@@ -12,6 +12,12 @@ mod poison_slots;
 pub(super) use dependencies::LoopDependencies;
 pub(super) use organizer::ReadyFragments;
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static READ_FOOTPRINT_INPUTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static READ_FOOTPRINT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// 构造具体臂帧并保存完整守卫；片段由调用栈或队列持有。
 pub(super) fn branch_arm<'ir, B: BV>(
     base: &LocalFrame<'ir, B>,
@@ -253,16 +259,22 @@ pub(super) fn publish_committed_records<B: BV>(
 /// 同一循环的退出前沿可能有多个兼容组。一次折叠失败只留下原两个前沿。
 pub(super) fn append_loop_exit<'ir, B: BV>(
     exits: &mut Vec<LocalFrame<'ir, B>>,
+    history_ids: &mut Option<HashSet<usize>>,
     next: LocalFrame<'ir, B>,
     solver: &mut Solver<B>,
-    fold: impl FnOnce(LocalFrame<'ir, B>, LocalFrame<'ir, B>, &mut Solver<B>) -> Result<LocalFrame<'ir, B>, ExecError>,
+    fold: impl FnOnce(
+        LocalFrame<'ir, B>,
+        LocalFrame<'ir, B>,
+        &mut Option<HashSet<usize>>,
+        &mut Solver<B>,
+    ) -> Result<LocalFrame<'ir, B>, ExecError>,
 ) -> Result<(), ExecError> {
     let Some(previous) = exits.pop() else {
         exits.push(next);
         return Ok(());
     };
     let tx = solver.start_transaction();
-    match fold(previous.clone(), next.clone(), solver) {
+    match fold(previous.clone(), next.clone(), history_ids, solver) {
         Ok(frame) => {
             solver.commit_transaction();
             exits.push(frame);
@@ -280,6 +292,7 @@ pub(super) fn append_loop_exit<'ir, B: BV>(
             }
             charge_fragment_growth(&next, 1)?;
             exits.extend([previous, next]);
+            *history_ids = None;
             Ok(())
         }
     }
@@ -353,12 +366,21 @@ pub(super) fn finish_arrivals<'ir, B: BV>(
         let mut sides = Vec::with_capacity(2);
         for side in arms {
             let mut combined = None;
+            let mut history_ids = None;
             for fragment in side {
                 combined = Some(match combined {
                     None => fragment,
-                    Some(previous) => {
-                        fold_exit_frontiers(previous, fragment, base, region, state, shared, solver, info)?
-                    }
+                    Some(previous) => fold_exit_frontiers(
+                        previous,
+                        fragment,
+                        &mut history_ids,
+                        base,
+                        region,
+                        state,
+                        shared,
+                        solver,
+                        info,
+                    )?,
                 });
             }
             sides.push(combined);
@@ -422,21 +444,16 @@ pub(super) fn record_projected_arrival<B: BV>(
     let guard = fragment.local_state.speculative_access.as_ref().unwrap().guard.as_ref().unwrap();
     let selector = solver.define_const(guard.clone(), info);
     let id = super::region_merge::next_region_record();
-    attach_child_records(fragment, base.region_merge_records.len(), id, "then");
+    let prefix = base.region_merge_records.len();
+    attach_child_records(fragment, prefix, id, "then");
     record_single_arrival(fragment, base, region, id, selector, info);
+    fragment.region_merge_records.mark_closed(prefix);
     cost::make_mut(&mut fragment.local_state).speculative_access.as_mut().unwrap().guard =
         Some(smtlib::Exp::Var(selector));
 }
 
 fn attach_child_records<B: BV>(arm: &mut LocalFrame<B>, start: usize, parent: usize, side: &'static str) {
-    arm.region_merge_records.edit_suffix(start, |records| {
-        for record in records {
-            if record.parent_record.is_none() {
-                record.parent_record = Some(parent);
-                record.arm = side;
-            }
-        }
-    });
+    arm.region_merge_records.attach_roots(start, parent, side);
 }
 
 fn record_single_arrival<B: BV>(
@@ -494,11 +511,12 @@ pub(super) fn finish_region<'ir, B: BV>(
     let cost_scope = cost::Scope::enter(cost::Category::StateMerge);
     let _ = &cost_scope;
     let depth = base.region_execution.as_ref().unwrap().depth;
+    let prefix = frame.region_merge_records.len();
     // 只修改本次推演产生的根记录。历史前缀和已连接的后代保持原上下文。
     for (index, arm) in arms.iter_mut().enumerate() {
         if let Some(arm) = arm {
             let side = if index == 0 { "then" } else { "else" };
-            attach_child_records(arm, frame.region_merge_records.len(), record_id, side);
+            attach_child_records(arm, prefix, record_id, side);
         }
     }
     let right = arms.pop().unwrap();
@@ -522,6 +540,7 @@ pub(super) fn finish_region<'ir, B: BV>(
                 single_arm_reads: Vec::new().into(),
                 memory_reads: Vec::new().into(),
             });
+            frame.region_merge_records.mark_closed(prefix);
             return Ok(RegionResult::Dead);
         }
         (Some(mut arm), None) | (None, Some(mut arm)) => {
@@ -564,6 +583,7 @@ pub(super) fn finish_region<'ir, B: BV>(
     }
     solver.add_event(Event::Fork(0, condition, 0, info));
     solver.add_event(Event::Merge(0, 2, info));
+    merged.region_merge_records.mark_closed(prefix);
     *frame = merged;
     Ok(RegionResult::Merged)
 }
@@ -940,7 +960,12 @@ fn merge_states<'ir, B: BV>(
         };
         merged.regs_mut().assign(*reg, value, shared);
     }
-    let shared_regs: HashSet<_> = lhs.writes.read_regs.intersection(&rhs.writes.read_regs).copied().collect();
+    let merge_read_footprint = lhs.global_state || !lhs.ordered_events;
+    let shared_regs: HashSet<_> = if merge_read_footprint {
+        HashSet::new()
+    } else {
+        lhs.writes.read_regs.intersection(&rhs.writes.read_regs).copied().collect()
+    };
     let write_order = if lhs.ordered_events {
         let common = |access: &AccessLog<B>| {
             access
@@ -980,17 +1005,23 @@ fn merge_states<'ir, B: BV>(
         .pure_definitions
         .extend(right.local_state.pure_definitions[base.local_state.pure_definitions.len()..].iter().copied());
     let mut single_arm_reads = Vec::new();
-    if lhs.global_state || !lhs.ordered_events {
+    if merge_read_footprint {
         // 与写入相同，前态读取按两臂首次访问的偏序合并；节点包含完整 accessor。
         let mut graph = petgraph::graph::DiGraph::new();
         let mut nodes = HashMap::new();
         let mut reads = HashMap::new();
-        for source in [lhs, rhs] {
+        for (side, source) in [lhs, rhs].into_iter().enumerate() {
+            let side = 1u8 << side;
             let mut previous = None;
             for ((reg, accessor, value), guard) in source.reads.iter().zip(&source.read_guards) {
-                let key = (*reg, accessor.clone());
+                #[cfg(test)]
+                {
+                    READ_FOOTPRINT_INPUTS.set(READ_FOOTPRINT_INPUTS.get() + 1);
+                    READ_FOOTPRINT_VISITS.set(READ_FOOTPRINT_VISITS.get() + 1);
+                }
+                let key = (*reg, accessor.as_slice());
                 if lhs.ordered_events {
-                    let node = *nodes.entry(key.clone()).or_insert_with(|| graph.add_node(key.clone()));
+                    let node = *nodes.entry(key).or_insert_with(|| graph.add_node(key));
                     if let Some(previous) = previous {
                         graph.update_edge(previous, node, ());
                     }
@@ -998,7 +1029,8 @@ fn merge_states<'ir, B: BV>(
                 }
                 reads
                     .entry(key)
-                    .and_modify(|(_, old_guard): &mut (Val<B>, smtlib::Exp<Sym>)| {
+                    .and_modify(|(_, old_guard, sides): &mut (Val<B>, smtlib::Exp<Sym>, u8)| {
+                        *sides |= side;
                         // 两臂继承同一个读取条件时，直接保留它。新的条件才需要共享定义。
                         if old_guard != guard {
                             *old_guard = smtlib::Exp::Var(solver.define_const(
@@ -1007,17 +1039,17 @@ fn merge_states<'ir, B: BV>(
                             ));
                         }
                     })
-                    .or_insert_with(|| (value.clone(), guard.clone()));
+                    .or_insert_with(|| (value.clone(), guard.clone(), side));
             }
         }
         let order = if lhs.ordered_events {
             petgraph::algo::toposort(&graph, None)
                 .map_err(|_| reject(base, SpeculativeRejectReason::RegisterSequence))?
                 .into_iter()
-                .map(|node| graph[node].clone())
+                .map(|node| graph[node])
                 .collect::<Vec<_>>()
         } else {
-            let mut order: Vec<_> = reads.keys().cloned().collect();
+            let mut order: Vec<_> = reads.keys().copied().collect();
             order.sort_unstable_by(|(a, p), (b, q)| {
                 a.cmp(b).then_with(|| {
                     let name = |accessor: &Accessor| match accessor {
@@ -1031,10 +1063,9 @@ fn merge_states<'ir, B: BV>(
         access.reads.clear();
         access.read_guards.clear();
         for (reg, accessor) in order {
-            let (value, guard) = reads.remove(&(reg, accessor.clone())).unwrap();
-            let in_arm =
-                |source: &AccessLog<B>| source.reads.iter().any(|(name, path, _)| *name == reg && *path == accessor);
-            if !in_arm(lhs) || !in_arm(rhs) {
+            let (value, guard, sides) = reads.remove(&(reg, accessor)).unwrap();
+            let accessor = accessor.to_vec();
+            if sides != 0b11 {
                 single_arm_reads.push(GuardedRegisterRead {
                     register: reg,
                     accessor: accessor.clone(),

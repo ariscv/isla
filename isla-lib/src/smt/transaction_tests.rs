@@ -105,7 +105,7 @@ fn smt_savepoint_restores_overwritten_symbols_and_attributes() {
     let function = solver.fresh();
     solver.add(DeclareFun(function, vec![Ty::Bool], Ty::Bool));
     let plain = solver.declare_const(Ty::BitVec(8), SourceLoc::unknown());
-    let ast = solver.decls[&sym].z3_ast;
+    let ast = solver.decls[&sym].ast().z3_ast;
     let fd = solver.func_decls[&function].z3_func_decl;
     let tx = solver.start_transaction();
     solver.add(DeclareConst(sym, Ty::Bool));
@@ -115,7 +115,7 @@ fn smt_savepoint_restores_overwritten_symbols_and_attributes() {
     assert!(solver.is_sail_bitvector(plain));
     solver.cycle_count();
     solver.rollback_transaction(tx);
-    assert_eq!(solver.decls[&sym].z3_ast, ast);
+    assert_eq!(solver.decls[&sym].ast().z3_ast, ast);
     assert_eq!(solver.func_decls[&function].z3_func_decl, fd);
     assert!(solver.is_sail_bitvector(sym));
     assert!(!solver.is_sail_bitvector(plain));

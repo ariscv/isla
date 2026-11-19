@@ -42,7 +42,7 @@ impl Drop for SavedModel<'_> {
 
 /// 保存点只记偏移；子层提交后，父层仍能撤销子层的声明变更。
 pub(super) enum DeclarationUndo<'ctx> {
-    Constant(Sym, Option<Ast<'ctx>>),
+    Constant(Sym, Option<ConstBinding<'ctx>>),
     Bitvector(Sym),
     Function(Sym, Option<FuncDecl<'ctx>>),
 }
@@ -252,7 +252,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             crate::executor::stats::region_cost::count(
                 crate::executor::stats::region_cost::Category::Release,
                 self.decls.len() + self.func_decls.len() + self.sail_bitvectors.len(),
-                self.decls.capacity() * std::mem::size_of::<(Sym, Ast<'ctx>)>(),
+                self.decls.capacity() * std::mem::size_of::<(Sym, ConstBinding<'ctx>)>(),
             );
         }
 
@@ -860,7 +860,7 @@ impl<B: BV> Solver<'_, B> {
             serde_json::json!({"layer":0,"decls_capacity":self.decls.capacity(),"sail_bitvectors_capacity":self.sail_bitvectors.capacity(),"func_decls_capacity":self.func_decls.capacity()}),
         ];
         let mut bytes = size_of_val(self)
-            + map_bytes::<Sym, Ast>(self.decls.capacity())
+            + map_bytes::<Sym, ConstBinding>(self.decls.capacity())
             + self.sail_bitvectors.capacity() * size_of::<Sym>()
             + map_bytes::<Sym, FuncDecl>(self.func_decls.capacity());
         let mut models = usize::from(self.stashed_model.is_some());

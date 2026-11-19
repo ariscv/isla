@@ -1110,6 +1110,8 @@ macro_rules! z3_float_binary_op {
 }
 
 mod arithmetic;
+mod const_binding;
+use const_binding::ConstBinding;
 pub mod rewrite;
 #[cfg(test)]
 mod rewrite_tests;
@@ -1118,8 +1120,15 @@ static PUSH_ITE_BV: &[u8] = b"push_ite_bv\0";
 static BV_LE_EXTRA: &[u8] = b"bv_le_extra\0";
 static BV_SORT_AC: &[u8] = b"bv_sort_ac\0";
 
+#[cfg(test)]
+thread_local! {
+    static AST_SIMPLIFY_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
 impl<'ctx> Ast<'ctx> {
     fn simplify(&mut self) {
+        #[cfg(test)]
+        AST_SIMPLIFY_CALLS.set(AST_SIMPLIFY_CALLS.get() + 1);
         let cost_scope =
             crate::executor::stats::region_cost::Scope::enter(crate::executor::stats::region_cost::Category::Simplify);
         let _ = &cost_scope;
@@ -1836,7 +1845,7 @@ pub struct Solver<'ctx, B> {
     next_var: u32,
     def_attrs: DefAttrs,
     cycles: i128,
-    decls: HashMap<Sym, Ast<'ctx>>,
+    decls: HashMap<Sym, ConstBinding<'ctx>>,
     sail_bitvectors: HashSet<Sym>,
     func_decls: HashMap<Sym, FuncDecl<'ctx>>,
     enums: Enums<'ctx>,
@@ -2070,7 +2079,7 @@ impl<'ctx, B: BV> Model<'ctx, B> {
         }
         let var_ast = match self.solver.decls.get(&var) {
             None => return Err(ExecError::Type(format!("Unbound variable {:?}", &var), SourceLoc::unknown())),
-            Some(ast) => ast.clone(),
+            Some(binding) => binding.ast(),
         };
         let value = self.get_ast(var_ast, SmtDumpRequest::GetValues { expressions: vec![Exp::Var(var)] })?;
         if matches!(&value, ModelVal::Exp(Exp::Bits(_) | Exp::Bits64(_) | Exp::Bool(_) | Exp::Enum(_))) {
@@ -2081,21 +2090,14 @@ impl<'ctx, B: BV> Model<'ctx, B> {
 
     /// 只读取输出多样化支持的 enum、bool 和 bitvector；其它合法 SMT sort 不参与取值选择。
     pub fn get_finite_domain_var(&mut self, var: Sym) -> Result<Option<ModelVal>, ExecError> {
-        let var_ast = match self.solver.decls.get(&var) {
-            None => return Err(ExecError::Type(format!("Unbound variable {:?}", &var), SourceLoc::unknown())),
-            Some(ast) => ast.clone(),
+        let Some(binding) = self.solver.decls.get(&var) else {
+            return Err(ExecError::Type(format!("Unbound variable {:?}", &var), SourceLoc::unknown()));
         };
-        let sort_kind = unsafe {
-            let sort = Z3_get_sort(self.ctx.z3_ctx, var_ast.z3_ast);
-            Z3_inc_ref(self.ctx.z3_ctx, Z3_sort_to_ast(self.ctx.z3_ctx, sort));
-            let sort_kind = Z3_get_sort_kind(self.ctx.z3_ctx, sort);
-            Z3_dec_ref(self.ctx.z3_ctx, Z3_sort_to_ast(self.ctx.z3_ctx, sort));
-            sort_kind
-        };
+        let sort_kind = unsafe { Z3_get_sort_kind(self.ctx.z3_ctx, binding.sort()) };
 
         match sort_kind {
             SortKind::Bool | SortKind::BV | SortKind::Datatype => {
-                self.get_ast(var_ast, SmtDumpRequest::GetValues { expressions: vec![Exp::Var(var)] }).map(Some)
+                self.get_ast(binding.ast(), SmtDumpRequest::GetValues { expressions: vec![Exp::Var(var)] }).map(Some)
             }
             SortKind::Array | SortKind::FloatingPoint | SortKind::RoundingMode => Ok(None),
             _ => panic!("不支持的符号常量 sort: {:?}", sort_kind),
@@ -2639,7 +2641,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let ast = match exp {
             Var(v) => match self.decls.get(v) {
                 None => panic!("Could not get Z3 func_decl {}", *v),
-                Some(ast) => ast.clone(),
+                Some(binding) => binding.ast(),
             },
             Bits(bv) => Ast::mk_bv(self.ctx, bv.len().try_into().unwrap(), bv),
             Bits64(bv) => Ast::mk_bv_u64(self.ctx, bv.len(), bv.lower_u64()),
@@ -2838,7 +2840,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 }
                 self.performance_info.add_var_node(*v, info);
                 let fd = FuncDecl::new(self.ctx, *v, &self.enums, &[], ty, &self.symbol_namer);
-                self.bind_constant(*v, Ast::mk_constant(&fd));
+                self.bind_constant(*v, ConstBinding::new(Ast::mk_constant(&fd), false));
                 if self.def_attrs.attrs & 2 != 0 {
                     self.tag_bitvector(*v);
                 }
@@ -2861,9 +2863,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 }
             }
             Def::DefineConst(v, exp) => {
-                // DefineConst 降级为化简后的表达式 AST，既不是 DeclareConst + Assert，
-                // 也不向 Z3 solver 加约束；臂 pop 后符号表中的定义仍然有效。
-                // 原有提交只发布定义日志；检查点重放再按同样方式建立符号表。
+                // DefineConst 将定义时翻译的表达式绑定到符号表，臂退出后仍可读取。
+                // 提交发布定义日志，检查点重放按同样方式重建绑定。
                 if cfg!(feature = "smtperf") {
                     self.performance_info.add_var_node(*v, info);
                     for used in exp.variables().iter() {
@@ -2871,10 +2872,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                         self.performance_info.add_var_edge(used, v)
                     }
                 }
-                let mut ast = self.translate_exp(exp);
-                ast.simplify();
-                // 改绑已有符号可能改变缓冲断言的含义，不能沿用改绑前的见证。
-                self.bind_constant(*v, ast);
+                // 翻译时冻结操作数的绑定，第一次取值时再化简。
+                let ast = self.translate_exp(exp);
+                self.bind_constant(*v, ConstBinding::new(ast, true));
                 if self.def_attrs.attrs & 2 != 0 {
                     self.tag_bitvector(*v);
                 }
@@ -2896,35 +2896,21 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     pub fn length(&mut self, v: Sym) -> Option<u32> {
-        match self.decls.get(&v) {
-            Some(ast) => unsafe {
-                let z3_ctx = self.ctx.z3_ctx;
-                let z3_sort = Z3_get_sort(z3_ctx, ast.z3_ast);
-                Z3_inc_ref(z3_ctx, Z3_sort_to_ast(z3_ctx, z3_sort));
-                if Z3_get_sort_kind(z3_ctx, z3_sort) == SortKind::BV {
-                    let sz = Z3_get_bv_sort_size(z3_ctx, z3_sort);
-                    Z3_dec_ref(z3_ctx, Z3_sort_to_ast(z3_ctx, z3_sort));
-                    Some(sz)
-                } else {
-                    Z3_dec_ref(z3_ctx, Z3_sort_to_ast(z3_ctx, z3_sort));
-                    None
-                }
-            },
-            None => None,
-        }
+        let sort = self.decls.get(&v)?.sort();
+        let ctx = self.ctx.z3_ctx;
+        unsafe { (Z3_get_sort_kind(ctx, sort) == SortKind::BV).then(|| Z3_get_bv_sort_size(ctx, sort)) }
     }
 
     pub fn is_bool(&self, v: Sym) -> bool {
-        let ast = self.decls.get(&v).expect("布尔类型查询必须引用已声明符号");
-        unsafe { Z3_get_sort_kind(self.ctx.z3_ctx, Z3_get_sort(self.ctx.z3_ctx, ast.z3_ast)) == SortKind::Bool }
+        let sort = self.decls.get(&v).expect("布尔类型查询必须引用已声明符号").sort();
+        unsafe { Z3_get_sort_kind(self.ctx.z3_ctx, sort) == SortKind::Bool }
     }
 
     /// 只读查询标量 sort，供原语准入和复合值结构检查复用。
     pub(crate) fn scalar_sort(&self, v: Sym) -> Option<Ty> {
-        let ast = self.decls.get(&v)?;
+        let sort = self.decls.get(&v)?.sort();
         unsafe {
             let ctx = self.ctx.z3_ctx;
-            let sort = Z3_get_sort(ctx, ast.z3_ast);
             match Z3_get_sort_kind(ctx, sort) {
                 SortKind::Bool => Some(Ty::Bool),
                 SortKind::BV => Some(Ty::BitVec(Z3_get_bv_sort_size(ctx, sort))),
@@ -2939,17 +2925,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     pub fn is_bitvector(&mut self, v: Sym) -> bool {
-        match self.decls.get(&v) {
-            Some(ast) => unsafe {
-                let z3_ctx = self.ctx.z3_ctx;
-                let z3_sort = Z3_get_sort(z3_ctx, ast.z3_ast);
-                Z3_inc_ref(z3_ctx, Z3_sort_to_ast(z3_ctx, z3_sort));
-                let result = Z3_get_sort_kind(z3_ctx, z3_sort) == SortKind::BV;
-                Z3_dec_ref(z3_ctx, Z3_sort_to_ast(z3_ctx, z3_sort));
-                result
-            },
-            None => false,
-        }
+        self.decls
+            .get(&v)
+            .is_some_and(|binding| unsafe { Z3_get_sort_kind(self.ctx.z3_ctx, binding.sort()) == SortKind::BV })
     }
 
     pub fn with_def_attrs<F, A>(&mut self, attrs: DefAttrs, f: F) -> A
@@ -2999,8 +2977,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.with_def_attrs(self.def_attrs.sail_bitvector(), |solver| solver.define_const(exp, info))
     }
 
-    fn bind_constant(&mut self, sym: Sym, ast: Ast<'ctx>) {
-        let previous = self.decls.insert(sym, ast);
+    fn bind_constant(&mut self, sym: Sym, binding: ConstBinding<'ctx>) {
+        // 改绑可能改变缓冲断言的含义，清除已有见证。
+        let previous = self.decls.insert(sym, binding);
         if previous.is_some() {
             self.knowledge.constrain();
             self.clear_stashed_model();

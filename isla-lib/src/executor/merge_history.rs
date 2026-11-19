@@ -10,6 +10,8 @@ pub struct MergeHistory<B>(Arc<Segment<B>>);
 #[derive(Debug)]
 struct Segment<B> {
     len: usize,
+    // 从此位置到末尾只有最后一条记录无父记录。仅在汇合收尾或投影后登记。
+    closed_from: Option<usize>,
     items: Option<Items<B>>,
     flat: OnceLock<Vec<RegionMergeRecord<B>>>,
 }
@@ -44,7 +46,12 @@ impl<B> Clone for MergeHistory<B> {
 }
 impl<B> From<Vec<RegionMergeRecord<B>>> for MergeHistory<B> {
     fn from(items: Vec<RegionMergeRecord<B>>) -> Self {
-        Self(Arc::new(Segment { len: items.len(), items: Some(Items::Leaf(items)), flat: OnceLock::new() }))
+        Self(Arc::new(Segment {
+            len: items.len(),
+            closed_from: None,
+            items: Some(Items::Leaf(items)),
+            flat: OnceLock::new(),
+        }))
     }
 }
 impl<B> Default for MergeHistory<B> {
@@ -90,6 +97,7 @@ impl<B> MergeHistory<B> {
         }
         *self = Self(Arc::new(Segment {
             len: self.len().checked_add(right.len()).expect("合并历史长度溢出"),
+            closed_from: None,
             items: Some(Items::Concat(self.clone(), right)),
             flat: OnceLock::new(),
         }));
@@ -104,6 +112,7 @@ impl<B> MergeHistory<B> {
         }
         Self(Arc::new(Segment {
             len: end - start,
+            closed_from: None,
             items: Some(Items::Range(self.clone(), start)),
             flat: OnceLock::new(),
         }))
@@ -116,6 +125,7 @@ impl<B> MergeHistory<B> {
             if let Some(Items::Leaf(items)) = &mut segment.items {
                 items.push(record);
                 segment.len += 1;
+                segment.closed_from = None;
                 segment.flat.take();
                 return;
             }
@@ -131,6 +141,54 @@ impl<B> MergeHistory<B> {
     }
 }
 impl<B: Clone> MergeHistory<B> {
+    pub(super) fn mark_closed(&mut self, start: usize) {
+        assert!(start < self.len(), "汇合后缀必须包含新的根记录");
+        Arc::get_mut(&mut self.0).expect("汇合结果必须拥有新的历史段").closed_from = Some(start);
+    }
+
+    pub(super) fn attach_roots(&mut self, start: usize, parent: usize, side: &'static str) {
+        let start = if start < self.len() && self.0.closed_from.is_some_and(|closed| start >= closed) {
+            self.len() - 1
+        } else {
+            start
+        };
+        self.edit_occurrences(start, |record| {
+            if record.parent_record.is_some() {
+                return None;
+            }
+            let mut record = record.clone();
+            record.parent_record = Some(parent);
+            record.arm = side;
+            Some(record)
+        });
+    }
+
+    /// 只复制位置元数据被修改的记录，未改动的区间继续共享。
+    pub(super) fn edit_occurrences(
+        &mut self,
+        start: usize,
+        mut edit: impl FnMut(&RegionMergeRecord<B>) -> Option<RegionMergeRecord<B>>,
+    ) {
+        let mut updated = Self::default();
+        let mut changed = Vec::new();
+        let mut next = 0;
+        for (offset, record) in self.suffix(start).enumerate() {
+            let Some(record) = edit(record) else { continue };
+            let index = start + offset;
+            if index != next {
+                updated.concat(std::mem::take(&mut changed).into());
+                updated.concat(self.range(next, index));
+            }
+            changed.push(record);
+            next = index + 1;
+        }
+        if next != 0 {
+            updated.concat(changed.into());
+            updated.concat(self.range(next, self.len()));
+            *self = updated;
+        }
+    }
+
     /// 只重建本次产生或重命名的后缀；已有前缀不建立连续视图。
     pub(super) fn edit_suffix(&mut self, start: usize, edit: impl FnOnce(&mut [RegionMergeRecord<B>])) {
         let mut items: Vec<_> = self.suffix(start).cloned().collect();
@@ -159,6 +217,7 @@ impl<B: Clone> MergeHistory<B> {
             *self = prefix;
         }
         let segment = Arc::get_mut(&mut self.0).unwrap();
+        segment.closed_from = None;
         match segment.items.as_mut().unwrap() {
             Items::Leaf(items) => items.last_mut(),
             Items::Concat(_, tail) => tail.last_mut(),
@@ -185,6 +244,7 @@ impl<B: Clone> DerefMut for MergeHistory<B> {
             *self = self.iter().cloned().collect::<Vec<_>>().into();
         }
         let segment = Arc::get_mut(&mut self.0).unwrap();
+        segment.closed_from = None;
         match segment.items.as_mut().unwrap() {
             Items::Leaf(items) => items,
             _ => unreachable!(),

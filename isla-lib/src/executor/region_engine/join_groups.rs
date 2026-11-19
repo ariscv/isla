@@ -40,7 +40,7 @@ pub(super) fn merge_compatible<'ir, B: BV>(
         .then(|| string_slots(&arrivals, base, region))
         .filter(|slots| !slots.is_empty());
     let mut buckets = HashMap::<Vec<String>, Vec<usize>>::new();
-    let mut groups: Vec<(Frame<'ir, B>, bool)> = Vec::new();
+    let mut groups: Vec<(Frame<'ir, B>, bool, Option<HashSet<usize>>)> = Vec::new();
     for arrival in arrivals {
         let candidates = slots.as_ref().map(|slots| {
             let signature = slots
@@ -63,6 +63,7 @@ pub(super) fn merge_compatible<'ir, B: BV>(
             let trial = fold_exit_frontiers(
                 groups[index].0.clone(),
                 arrival.clone(),
+                &mut groups[index].2,
                 base,
                 region,
                 state,
@@ -73,7 +74,8 @@ pub(super) fn merge_compatible<'ir, B: BV>(
             match trial {
                 Ok(frame) => {
                     solver.commit_transaction();
-                    groups[index] = (frame, true);
+                    groups[index].0 = frame;
+                    groups[index].1 = true;
                     combined = true;
                     break;
                 }
@@ -89,8 +91,8 @@ pub(super) fn merge_compatible<'ir, B: BV>(
             if let Some(indices) = candidates {
                 indices.push(groups.len());
             }
-            groups.push((arrival, false));
+            groups.push((arrival, false, None));
         }
     }
-    Ok(groups)
+    Ok(groups.into_iter().map(|(frame, combined, _)| (frame, combined)).collect())
 }

@@ -1377,6 +1377,7 @@ struct LoopWork<'ir, B> {
 pub(super) fn fold_loop_exit<'ir, B: BV>(
     previous: LocalFrame<'ir, B>,
     next: LocalFrame<'ir, B>,
+    history_ids: &mut Option<HashSet<usize>>,
     base: &LocalFrame<'ir, B>,
     region: &Region,
     state: &TaskState<B>,
@@ -1394,7 +1395,12 @@ pub(super) fn fold_loop_exit<'ir, B: BV>(
             return Err(reject(exit, SpeculativeRejectReason::StateEffect));
         }
     }
-    fold_exit_frontiers(previous, next, base, region, state, shared, solver, info)
+    fold_exit_frontiers(previous, next, history_ids, base, region, state, shared, solver, info)
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static FOLD_HISTORY_ID_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// 已到同一出口的前沿共享记录重编号和状态合并；调用方校验各策略的适用形状。
@@ -1402,6 +1408,7 @@ pub(super) fn fold_loop_exit<'ir, B: BV>(
 pub(super) fn fold_exit_frontiers<'ir, B: BV>(
     previous: LocalFrame<'ir, B>,
     mut next: LocalFrame<'ir, B>,
+    history_ids: &mut Option<HashSet<usize>>,
     base: &LocalFrame<'ir, B>,
     region: &Region,
     state: &TaskState<B>,
@@ -1416,23 +1423,39 @@ pub(super) fn fold_exit_frontiers<'ir, B: BV>(
     // 两前沿可能共享先前轮次的记录，但在本次不同臂条件下各有一份出现。
     // 只给尚未发布的重复后缀换新ID，保留符号与父子关系；已发布前缀不动。
     let prefix = base.region_merge_records.len();
-    let previous_ids: HashSet<_> = previous.region_merge_records.suffix(prefix).map(|r| r.record_id).collect();
-    let mut renamed = HashMap::new();
-    for record in next.region_merge_records.suffix(prefix) {
-        if previous_ids.contains(&record.record_id) {
-            renamed.entry(record.record_id).or_insert_with(|| next_region_record());
-        }
-    }
-    next.region_merge_records.edit_suffix(prefix, |records| {
-        for record in records {
-            if let Some(id) = renamed.get(&record.record_id) {
-                record.record_id = *id;
-            }
-            if let Some(id) = record.parent_record.and_then(|id| renamed.get(&id)) {
-                record.parent_record = Some(*id);
-            }
-        }
+    let previous_ids = history_ids.get_or_insert_with(|| {
+        previous
+            .region_merge_records
+            .suffix(prefix)
+            .map(|record| {
+                #[cfg(test)]
+                FOLD_HISTORY_ID_VISITS.set(FOLD_HISTORY_ID_VISITS.get() + 1);
+                record.record_id
+            })
+            .collect()
     });
+    let mut renamed = HashMap::new();
+    let mut incoming_ids = Vec::with_capacity(next.region_merge_records.len() - prefix);
+    for record in next.region_merge_records.suffix(prefix) {
+        let mut id = record.record_id;
+        if previous_ids.contains(&id) {
+            id = *renamed.entry(id).or_insert_with(next_region_record);
+        }
+        incoming_ids.push(id);
+    }
+    if !renamed.is_empty() {
+        next.region_merge_records.edit_occurrences(prefix, |record| {
+            let id = renamed.get(&record.record_id).copied();
+            let parent = record.parent_record.and_then(|parent| renamed.get(&parent).copied());
+            if id.is_none() && parent.is_none() {
+                return None;
+            }
+            let mut record = record.clone();
+            record.record_id = id.unwrap_or(record.record_id);
+            record.parent_record = parent.or(record.parent_record);
+            Some(record)
+        });
+    }
     let a = previous.local_state.speculative_access.as_ref().unwrap().guard.clone().expect("退出前沿必须有条件");
     let b = next.local_state.speculative_access.as_ref().unwrap().guard.clone().expect("退出前沿必须有条件");
     let condition = solver.define_const(a.clone(), info);
@@ -1458,6 +1481,9 @@ pub(super) fn fold_exit_frontiers<'ir, B: BV>(
         })
     })?;
     assert!(matches!(result, RegionResult::Merged), "两个存活退出前沿必须保留");
+    // 双臂汇合按累计侧、新侧、新根的顺序追加。成功后才更新索引。
+    previous_ids.extend(incoming_ids);
+    previous_ids.insert(id);
     cost::make_mut(&mut merged.local_state).speculative_access.as_mut().unwrap().guard = Some(union);
     Ok(merged)
 }
@@ -1516,6 +1542,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             RegionPoint::Instruction(pc) => matches!(frame.instrs.get(pc), Some(Instr::End)),
         };
     let mut exit_prefix = Vec::new();
+    let mut exit_ids = None;
     let root_branch = region.branch_pc;
     let root_region = region.clone();
     let remaining = base.region_execution.as_ref().unwrap().remaining.clone();
@@ -1631,11 +1658,16 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 }
                 if !exit_prefix.is_empty() {
                     match result {
-                        RegionResult::Merged => {
-                            append_loop_exit(&mut exit_prefix, work.original, solver, |previous, next, solver| {
+                        RegionResult::Merged => append_loop_exit(
+                            &mut exit_prefix,
+                            &mut exit_ids,
+                            work.original,
+                            solver,
+                            |previous, next, ids, solver| {
                                 fold_loop_exit(
                                     previous,
                                     next,
+                                    ids,
                                     &original_base,
                                     &root_region,
                                     state,
@@ -1643,8 +1675,8 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                     solver,
                                     info,
                                 )
-                            })?
-                        }
+                            },
+                        )?,
                         RegionResult::Dead => (),
                         _ => panic!("循环收尾只能汇合或全部死亡"),
                     }
@@ -1745,8 +1777,8 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     && !solver.transaction_has_memory_writes()
                 {
                     let exit = work.arms[0].pop().expect("退出脊柱必须已有存活前沿");
-                    append_loop_exit(&mut exit_prefix, exit, solver, |previous, next, solver| {
-                        fold_loop_exit(previous, next, &original_base, &root_region, state, shared, solver, info)
+                    append_loop_exit(&mut exit_prefix, &mut exit_ids, exit, solver, |previous, next, ids, solver| {
+                        fold_loop_exit(previous, next, ids, &original_base, &root_region, state, shared, solver, info)
                     })?;
                     let guard = arm
                         .local_state
