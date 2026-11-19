@@ -58,7 +58,7 @@ fn region_memory_write_projections_match_forks() {
             frame.vars_mut().insert(address_id, UVal::Init(Val::Symbolic(address)));
             frame.vars_mut().insert(dst, UVal::Init(Val::Bool(false)));
             frame.memory_mut().add_concrete_region(BASE..BASE + 3, HashMap::new());
-            crate::memory::install_seq_memory(frame.memory_mut(), 64, &mut solver);
+            crate::memory::install_seq_memory(frame.memory_mut(), 64, &mut solver, false);
             let mut limits =
                 ExecutionLimits::default().with_path_merging(strategy.is_some()).with_region_global_state(true);
             if let Some(strategy) = strategy {
@@ -226,7 +226,8 @@ fn region_memory_write_barriers_roll_back_before_device_or_exclusive_attempt() {
         frame
             .memory_mut()
             .add_region(crate::memory::Region::Custom(BASE + 8..BASE + 16, Box::new(CountingDevice(attempts.clone()))));
-        crate::memory::install_seq_memory(frame.memory_mut(), 64, &mut solver);
+        frame.memory_mut().add_concrete_region(BASE..BASE + 8, HashMap::from([(BASE + 4, 0x5A)]));
+        crate::memory::install_seq_memory(frame.memory_mut(), 64, &mut solver, false);
         let version = frame.memory().ram_version().unwrap();
         let queue = Worker::new_lifo();
         let sink = SingleForkSink { queue: &queue };
@@ -270,11 +271,29 @@ fn region_memory_write_barriers_roll_back_before_device_or_exclusive_attempt() {
             &mut solver,
         )
         .unwrap();
-        assert!(matches!(result, Run::Finished(_)));
+        let Run::Finished(result) = result else { panic!("屏障外的普通执行应完成") };
         assert_eq!(attempts.load(Ordering::Relaxed), usize::from(!exclusive));
         assert_eq!(
             solver.trace().to_vec().iter().filter(|event| event.is_memory_write()).count(),
             1 + usize::from(exclusive)
         );
+        if exclusive {
+            let result = smt_value(&result, info()).unwrap();
+            solver.assert(smtlib::Exp::Not(Box::new(result)));
+            let value = frame
+                .memory()
+                .read(
+                    Val::Unit,
+                    Val::Bits(B64::new(BASE + 4, 64)),
+                    Val::I128(1),
+                    &mut solver,
+                    false,
+                    Default::default(),
+                )
+                .unwrap();
+            let differs = smtlib::Exp::Neq(Box::new(smt_value(&value, info()).unwrap()), Box::new(bits64(0x5A, 8)));
+            assert!(solver.check_sat(info()).is_sat().unwrap());
+            assert!(solver.check_sat_with(&differs, info()).is_unsat().unwrap());
+        }
     }
 }

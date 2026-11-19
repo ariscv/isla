@@ -1,6 +1,15 @@
 //! isarch 的顺序内存配置和模型回归。
 
-pub use isla_lib::memory::{install_seq_memory, SeqMemory};
+pub use isla_lib::memory::SeqMemory;
+
+/// 模型的独占失败发生于提交写请求之前。到达数组回调的独占写沿用 isarch 的成功契约。
+pub fn install_seq_memory<B: isla_lib::bitvector::BV>(
+    memory: &mut isla_lib::memory::Memory<B>,
+    addr_size: u32,
+    solver: &mut isla_lib::smt::Solver<B>,
+) {
+    isla_lib::memory::install_seq_memory(memory, addr_size, solver, true);
+}
 
 /// 环境变量 `ISLA_RISCV_MEMORY_MODEL` 是否启用数组模型（默认启用）。
 pub fn array_model_enabled() -> bool {

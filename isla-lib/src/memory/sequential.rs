@@ -40,16 +40,27 @@ pub struct SeqMemory {
     initial_memory_var: Sym,
     memory_var: Sym,
     addr_size: u32,
+    exclusive_writes_succeed: bool,
 }
 
 /// 在 solver 中声明初始数组常量 `(Array (_ BitVec addr_size) (_ BitVec 8))`
 /// 并把回调装入 `memory`。必须在生成后续 checkpoint 之前调用，使所有执行
 /// 路径共享初始数组定义。
-pub fn install_seq_memory<B: BV>(memory: &mut Memory<B>, addr_size: u32, solver: &mut Solver<B>) {
+pub fn install_seq_memory<B: BV>(
+    memory: &mut Memory<B>,
+    addr_size: u32,
+    solver: &mut Solver<B>,
+    exclusive_writes_succeed: bool,
+) {
     assert!(addr_size > 0, "数组索引位宽必须为正");
     let memory_var = solver.fresh();
     solver.add(Def::DeclareConst(memory_var, Ty::Array(Box::new(Ty::BitVec(addr_size)), Box::new(Ty::BitVec(8)))));
-    memory.set_client_info(Box::new(SeqMemory { initial_memory_var: memory_var, memory_var, addr_size }));
+    memory.set_client_info(Box::new(SeqMemory {
+        initial_memory_var: memory_var,
+        memory_var,
+        addr_size,
+        exclusive_writes_succeed,
+    }));
     log!(log::MEMORY, &format!("数组内存模型已启用: memory_var={} addr_size={}", memory_var, addr_size));
 }
 
@@ -278,20 +289,15 @@ impl<B: BV> MemoryCallbacks<B> for SeqMemory {
                 Box::new(Exp::Extract(i * 8 + 7, i * 8, Box::new(data_exp.clone()))),
             );
         }
-        // Sail 并发接口的 Bool 仅表示 exclusive/CAS 的成败；普通写的 Bool
-        // 可以被调用方忽略，事件一旦发出就提交 Store 链。
-        // 独占写同理必已提交（F3，campaign24 七例 AMO 非 aqrl post==pre 的根因）：
-        // 模型的 write_ram 把并发接口的返回值丢弃（`Ok(_) => true`，
-        // phys_mem_interface.sail:109-115），AMO/SC 拿到的提交判定恒为具体 true，
-        // "未提交"分支在模型控制流里不可达——独占写事件一旦发出即已提交。
-        // 此前 Bool 保持自由，Z3 可任取 false：数组 Ite 选旧值、exec.rs 终值重放
-        // 按 write_success=Some(false) 跳过物化。SC 失败在模型里发生于写之前
-        // （vmem_write_addr 的 match_reservation 检查不满足时直接跳过写），
-        // 不经过本回调，故此处钉死 Bool=true 不吞掉任何合法路径。
-        if opts.is_exclusive() {
-            solver.add(Def::Assert(Exp::Var(value)));
-        }
-        let next_exp = mem_exp;
+        // 独占写的返回布尔值表示是否提交。已由调用者确认成功的请求可直接更新数组。
+        let next_exp = if opts.is_exclusive() && !self.exclusive_writes_succeed {
+            Exp::Ite(Box::new(Exp::Var(value)), Box::new(mem_exp), Box::new(Exp::Var(self.memory_var)))
+        } else {
+            if opts.is_exclusive() {
+                solver.add(Def::Assert(Exp::Var(value)));
+            }
+            mem_exp
+        };
         self.memory_var = solver.fresh();
         solver.add(Def::DefineConst(self.memory_var, next_exp));
 

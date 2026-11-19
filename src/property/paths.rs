@@ -79,7 +79,7 @@ impl PathOptions {
         if self.sequential_ram {
             let context = Context::new(Config::new());
             let mut solver = Solver::new(&context);
-            isla_lib::memory::install_seq_memory(frame.memory_mut(), 64, &mut solver);
+            isla_lib::memory::install_seq_memory(frame.memory_mut(), 64, &mut solver, false);
             frame.task_with_checkpoint(id, state, checkpoint(&mut solver))
         } else {
             frame.task(id, state)
