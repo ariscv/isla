@@ -23,7 +23,7 @@ python3 test/path-merge/run_scenarios.py --bitvector both \
 
 ## 新增场景
 
-用 `A1-concrete-diff-bits.sail` 的 [完整样例](scenarios/A1-concrete-diff-bits.sail) 起步。编号由 A–D 组字母、组内正整数编号和短英文名组成。源码通常 5–20 行，使用 Sail 标准库和 property 的共用配置。
+用 `A1-concrete-diff-bits.sail` 的 [完整样例](scenarios/A1-concrete-diff-bits.sail) 起步。编号由 A–E 组字母、组内正整数编号和短英文名组成。源码通常 5–20 行，使用 Sail 标准库和 property 的共用配置。
 
 1. 把输入位写到专用寄存器。在 TOML 的 `inputs` 中按位宽登记这些寄存器。符号条件和影响观测的自由选择都应有对应输入。场景会穷举登记的有限输入域，通常只需几位。
 2. 在 `prop` 中执行候选代码，把它的返回值写入 `out_value`，再返回布尔性质。可以用无分叉的独立规格校验候选返回值。复合值在 Sail 里投影成可区别各结果的整数、布尔值或位向量。把要比较的后态寄存器写入 `registers`。这些寄存器在每条完成路径上都应已初始化。
@@ -129,5 +129,16 @@ python3 test/path-merge/run_scenarios.py --bitvector both \
 - [D7 五个叶子按 a、b、c 分三组](scenarios/D7-five-labels.sail)
 - [D8 改变五片段到达次序后守卫分组一致](scenarios/D8-permute-five.sail)
 - [D9 P("a")、Q(())、P("c") 的分组](scenarios/D9-union-other-tree.sail)
+
+### E 符号模式映射为整数后的返回与使用
+
+- [E1 直接返回 match 选出的整数](scenarios/E1-match-width.sail)
+- [E2 直接返回 mapping 正向映射的整数](scenarios/E2-mapping-width.sail)
+- [E3 按映射位宽切片并比较两种扩展](scenarios/E3-extend-width.sail)
+- [E4 按模式选择 VPN 每级位数后切片](scenarios/E4-vpn-index.sail)
+- [E5 从 Bare 提前返回到翻译结果](scenarios/E5-translate-result.sail)
+- [E6 同一个宽度同时用于切片和整数比较](scenarios/E6-two-consumers.sail)
+
+[六个场景的开关对照、逐输入结果与拒绝位置](../../agents/path_merge_scenarios_20261119/review-satp.md)
 
 S1–S6、S6 边界、S1 控制及故意写错的规格继续使用 [property 的内层合并索引](../property/README-nested-merge.md)。该索引给出每项的守卫目标与独立运行命令。

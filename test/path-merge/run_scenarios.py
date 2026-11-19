@@ -51,7 +51,7 @@ def read_scene(path):
     metadata = tomllib.loads("\n".join(line[2:].removeprefix(" ") for line in header[1].splitlines()))
     require(not (metadata.keys() - DEFAULTS.keys() - {"id", "group"}), "存在未知元数据字段")
     scene = {**DEFAULTS, "id": path.stem, "group": path.stem[0], **metadata}
-    require(re.fullmatch(r"[A-D][1-9]\d*-[a-z0-9]+(?:-[a-z0-9]+)*", path.stem), "场景文件名无效")
+    require(re.fullmatch(r"[A-E][1-9]\d*-[a-z0-9]+(?:-[a-z0-9]+)*", path.stem), "场景文件名无效")
     require(scene["id"] == path.stem and scene["group"] == path.stem[0], "id、group 须与文件名一致")
     for key in ("title", "intent", "reason", "must_merge", "must_not_merge"):
         require(isinstance(scene[key], str), f"{key} 须是字符串")
