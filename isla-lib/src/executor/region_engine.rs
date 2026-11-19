@@ -5,6 +5,7 @@ use super::*;
 use crate::executor::stats::region_cost as cost;
 use crate::ir::regions::Region;
 use crate::primop_util::{build_ite_terms, merge_terms::MergeTerms, merge_val_mode, symbolic_terms};
+use std::borrow::Cow;
 
 mod dependencies;
 pub(super) mod join_groups;
@@ -551,14 +552,15 @@ pub(super) fn finish_prepared_region<'ir, B: BV>(
         },
     };
     let record = merged.region_merge_records.last_mut().expect("成功合并必须有记录");
-    Arc::make_mut(&mut record.value_symbols).insert(condition);
+    let mut symbols = HashSet::with_hasher(ahash::RandomState::new());
+    symbols.insert(condition);
     for (bindings, original) in
         [(&merged.local_state.vars, &frame.local_state.vars), (&merged.local_state.lets, &frame.local_state.lets)]
     {
         for (name, value) in bindings {
             if let UVal::Init(value) = value {
                 if !matches!(original.get(name), Some(UVal::Init(old)) if value == old) {
-                    Arc::make_mut(&mut record.value_symbols).extend(value.symbolic_variables());
+                    value.collect_symbolic_variables(&mut symbols);
                 }
             }
         }
@@ -566,9 +568,10 @@ pub(super) fn finish_prepared_region<'ir, B: BV>(
     let access = merged.local_state.speculative_access.as_ref().unwrap();
     for reg in &access.writes.modified_regs {
         if let Some(value) = merged.local_state.regs.get_last_if_initialized(*reg) {
-            Arc::make_mut(&mut record.value_symbols).extend(value.symbolic_variables());
+            value.collect_symbolic_variables(&mut symbols);
         }
     }
+    Arc::make_mut(&mut record.value_symbols).extend(symbols);
     cost::make_mut(&mut merged.local_state).speculative_access.as_mut().unwrap().guard =
         frame.local_state.speculative_access.as_ref().and_then(|access| access.guard.clone());
     merged.region_execution = frame.region_execution.clone();
@@ -764,6 +767,12 @@ fn prepare_state<'ir, B: BV>(
             right.execution_limit_state.clone()
         };
     let poison_limits = state.execution_limits.as_ref().filter(|limits| limits.merge_poison_slots);
+    let same_value = |a: Option<&UVal<'ir, B>>, b: Option<&UVal<'ir, B>>| match (a, b) {
+        (Some(UVal::Init(a)), Some(UVal::Init(b))) => a == b,
+        (Some(UVal::Uninit(a)), Some(UVal::Uninit(b))) => std::ptr::eq(*a, *b),
+        _ => false,
+    };
+    let at_end = matches!(left.instrs.get(left.pc), Some(Instr::End));
     // 活跃的区域局部槽位必须两臂存在；静态证明离开区域不再读取的槽位直接删除。
     for lets in [false, true] {
         let a = if lets { left.lets() } else { left.vars() };
@@ -771,44 +780,40 @@ fn prepare_state<'ir, B: BV>(
         let original = if lets { base.lets() } else { base.vars() };
         let names: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).copied().collect();
         for name in names {
+            let (left_slot, right_slot, base_slot) = (a.get(&name), b.get(&name), original.get(&name));
             // End之后不再读取局部机器整数；不同具体值不能合成符号长度。
             // 可合并的基态槽位和输入仍供导出使用，不能一并删除。
             if !lets
                 && name != RETURN
                 && matches!(
-                    (a.get(&name), b.get(&name)),
+                    (left_slot, right_slot),
                     (Some(UVal::Init(Val::I64(_))), _) | (_, Some(UVal::Init(Val::I64(_))))
                 )
-                && matches!(left.instrs.get(left.pc), Some(Instr::End))
-                && matches!(right.instrs.get(right.pc), Some(Instr::End))
+                && at_end
             {
-                merged.vars_mut().remove(&name);
-                continue;
-            }
-            if !lets && region.local_variables.contains(&name) && !original.contains_key(&name) {
-                merged.vars_mut().remove(&name);
-                continue;
-            }
-            let (mut va, mut vb) = (a.get(&name).cloned(), b.get(&name).cloned());
-            if matches!((&va, &vb), (Some(UVal::Init(a)), Some(UVal::Init(b))) if a == b)
-                || matches!((&va, &vb), (Some(UVal::Uninit(a)), Some(UVal::Uninit(b))) if std::ptr::eq(*a, *b))
-            {
-                if let Some(value) = va {
-                    if lets {
-                        merged.lets_mut().insert(name, value);
-                    } else {
-                        merged.vars_mut().insert(name, value);
-                    }
+                if base_slot.is_some() {
+                    merged.vars_mut().remove(&name);
                 }
                 continue;
             }
-            let ty = match (original.get(&name), &va, &vb) {
+            if !lets && region.local_variables.contains(&name) && base_slot.is_none() {
+                continue;
+            }
+            if same_value(left_slot, right_slot) {
+                if !same_value(left_slot, base_slot) {
+                    let bindings = if lets { merged.lets_mut() } else { merged.vars_mut() };
+                    bindings.insert(name, left_slot.unwrap().clone());
+                }
+                continue;
+            }
+            let (mut va, mut vb) = (left_slot.map(Cow::Borrowed), right_slot.map(Cow::Borrowed));
+            let ty = match (base_slot, left_slot, right_slot) {
                 (Some(UVal::Uninit(ty)), _, _) => Some(*ty),
                 (_, Some(UVal::Uninit(ty)), _) | (_, _, Some(UVal::Uninit(ty))) => Some(*ty),
                 _ => None,
             };
             let initial = ty
-                .filter(|_| matches!(va, Some(UVal::Uninit(_))) || matches!(vb, Some(UVal::Uninit(_))))
+                .filter(|_| matches!(left_slot, Some(UVal::Uninit(_))) || matches!(right_slot, Some(UVal::Uninit(_))))
                 .map(|ty| symbolic_terms(ty, shared.typedefs(), solver, info))
                 .transpose()?;
             if let Some(limits) = poison_limits.filter(|_| !lets) {
@@ -834,14 +839,14 @@ fn prepare_state<'ir, B: BV>(
                 }
             }
             if let Some(initial) = initial {
-                if matches!(va, Some(UVal::Uninit(_))) {
-                    va = Some(UVal::Init(initial.clone()));
+                if matches!(left_slot, Some(UVal::Uninit(_))) {
+                    va = Some(Cow::Owned(UVal::Init(initial.clone())));
                 }
-                if matches!(vb, Some(UVal::Uninit(_))) {
-                    vb = Some(UVal::Init(initial));
+                if matches!(right_slot, Some(UVal::Uninit(_))) {
+                    vb = Some(Cow::Owned(UVal::Init(initial)));
                 }
             }
-            let (Some(UVal::Init(a)), Some(UVal::Init(b))) = (&va, &vb) else {
+            let (Some(UVal::Init(a)), Some(UVal::Init(b))) = (va.as_deref(), vb.as_deref()) else {
                 if let Some(solver) = solver.diagnostics() {
                     diagnose_slot(
                         base,
@@ -1034,9 +1039,25 @@ fn prepare_state<'ir, B: BV>(
         order.sort_unstable();
         order
     };
-    let mut access = lhs.clone();
-    cost::make_mut(&mut merged.local_state).pure_definitions = left.local_state.pure_definitions.clone();
-    cost::make_mut(&mut merged.local_state)
+    let mut access = AccessLog {
+        writes: lhs.writes.clone(),
+        reads: if merge_read_footprint { Vec::new() } else { lhs.reads.clone() },
+        read_guards: if merge_read_footprint { Vec::new() } else { lhs.read_guards.clone() },
+        guard: base.local_state.speculative_access.as_ref().unwrap().guard.clone(),
+        initial_registers: lhs.initial_registers.clone(),
+        initial_variables: lhs.initial_variables.clone(),
+        initial_lets: lhs.initial_lets.clone(),
+        call_scope: lhs.call_scope,
+        function: lhs.function,
+        pc: lhs.pc,
+        location: lhs.location,
+        writes_allowed: lhs.writes_allowed,
+        global_state: lhs.global_state,
+        ordered_events: lhs.ordered_events,
+    };
+    let local = cost::make_mut(&mut merged.local_state);
+    local.pure_definitions.clone_from(&left.local_state.pure_definitions);
+    local
         .pure_definitions
         .extend(right.local_state.pure_definitions[base.local_state.pure_definitions.len()..].iter().copied());
     let mut single_arm_reads = Vec::new();
@@ -1095,8 +1116,8 @@ fn prepare_state<'ir, B: BV>(
             });
             order
         };
-        access.reads.clear();
-        access.read_guards.clear();
+        access.reads.reserve(order.len());
+        access.read_guards.reserve(order.len());
         for (reg, accessor) in order {
             let (value, guard, sides) = reads.remove(&(reg, accessor)).unwrap();
             let accessor = accessor.to_vec();
@@ -1150,12 +1171,11 @@ fn prepare_state<'ir, B: BV>(
     access.initial_registers.extend(retained_initials);
     access.initial_variables.extend(rhs.initial_variables.clone());
     access.initial_lets.extend(rhs.initial_lets.clone());
-    access.guard = base.local_state.speculative_access.as_ref().unwrap().guard.clone();
     access.writes.modified_vars.extend(&rhs.writes.modified_vars);
     access.writes.read_regs.extend(&rhs.writes.read_regs);
     access.writes.modified_regs.extend(&rhs.writes.modified_regs);
     access.writes.register_write_order = write_order;
-    cost::make_mut(&mut merged.local_state).speculative_access = Some(access);
+    local.speculative_access = Some(access);
     merged.pc = left.pc;
     Ok(PreparedState { frame: merged, single_arm_reads })
 }

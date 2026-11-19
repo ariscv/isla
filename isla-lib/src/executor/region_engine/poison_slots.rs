@@ -62,24 +62,26 @@ fn prune_inactive<B: BV>(
 }
 
 /// 仅使用当前帧的局部槽。可正常初始化的槽位继续保留带守卫的值。
-pub(super) fn prepare_local<'ir, B: BV>(
-    a: &mut Option<UVal<'ir, B>>,
-    b: &mut Option<UVal<'ir, B>>,
+pub(super) fn prepare_local<'slot, 'ir, B: BV>(
+    a: &mut Option<Cow<'slot, UVal<'ir, B>>>,
+    b: &mut Option<Cow<'slot, UVal<'ir, B>>>,
     uninit_is_poison: bool,
     condition: Sym,
     solver: &dyn crate::primop_util::merge_terms::MergeTerms<B>,
     reads_guarded: impl Fn(Option<(&[SlotProjection], Name)>) -> bool,
 ) -> Option<&'ir Ty<Name>> {
-    match (a, b) {
+    match (a.as_deref(), b.as_deref()) {
         (Some(UVal::Init(value)), Some(UVal::Uninit(ty))) | (Some(UVal::Uninit(ty)), Some(UVal::Init(value)))
             if uninit_is_poison && !matches!(value, Val::Poison) =>
         {
             reads_guarded(None).then_some(*ty)
         }
-        (Some(UVal::Init(a)), Some(UVal::Init(b))) => {
+        (Some(UVal::Init(_)), Some(UVal::Init(_))) => {
             let guard = Var(condition);
-            for (value, guard) in [(a, guard.clone()), (b, Not(Box::new(guard)))] {
-                if contains_poison(value) {
+            for (slot, guard) in [(a, guard.clone()), (b, Not(Box::new(guard)))] {
+                let slot = slot.as_mut().unwrap();
+                if matches!(slot.as_ref(), UVal::Init(value) if contains_poison(value)) {
+                    let UVal::Init(value) = slot.to_mut() else { unreachable!() };
                     prune_inactive(value, &guard, &mut Vec::new(), solver, &|path, ctor| {
                         reads_guarded(Some((path, ctor)))
                     });
