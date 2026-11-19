@@ -750,7 +750,7 @@ mod tests {
         let x5_text = zencode::encode("x5");
         let x6_text = zencode::encode("x6");
         let x5_name = symtab.intern(&x5_text);
-        let x6_name = symtab.intern(&x6_text);
+        symtab.intern(&x6_text);
         let prestate = HashMap::from([(x5_name, Val::Bits(B64::new(1, 64)))]);
 
         let pins = vec![("x5".to_string(), 0x8000_0001, PinWidth::Exact)];

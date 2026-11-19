@@ -10,8 +10,10 @@ use isla_lib::fmtval::FmtVal;
 use isla_lib::ir::{Bindings, IRTypeInfo, Name, SharedState, Symtab, Ty, UVal, Val};
 use isla_lib::primop_util::{smt_value, symbolic};
 use isla_lib::register::RegisterBindings;
+#[cfg(test)]
+use isla_lib::smt::EnumId;
 use isla_lib::smt::Model;
-use isla_lib::smt::{smtlib, EnumId, EnumMember, Solver, Sym};
+use isla_lib::smt::{smtlib, EnumMember, Solver, Sym};
 use isla_lib::source_loc::SourceLoc;
 use isla_lib::zencode;
 
@@ -45,7 +47,7 @@ impl<B: BV> PreStateCtx<B> {
         self.map.insert(name, value)
     }
 
-    pub fn iter(&self) -> std::collections::hash_map::Iter<Name, Val<B>> {
+    pub fn iter(&self) -> std::collections::hash_map::Iter<'_, Name, Val<B>> {
         self.map.iter()
     }
 
@@ -343,7 +345,7 @@ where
     /// complete model 补全输出具体值，重放侧没有 isa-state 初值可编程
     /// FPR/VPR，只能用 emu 自身复位值，post 期望不可比。寄存器值必须与 post
     /// 数据同源输出。
-    fn must_output_register(&self, reg_name: &str) -> bool {
+    fn must_output_register(&self, _: &str) -> bool {
         false
     }
 

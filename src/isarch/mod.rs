@@ -174,7 +174,7 @@ fn run_mapping<B: BV>(
         regs,
         lets,
         &collected,
-        &|thread, task_id, exec_result, shared_state, mut solver, collected| {
+        &|_, _, exec_result, shared_state, mut solver, collected| {
             let frame = match &exec_result {
                 Ok((_, frame)) | Err((_, frame)) => frame,
             };
@@ -315,8 +315,8 @@ pub fn generate_default_value<B: BV>(ty: &Ty<Name>, shared_state: &SharedState<B
 pub fn get_default_arg_all<'ir, B: BV>(
     instruction_name: &str, //like "zRTYPE/zMRET/zSTORE"
     shared_state: &'ir SharedState<'ir, B>,
-    regs: &RegisterBindings<B>,
-    lets: &Bindings<B>,
+    _: &RegisterBindings<B>,
+    _: &Bindings<B>,
 ) -> Vec<ArgStruct<'ir, B>> {
     // 查找指令的构造函数名称
     let encoded_name = format!("{}", instruction_name);
@@ -606,8 +606,8 @@ pub fn generate_symbolic_value<B: BV>(
 pub fn get_symbolic_arg_all<'ir, B: BV>(
     instruction_name: &str, //like "zRTYPE/zMRET/zSTORE"
     shared_state: &'ir SharedState<'ir, B>,
-    regs: &RegisterBindings<B>,
-    lets: &Bindings<B>,
+    _: &RegisterBindings<B>,
+    _: &Bindings<B>,
 ) -> Vec<ArgStruct<'ir, B>> {
     // 查找指令的构造函数名称
     let encoded_name = format!("{}", instruction_name);
@@ -856,10 +856,10 @@ pub fn ir_assembly_names_to_InstructionMap_step1_symbolic_exec<'ir, B: BV>(
 }
 #[allow(non_snake_case)]
 pub fn ir_assembly_names_to_InstructionMap_step2_merge<'ir, B: BV>(
-    instruction_name: &str,
+    _: &str,
     shared_state: &'ir SharedState<'ir, B>,
-    regs: &RegisterBindings<B>,
-    lets: &Bindings<B>,
+    _: &RegisterBindings<B>,
+    _: &Bindings<B>,
     arg_structs: Vec<(String, ArgStruct<'ir, B>)>,
 ) -> InstructionMap<'ir, B> {
     let arg_structs_splited: Vec<(Option<&str>, &ArgStruct<'ir, B>)> = arg_structs

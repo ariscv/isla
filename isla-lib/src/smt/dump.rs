@@ -614,7 +614,7 @@ fn ast_size(ctx: Z3_context, roots: &[Z3_ast]) -> serde_json::Value {
 /// 完整快照复用已有命名和重放。逐条保留断言以支持离线分量分析及来源检查。
 fn slow_query_artifact<B: BV>(checkpoint: Checkpoint<B>, exp: Option<&Exp<Sym>>) -> (String, serde_json::Value) {
     let ctx = Context::new_smtlib2_dump(Config::new());
-    let mut solver = Solver::from_checkpoint_for_smtlib2_dump(&ctx, checkpoint, SmtDumpNames::default());
+    let solver = Solver::from_checkpoint_for_smtlib2_dump(&ctx, checkpoint, SmtDumpNames::default());
     let mut preceding = super::SourceLoc::unknown();
     let locations: Vec<_> = solver
         .trace

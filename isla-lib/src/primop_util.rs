@@ -981,7 +981,6 @@ fn merge_val_inner_mode<B: BV, const CONCRETE: bool>(
         | (Val::MixedBits(_), Val::MixedBits(_))
         | (Val::String(_), Val::String(_))
         | (Val::Ref(_), Val::Ref(_))
-        | (Val::Vector(_), Val::Vector(_))
         | (Val::List(_), Val::List(_)) => {
             if val_a == val_b {
                 Ok(val_a.clone())

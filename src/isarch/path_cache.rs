@@ -155,7 +155,6 @@ mod tests {
         use super::super::target::RV64;
         use isla_lib::{
             executor::samples::SamplePath,
-            ir::Val,
             smt::{self, checkpoint},
         };
         smt::configure_tastic(smt::Tactic::Qfaufbv);

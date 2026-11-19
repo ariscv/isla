@@ -171,14 +171,14 @@ fn print_usage(opts: &getopts::Options, code: i32) -> ! {
 #[allow(dead_code)]
 fn cmd_tree<B: isla_lib::bitvector::BV>(
     matches: getopts::Matches,
-    shared_state: &&isla_lib::ir::SharedState<B>,
-    regs: &isla_lib::register::RegisterBindings<B>,
-    lets: &Bindings<B>,
-    iarch_config: isla_lib::init::InitArchWithConfig<B>,
-    source_path: Option<std::path::PathBuf>,
+    _: &&isla_lib::ir::SharedState<B>,
+    _: &isla_lib::register::RegisterBindings<B>,
+    _: &Bindings<B>,
+    _: isla_lib::init::InitArchWithConfig<B>,
+    _: Option<std::path::PathBuf>,
 ) -> i32 {
     let instruction = &matches.free[1];
-    let graphviz = matches.opt_present("graphviz");
+    matches.opt_present("graphviz");
 
     log!(log::VERBOSE, &format!("Analyzing instruction: {}", instruction));
 
@@ -247,13 +247,13 @@ fn cmd_tree<B: isla_lib::bitvector::BV>(
 #[allow(dead_code)]
 fn cmd_solve_state<B: isla_lib::bitvector::BV>(
     matches: getopts::Matches,
-    iarch: &isla_lib::init::Initialized<B>,
-    arch: Vec<isla_lib::ir::Def<isla_lib::ir::Name, B>>,
-    isa_config: isla_lib::config::ISAConfig<B>,
-    source_path: Option<std::path::PathBuf>,
+    _: &isla_lib::init::Initialized<B>,
+    _: Vec<isla_lib::ir::Def<isla_lib::ir::Name, B>>,
+    _: isla_lib::config::ISAConfig<B>,
+    _: Option<std::path::PathBuf>,
 ) -> i32 {
     let instruction = &matches.free[1];
-    let init_isa_with_config = matches.opt_present("init-isa-with-config");
+    matches.opt_present("init-isa-with-config");
 
     log!(log::VERBOSE, &format!("Solving state for instruction: {}", instruction));
 
