@@ -474,6 +474,21 @@ fn loop_iteration_frontiers_finish_sixty_four_rounds_in_one_region_body() {
     let ids: std::collections::HashSet<_> = records.iter().map(|r| r.record_id).collect();
     assert_eq!(ids.len(), records.len(), "共享前缀在不同条件下出现时必须保持记录ID唯一");
     assert!(records.iter().all(|r| r.parent_record.is_none_or(|id| ids.contains(&id))), "任何父记录都必须存在");
+    // 每轮的返回选择器仍链接先前的到达条件，但本轮的原始表达式不能复制整条链。
+    let guard_nodes: Vec<_> = on[0]
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Smt(smtlib::Def::DefineConst(_, exp @ smtlib::Exp::Not(inner)), ..)
+                if matches!(inner.as_ref(), smtlib::Exp::And(..)) =>
+            {
+                Some(stats::memory_stats::exp_stats(exp).0)
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(!guard_nodes.is_empty(), "夹具必须经过带前序条件的迭代汇合");
+    assert!(guard_nodes.iter().all(|nodes| *nodes <= 6), "单轮到达条件不应复制前序各轮：{guard_nodes:?}");
 }
 
 #[test]

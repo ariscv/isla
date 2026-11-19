@@ -1700,7 +1700,10 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     })?;
                     assert!(matches!(result, RegionResult::Merged));
                     solver.compact_region_query_prefix();
-                    cost::make_mut(&mut next.local_state).speculative_access.as_mut().unwrap().guard = Some(guard);
+                    // 返回选择器已保存完整到达条件。下一轮引用它的补集，避免每个事件
+                    // 复制前面所有轮次的守卫树。
+                    cost::make_mut(&mut next.local_state).speculative_access.as_mut().unwrap().guard =
+                        Some(Not(Box::new(Var(returned))));
                     let id = NEXT_RECORD
                         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
                         .expect("合并记录编号溢出");
