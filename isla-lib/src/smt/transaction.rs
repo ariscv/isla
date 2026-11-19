@@ -32,14 +32,19 @@ impl Drop for SavedModel<'_> {
     }
 }
 
+/// 保存点只记偏移；子层提交后，父层仍能撤销子层的声明变更。
+pub(super) enum DeclarationUndo<'ctx> {
+    Constant(Sym, Option<Ast<'ctx>>),
+    Bitvector(Sym),
+    Function(Sym, Option<FuncDecl<'ctx>>),
+}
+
 pub(super) struct SolverSavepoint<'ctx> {
     token: SolverTransaction,
     pub(super) events_len: usize,
     // 只表示不支持的操作；新层继承父层状态，普通断言不会置位。
     pub(super) invalid: bool,
-    decls: HashMap<Sym, Ast<'ctx>>,
-    sail_bitvectors: HashSet<Sym>,
-    func_decls: HashMap<Sym, FuncDecl<'ctx>>,
+    declaration_undo_len: usize,
     def_attrs: DefAttrs,
     cycles: i128,
     asserts_since_check: usize,
@@ -54,6 +59,14 @@ pub(super) struct SolverSavepoint<'ctx> {
     order_register_reads: bool,
     deferred_obligations_len: usize,
     deferred_input_facts_len: usize,
+}
+
+fn restore_binding<T>(bindings: &mut HashMap<Sym, T>, sym: Sym, previous: Option<T>) {
+    let replaced = match previous {
+        Some(value) => bindings.insert(sym, value),
+        None => bindings.remove(&sym),
+    };
+    assert!(replaced.is_some(), "撤销的声明必须存在");
 }
 
 impl<'ctx, B: BV> Solver<'ctx, B> {
@@ -73,8 +86,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
         serde_json::json!({"savepoint_count":self.savepoints.len(),
             "native_condition_scopes":unsafe { Z3_solver_get_num_scopes(self.ctx.z3_ctx, self.z3_solver) },
-            "saved_decl_entries":self.savepoints.iter().map(|s|s.decls.len()).sum::<usize>(),
-            "saved_function_entries":self.savepoints.iter().map(|s|s.func_decls.len()).sum::<usize>(),
+            "saved_decl_entries":self.declaration_undo.iter().filter(|entry| matches!(entry, DeclarationUndo::Constant(_, Some(_)))).count(),
+            "saved_function_entries":self.declaration_undo.iter().filter(|entry| matches!(entry, DeclarationUndo::Function(_, Some(_)))).count(),
+            "declaration_undo_entries":self.declaration_undo.len(),
             "saved_assert_counters":self.savepoints.iter().map(|s|s.asserts_since_check).sum::<usize>(),
             "buffered_event_count":self.transaction_events.len(),"buffered_assertion_count":count,
             "omitted_assertions":count-prefix.len(),"prefix_assertions":prefix})
@@ -154,6 +168,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         if self.savepoints.is_empty() {
             assert!(self.transaction_events.is_empty(), "保存点栈与缓冲必须同时清空");
             assert!(self.transaction_event_guards.is_empty(), "事件及其条件必须同时清空");
+            assert!(self.declaration_undo.is_empty(), "根保存点之间不得保留声明撤销记录");
             self.last_committed_transaction = None;
             self.committed_transaction_events.clear();
         }
@@ -163,33 +178,17 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         // next_var 不回退：符号已经交给调用方，复用编号会让旧值错误引用新定义。
         // 枚举 sort 是 Context 的全局注册状态，不能撤销；其定义在回滚时仍须可重放。
         // z3_solver/ctx/symbol_namer 不变，迹在活动保存点期间不发布也不能建检查点。
-        // 完整复制符号表也覆盖对已有 Sym 的重定义，不能只删除新鲜编号区间。
-        // 每层复制符号表、函数表、位向量集合和性能图：时间/空间为当前状态规模，
-        // 总成本随路径规模和嵌套深度增长。后续可改为逐项记录旧值的增量撤销日志，
-        // 提交合并父层日志、回滚按逆序恢复；届时仍须处理已有 Sym 重定义和模型引用。
+        // 声明变更日志也记录已有 Sym 的旧绑定，支持嵌套提交后回滚外层。
         {
             let snapshot_scope = crate::executor::stats::region_cost::Scope::enter(
                 crate::executor::stats::region_cost::Category::Savepoint,
             );
             let _ = &snapshot_scope;
-            if crate::executor::stats::region_cost::enabled() {
-                let entries = self.decls.len() + self.sail_bitvectors.len() + self.func_decls.len();
-                let bytes = self.decls.capacity() * std::mem::size_of::<(Sym, Ast<'ctx>)>()
-                    + self.sail_bitvectors.capacity() * std::mem::size_of::<Sym>()
-                    + self.func_decls.capacity() * std::mem::size_of::<(Sym, FuncDecl<'ctx>)>();
-                crate::executor::stats::region_cost::count(
-                    crate::executor::stats::region_cost::Category::Savepoint,
-                    entries,
-                    bytes,
-                );
-            }
             self.savepoints.push(SolverSavepoint {
                 token,
                 events_len: self.transaction_events.len(),
                 invalid: self.transaction_invalid(),
-                decls: self.decls.clone(),
-                sail_bitvectors: self.sail_bitvectors.clone(),
-                func_decls: self.func_decls.clone(),
+                declaration_undo_len: self.declaration_undo.len(),
                 def_attrs: self.def_attrs,
                 cycles: self.cycles,
                 asserts_since_check: self.asserts_since_check,
@@ -268,9 +267,15 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             self.transaction_conditions.pop().unwrap();
         }
         self.clear_stashed_model();
-        self.decls = savepoint.decls;
-        self.sail_bitvectors = savepoint.sail_bitvectors;
-        self.func_decls = savepoint.func_decls;
+        while self.declaration_undo.len() > savepoint.declaration_undo_len {
+            match self.declaration_undo.pop().unwrap() {
+                DeclarationUndo::Constant(sym, previous) => restore_binding(&mut self.decls, sym, previous),
+                DeclarationUndo::Bitvector(sym) => {
+                    assert!(self.sail_bitvectors.remove(&sym), "撤销的位向量标记必须存在");
+                }
+                DeclarationUndo::Function(sym, previous) => restore_binding(&mut self.func_decls, sym, previous),
+            }
+        }
         self.def_attrs = savepoint.def_attrs;
         self.cycles = savepoint.cycles;
         self.asserts_since_check = savepoint.asserts_since_check;
@@ -423,6 +428,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             // 撤去 g 并把 c 改为 g→c 只会弱化约束，同一见证仍然有效。
         }
         if self.savepoints.is_empty() {
+            self.declaration_undo.clear();
             // 最外层已提交，辅助solver的旧scope与学习状态不再属于活动区域。
             // 主solver和其模型各自持有引用；释放辅助资源不改变已提交约束。
             self.region_query = None;
@@ -691,13 +697,13 @@ impl<B: BV> Solver<'_, B> {
             + self.sail_bitvectors.capacity() * size_of::<Sym>()
             + map_bytes::<Sym, FuncDecl>(self.func_decls.capacity());
         let mut models = usize::from(self.stashed_model.is_some());
-        bytes += self.savepoints.capacity() * size_of::<SolverSavepoint>();
+        bytes += self.savepoints.capacity() * size_of::<SolverSavepoint>()
+            + self.declaration_undo.capacity() * size_of::<DeclarationUndo>();
         for (index, point) in self.savepoints.iter().enumerate() {
-            layers.push(serde_json::json!({"layer":index+1,"decls_capacity":point.decls.capacity(),"sail_bitvectors_capacity":point.sail_bitvectors.capacity(),"func_decls_capacity":point.func_decls.capacity()}));
-            bytes += map_bytes::<Sym, Ast>(point.decls.capacity())
-                + point.sail_bitvectors.capacity() * size_of::<Sym>()
-                + map_bytes::<Sym, FuncDecl>(point.func_decls.capacity())
-                + point.guard.as_ref().map_or(0, exp_heap_bytes);
+            let end =
+                self.savepoints.get(index + 1).map_or(self.declaration_undo.len(), |child| child.declaration_undo_len);
+            layers.push(serde_json::json!({"layer":index+1,"declaration_undo_entries":end-point.declaration_undo_len}));
+            bytes += point.guard.as_ref().map_or(0, exp_heap_bytes);
             models += usize::from(point.model.model.is_some());
         }
         let buffered_events_bytes = self.transaction_events.capacity() * size_of::<Event<B>>()

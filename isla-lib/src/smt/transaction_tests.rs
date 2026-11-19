@@ -844,3 +844,44 @@ fn logical_arm_interleaved_death_keeps_sibling_effects_and_frozen_obligations() 
         }
     }
 }
+
+#[test]
+fn smt_savepoint_snapshots_only_declaration_changes_and_restores_nested_rebindings() {
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let info = SourceLoc::unknown();
+    for _ in 0..256 {
+        solver.declare_bitvector(8, info);
+    }
+    let value = solver.define_const(Bits64(B64::new(1, 8)), info);
+    let function = solver.fresh();
+    solver.add(DeclareFun(function, vec![Ty::Bool], Ty::Bool));
+    let original_function = solver.func_decls[&function].z3_func_decl;
+
+    let outer = solver.start_transaction();
+    assert_eq!(solver.probe_transaction_snapshot()["saved_decl_entries"], 0, "空保存点不应复制既有声明表");
+
+    solver.add(DefineConst(value, Bits64(B64::new(2, 8))));
+    let inner = solver.start_transaction();
+    solver.add(DefineConst(value, Bits64(B64::new(3, 8))));
+    solver.rollback_transaction(inner);
+    assert_eq!(solver.structural_i128(value), Some(2));
+
+    solver.start_transaction();
+    solver.add(DefineConst(value, Bits64(B64::new(4, 8))));
+    solver.add(DeclareFun(function, vec![Ty::Bool], Ty::BitVec(8)));
+    solver.mark_bitvector(value);
+    let added = solver.declare_bitvector(16, info);
+    solver.commit_transaction();
+    assert_eq!(solver.structural_i128(value), Some(4));
+    assert!(solver.is_sail_bitvector(value));
+    assert_ne!(solver.func_decls[&function].z3_func_decl, original_function);
+
+    solver.rollback_transaction(outer);
+    assert_eq!(solver.structural_i128(value), Some(1));
+    assert_eq!(solver.func_decls[&function].z3_func_decl, original_function);
+    assert!(!solver.is_sail_bitvector(value));
+    assert!(!solver.decls.contains_key(&added));
+    assert!(!solver.is_sail_bitvector(added));
+}
