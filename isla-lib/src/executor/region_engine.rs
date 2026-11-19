@@ -241,13 +241,7 @@ pub(super) fn publish_committed_records<B: BV>(
             .iter()
             .filter(|(_, event)| event.is_memory_read_or_write())
             .enumerate()
-            .filter_map(|(i, (guard, event))| {
-                if event.is_memory_read() {
-                    guard.as_ref().map(|guard| (offset + i, guard.clone(), event.clone()))
-                } else {
-                    None
-                }
-            })
+            .filter_map(|(i, (guard, event))| guard.as_ref().map(|guard| (offset + i, guard.clone(), event.clone())))
             .collect();
     }
     if super::merge_record::enabled() {
@@ -708,6 +702,25 @@ fn merge_states<'ir, B: BV>(
     let _ = &cost_scope;
     let incompatible = || reject(base, SpeculativeRejectReason::IncompatibleState);
     let mut merged = base.clone();
+    if !Arc::ptr_eq(&left.memory, &right.memory) {
+        match (left.memory.ram_version(), right.memory.ram_version()) {
+            (None, None) => (),
+            (Some(a), Some(b)) => {
+                let version = if a == b {
+                    a
+                } else {
+                    use smtlib::Exp::{Ite, Var};
+                    solver.define_const(Ite(Box::new(Var(condition)), Box::new(Var(a)), Box::new(Var(b))), info)
+                };
+                if merged.memory.ram_version() != Some(version) {
+                    merged.memory_mut().set_ram_version(version);
+                }
+            }
+            _ => panic!("同一分支区域的内存回调必须具有相同的版本契约"),
+        }
+    } else {
+        merged.memory = left.memory.clone();
+    }
     let lhs = left.local_state.speculative_access.as_ref().unwrap();
     let rhs = right.local_state.speculative_access.as_ref().unwrap();
     if let Some(limits) = &state.execution_limits {

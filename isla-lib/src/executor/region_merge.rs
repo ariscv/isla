@@ -360,7 +360,6 @@ pub(super) fn preflight<B: BV>(
     {
         cost::make_mut(&mut frame.local_state).speculative_access.as_mut().unwrap().writes_allowed = true;
     }
-    // 注意（ATTENTION）：合并路径的内存读取为并集语义；需要精确内存读序列时不可信。
     // Custom 可执行设备 IO，Constrained 是任意闭包，均不能靠 solver 回滚外部效应。
     if matches!(&frame.instrs[frame.pc], Instr::PrimopVariadic(_, f, _, _)
         if primop::variadic_effect(*f) == Some(primop::Effect::ReadsMemory))
@@ -369,6 +368,12 @@ pub(super) fn preflight<B: BV>(
             .regions()
             .iter()
             .any(|region| matches!(region, crate::memory::Region::Custom(..) | crate::memory::Region::Constrained(..)))
+    {
+        return Err(reject(frame, SpeculativeRejectReason::StateEffect));
+    }
+    if matches!(&frame.instrs[frame.pc], Instr::PrimopVariadic(_, f, _, _)
+        if primop::variadic_effect(*f) == Some(primop::Effect::WritesMemory))
+        && frame.memory().ram_version().is_none()
     {
         return Err(reject(frame, SpeculativeRejectReason::StateEffect));
     }

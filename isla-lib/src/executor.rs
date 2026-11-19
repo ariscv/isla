@@ -4268,6 +4268,7 @@ mod tests {
     mod nested_merge_failure_tests;
     mod read_size_tests;
     mod region_measurement_tests;
+    mod region_memory_write_tests;
     mod region_merge_tests;
     mod review27_tests;
     mod review28_tests;

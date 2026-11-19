@@ -615,7 +615,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let mut guards = Vec::new();
         for (guard, event) in effects.events {
             if event.is_memory_read_or_write() {
-                if let (true, Some(guard)) = (event.is_memory_read(), guard) {
+                if let Some(guard) = guard {
                     guards.push((index, guard));
                 }
                 index += 1;
