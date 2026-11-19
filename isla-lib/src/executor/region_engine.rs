@@ -889,7 +889,7 @@ fn merge_states<'ir, B: BV>(
     let mut retained_initials = Vec::new();
     let read_or_written: std::collections::BTreeSet<_> =
         lhs.writes.read_regs.union(&rhs.writes.read_regs).chain(registers.iter()).collect();
-    for reg in read_or_written {
+    for &reg in &read_or_written {
         if lhs.ordered_events && (base.regs().is_relaxed(*reg) || base.regs().has_old_writes(*reg)) {
             return Err(reject(base, SpeculativeRejectReason::RelaxedRegister));
         }
@@ -973,6 +973,9 @@ fn merge_states<'ir, B: BV>(
             })?
         };
         merged.regs_mut().assign(*reg, value, shared);
+    }
+    for reg in read_or_written {
+        merged.regs_mut().merge_initialization(*reg, condition, left.regs(), right.regs(), solver, info);
     }
     let merge_read_footprint = lhs.global_state || !lhs.ordered_events;
     let shared_regs: HashSet<_> = if merge_read_footprint {

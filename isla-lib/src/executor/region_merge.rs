@@ -1252,12 +1252,12 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             )
         })? {
             if arm.region_arrivals.is_empty() {
-                promote_initials(&mut base, &arm, shared, solver);
+                promote_initials(&mut base, &arm, solver);
                 arms[side].push(arm);
             } else {
                 arms[side] = std::mem::take(&mut arm.region_arrivals);
                 for fragment in &arms[side] {
-                    promote_initials(&mut base, fragment, shared, solver);
+                    promote_initials(&mut base, fragment, solver);
                 }
             }
         } else if consumer.is_some() || crate::config::RegionOptions::current().arm_error_leaf {
@@ -1329,7 +1329,6 @@ pub fn validate_force_regions<B: BV>(shared: &SharedState<B>, limits: &Execution
 pub(super) fn promote_initials<'ir, B: BV>(
     base: &mut LocalFrame<'ir, B>,
     arm: &LocalFrame<'ir, B>,
-    shared: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
 ) {
     let cost_scope = cost::Scope::enter(cost::Category::StateMerge);
@@ -1339,7 +1338,7 @@ pub(super) fn promote_initials<'ir, B: BV>(
     for (reg, initial) in &access.initial_registers {
         if base.regs().get_last_if_initialized(*reg).is_none() {
             assert_initial_type(initial, solver);
-            base.regs_mut().assign(*reg, initial.clone(), shared);
+            base.regs_mut().reserve_initial(*reg, initial.clone());
         }
     }
     for ((scope, function, name), value) in &access.initial_variables {
@@ -1623,7 +1622,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 assert_eq!(parent.completed, side, "调用栈组织者按两臂顺序收尾");
                 match result {
                     RegionResult::Merged => {
-                        promote_initials(&mut parent.base, &work.original, shared, solver);
+                        promote_initials(&mut parent.base, &work.original, solver);
                         parent.arms[side].push(work.original);
                     }
                     RegionResult::Dead => {
@@ -1631,7 +1630,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     }
                     RegionResult::Separate { .. } => {
                         for fragment in std::mem::take(&mut work.original.region_arrivals) {
-                            promote_initials(&mut parent.base, &fragment, shared, solver);
+                            promote_initials(&mut parent.base, &fragment, solver);
                             parent.arms[side].push(fragment);
                         }
                     }
@@ -1749,7 +1748,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     if part.region_execution.as_ref().unwrap().pending_branch.is_some() {
                         continuing.push(part);
                     } else {
-                        promote_initials(&mut work.base, &part, shared, solver);
+                        promote_initials(&mut work.base, &part, solver);
                         work.arms[side].push(part);
                     }
                 }
@@ -1953,7 +1952,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         || (work.region.join == RegionPoint::FunctionExit && matches!(arm.instrs[arm.pc], Instr::End)),
                     "非分叉挂起必须抵达共同出口"
                 );
-                promote_initials(&mut work.base, &arm, shared, solver);
+                promote_initials(&mut work.base, &arm, solver);
                 work.arms[work.completed].push(arm);
                 work.completed += 1;
                 work.active_arm = None;

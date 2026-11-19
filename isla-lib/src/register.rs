@@ -83,7 +83,7 @@ use crate::error::ExecError;
 use crate::executor::stats::region_cost as cost;
 use crate::ir::*;
 use crate::primop_util::{ite_choice, symbolic};
-use crate::smt::{Solver, Sym};
+use crate::smt::{smtlib::Exp, Solver, Sym};
 use crate::source_loc::SourceLoc;
 use crate::zencode;
 
@@ -93,10 +93,18 @@ enum RelaxedVal<'ir, B> {
     Init { last_write: Val<B>, last_read: Option<Val<B>>, old_writes: Vec<Val<B>> },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Initialization {
+    Value,
+    Reserved,
+    Guarded(Sym),
+}
+
 #[derive(Clone, Debug)]
 pub struct Register<'ir, B> {
     relaxed: bool,
     value: RelaxedVal<'ir, B>,
+    initialization: Initialization,
 }
 
 impl<'ir, B: BV> RelaxedVal<'ir, B> {
@@ -201,6 +209,7 @@ impl<'ir, B: BV> Register<'ir, B> {
         solver: &mut Solver<B>,
         info: SourceLoc,
     ) -> Result<&'a Val<B>, ExecError> {
+        self.initialization = Initialization::Value;
         if self.relaxed {
             self.value.read(shared_state, solver, info)
         } else {
@@ -229,7 +238,17 @@ impl<'ir, B: BV> Register<'ir, B> {
         }
     }
 
+    /// 取得读写语义上的初始化位。区域为另一臂预留的入口值仍可保持未初始化。
+    pub fn initialization(&self) -> Val<B> {
+        match self.initialization {
+            Initialization::Value => Val::Bool(self.read_last_if_initialized().is_some()),
+            Initialization::Reserved => Val::Bool(false),
+            Initialization::Guarded(guard) => Val::Symbolic(guard),
+        }
+    }
+
     pub fn write(&mut self, value: Val<B>) {
+        self.initialization = Initialization::Value;
         if self.relaxed {
             self.value.write(value)
         } else {
@@ -290,13 +309,17 @@ impl<'ir, B: BV> RegisterBindings<'ir, B> {
     pub fn insert(&mut self, id: Name, relaxed: bool, v: UVal<'ir, B>) {
         match v {
             UVal::Uninit(ty) => {
-                cost::make_mut(&mut self.map).insert(id, Register { relaxed, value: RelaxedVal::Uninit(ty) });
+                cost::make_mut(&mut self.map).insert(
+                    id,
+                    Register { relaxed, value: RelaxedVal::Uninit(ty), initialization: Initialization::Value },
+                );
             }
             UVal::Init(value) => {
                 cost::make_mut(&mut self.map).insert(
                     id,
                     Register {
                         relaxed,
+                        initialization: Initialization::Value,
                         value: RelaxedVal::Init { last_write: value, last_read: None, old_writes: Vec::new() },
                     },
                 );
@@ -316,7 +339,10 @@ impl<'ir, B: BV> RegisterBindings<'ir, B> {
         info: SourceLoc,
     ) -> Result<Option<&'a Val<B>>, ExecError> {
         let Some(register) = self.map.get(&id) else { return Ok(None) };
-        if !register.relaxed && register.read_last_if_initialized().is_some() {
+        if !register.relaxed
+            && register.initialization == Initialization::Value
+            && register.read_last_if_initialized().is_some()
+        {
             return Ok(self.get_last_if_initialized(id));
         }
         let register = cost::make_mut(&mut self.map).get_mut(&id).unwrap();
@@ -332,11 +358,46 @@ impl<'ir, B: BV> RegisterBindings<'ir, B> {
         info: SourceLoc,
     ) -> Result<Option<&'a Val<B>>, ExecError> {
         let Some(register) = self.map.get(&id) else { return Ok(None) };
-        if register.read_last_if_initialized().is_some() {
+        if register.initialization == Initialization::Value && register.read_last_if_initialized().is_some() {
             return Ok(self.get_last_if_initialized(id));
         }
         let register = cost::make_mut(&mut self.map).get_mut(&id).unwrap();
+        register.initialization = Initialization::Value;
         register.value.read_last(shared_state, solver, info).map(Some)
+    }
+
+    pub(crate) fn reserve_initial(&mut self, id: Name, value: Val<B>) {
+        let register = cost::make_mut(&mut self.map).get_mut(&id).expect("区域入口必须有寄存器");
+        assert!(register.read_last_if_initialized().is_none());
+        register.write(value);
+        register.initialization = Initialization::Reserved;
+    }
+
+    pub(crate) fn merge_initialization(
+        &mut self,
+        id: Name,
+        condition: Sym,
+        left: &Self,
+        right: &Self,
+        solver: &mut Solver<B>,
+        info: SourceLoc,
+    ) {
+        let terms = [left, right].map(|bindings| match bindings.map[&id].initialization() {
+            Val::Bool(value) => Exp::Bool(value),
+            Val::Symbolic(guard) => Exp::Var(guard),
+            _ => unreachable!("初始化位必须是布尔值"),
+        });
+        let [a, b] = terms;
+        let value = if a == b { a } else { Exp::Ite(Box::new(Exp::Var(condition)), Box::new(a), Box::new(b)).eval() };
+        let initialization = match value {
+            Exp::Bool(true) => Initialization::Value,
+            Exp::Bool(false) => Initialization::Reserved,
+            Exp::Var(guard) => Initialization::Guarded(guard),
+            value => Initialization::Guarded(solver.define_const(value, info)),
+        };
+        if self.map[&id].initialization != initialization {
+            cost::make_mut(&mut self.map).get_mut(&id).unwrap().initialization = initialization;
+        }
     }
 
     /// 外层可能继续用普通的 relaxed 读。历史逐项带合并守卫，缺项重复同臂的最新值。
