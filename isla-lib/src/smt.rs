@@ -206,6 +206,7 @@ pub(crate) use finite_domain::FiniteDomain;
 pub mod no_smt;
 mod query;
 mod z3_timeout;
+mod z3_version;
 pub use dump::configure_slow_query_dump;
 use dump::{timeout_dump_from_checkpoint, SmtDumpRequest, Z3SymbolNamer};
 use smtlib::*;
@@ -213,6 +214,7 @@ use z3_timeout::{
     timeout_Z3_model_eval, timeout_Z3_solver_check, timeout_Z3_solver_check_assumptions,
     timeout_Z3_solver_check_deadline, timeout_error as z3_timeout_error, Z3TimeoutError,
 };
+use z3_version::MIN_Z3_VERSION;
 
 /// Snapshot of interaction with underlying solver that can be
 /// efficiently cloned and shared between threads.
@@ -795,9 +797,6 @@ pub struct Context {
     z3_ctx: Z3_context,
     enum_cache: RefCell<HashMap<EnumSortKey, Enum>>,
 }
-
-// 最低运行时版本对应官方提交 d6c9b4fbb31cb76e35cc325dd7e64b7c26c7d70f。
-const MIN_Z3_VERSION: (c_uint, c_uint, c_uint, c_uint) = (5, 4, 0, 0);
 
 fn z3_version_supported(version: (c_uint, c_uint, c_uint, c_uint)) -> bool {
     version >= MIN_Z3_VERSION
