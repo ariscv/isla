@@ -527,12 +527,12 @@ progress = true
 
 使用线程中断功能构建时，`--smt-timeout` 设置单次 Z3 调用的软中断限时，省略时不限。终态查询的专用限时独立生效。直接调用构建没有这两种单次限时。
 
-递归与平铺合并都在实际到达指令时检查普通被调函数的传递 `StateEffect`。区域准入仍检查直接效应和 `CalleeStateWrite`，到达未实现的 extern 时仍拒绝推演。
+递归与平铺合并都在实际到达指令时检查普通被调函数的传递 `StateEffect`。普通被调函数的寄存器写入沿用调用者区域的访问记录，各汇合组发布自己的最终写入。区域准入仍检查直接不可撤销效应，到达未实现的 extern 时仍拒绝推演。
 
 ### 臂内执行错误叶子
 
-`[execution_limits.path_merge].arm_error_leaf` 默认关闭，`--arm-error-leaf=true|false` 可覆盖。
-延迟区域检查下，位置和到达条件随错误保留。执行器按逻辑臂冻结访存前缀并撤销该臂的正常出口，兄弟臂继续参与汇合。启用 SMT 时，区域出口证明错误不可达后才提交。无 SMT 时，缓存写出未认证的 `ExecutionError` 终态，支持用 `--path-cache-read` 配合 `--check-samples` 或 `--judge-resident` 重新判定。不可达的错误终态不影响正常路径接纳，可达的执行错误会使签收失败。
+`[execution_limits.path_merge].arm_error_leaf` 默认开启，`--arm-error-leaf=false` 恢复原有处理。
+即时与延后区域共用失败点的执行迹和完整守卫。正常组继续执行，已证可达的执行错误单独交付。无 SMT 或求解结果未知时，错误叶标记为未认证。只有已证不可达的错误叶会被筛除。
 
 ### 区域合并具体值
 

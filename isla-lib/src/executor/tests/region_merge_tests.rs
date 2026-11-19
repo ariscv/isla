@@ -5898,8 +5898,17 @@ mod prune_constant_branch_tests;
 // 子进程只通过测试名称选择模式，不引入运行时环境变量。
 #[test]
 fn arm_error_leaf_modes() {
-    for mode in ["normal", "deferred_dead", "deferred_live", "nosmt", "flat", "disabled", "structural_dead", "rollback"]
-    {
+    for mode in [
+        "normal",
+        "immediate_live",
+        "deferred_dead",
+        "deferred_live",
+        "nosmt",
+        "flat",
+        "disabled",
+        "structural_dead",
+        "rollback",
+    ] {
         let out = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -5935,7 +5944,7 @@ fn arm_error_leaf_fixture(mode: &str) {
     } else {
         solver.declare_const(smtlib::Ty::Bool, info())
     };
-    if !["deferred_live", "nosmt", "flat"].contains(&mode) {
+    if !["immediate_live", "deferred_live", "nosmt", "flat"].contains(&mode) {
         solver.assert(smtlib::Exp::Not(Box::new(smtlib::Exp::Var(condition))));
     }
     let read = |address| {
@@ -5992,14 +6001,14 @@ fn arm_error_leaf_fixture(mode: &str) {
         info(),
     )
     .unwrap();
-    if ["deferred_live", "nosmt", "flat"].contains(&mode) {
+    if ["immediate_live", "deferred_live", "nosmt", "flat"].contains(&mode) {
         assert!(matches!(result, region_merge::RegionResult::Merged));
         let leaf = queue.pop().expect("可达失败必须保留为独立错误叶");
 
         assert!(matches!(leaf.fork_cond, Some((_, Event::Fork(_, _, 0, _)))), "失败前沿须走真实分叉提交接口");
         let error_frame = unfreeze_frame(&leaf.frame);
         assert!(matches!(error_frame.arm_error(), Some(ExecError::Type(..))));
-        assert_eq!(error_frame.arm_error_certified(), mode == "deferred_live");
+        assert_eq!(error_frame.arm_error_certified(), matches!(mode, "immediate_live" | "deferred_live"));
         assert_ne!(error_frame.path_signature(), frame.path_signature(), "失败与正常前沿签名不可相同");
         let checked_context = Context::new(Config::new());
         let mut replay = Solver::from_checkpoint(&checked_context, leaf.checkpoint);
@@ -6037,6 +6046,12 @@ fn arm_error_leaf_fixture(mode: &str) {
 fn arm_error_leaf_normal_child() {
     arm_error_leaf_fixture("normal")
 }
+#[test]
+#[ignore]
+fn arm_error_leaf_immediate_live_child() {
+    arm_error_leaf_fixture("immediate_live")
+}
+
 #[test]
 #[ignore]
 fn arm_error_leaf_deferred_dead_child() {
