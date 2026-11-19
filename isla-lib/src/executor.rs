@@ -2017,6 +2017,9 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     shared_state: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
 ) -> Result<Run<B>, ExecError> {
+    if let Some(error) = frame.arm_error() {
+        return Err(error.clone());
+    }
     let cost_scope = cost::Scope::enter(cost::Category::Interpreter);
     let _ = &cost_scope;
     let fork_sink: &dyn ForkSink<'ir, 'task, B> =

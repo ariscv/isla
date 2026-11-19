@@ -25,6 +25,7 @@ pub struct RegionOptions {
     pub defer_exit_check: bool,
     /// 分支入口只用表达式结构识别布尔恒值；默认关闭。
     pub prune_constant_branches: bool,
+    pub arm_error_leaf: bool,
     /// 延迟 Z3 条件作用域；默认关闭，仅在 defer 内生效，可能增加内存占用。
     pub lazy_z3_scope: bool,
     /// 完整前提见证求值；默认关闭。
@@ -81,6 +82,7 @@ impl RegionOptions {
             no_smt_keep_bool_proofs: limits.solver.no_smt_keep_bool_proofs,
             defer_exit_check: merge.defer_exit_check,
             prune_constant_branches: merge.prune_constant_branches,
+            arm_error_leaf: merge.arm_error_leaf,
             lazy_z3_scope: merge.lazy_z3_scope,
             witness_eval: merge.witness_eval,
             prefix_compact: merge.prefix_compact,

@@ -2801,6 +2801,7 @@ obligation_dump_dir = "obligations"
                 defer_range_proofs: false,
                 defer_ctor_checks: false,
                 prune_constant_branches: false,
+                arm_error_leaf: false,
                 skip_branch_checks: true,
                 skip_bool_proofs: true,
                 no_smt: true,

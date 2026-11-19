@@ -119,6 +119,9 @@ impl FastFacts {
         records: &[super::super::RegionMergeRecord<B>],
     ) -> Result<Self, ExecError> {
         assert_eq!(solver.transaction_depth(), 0);
+        if matches!(path.terminal, super::Terminal::ExecutionError { .. }) {
+            return Ok(Self { guard_unique: false, post_unique: false, simple_pre: false });
+        }
         let simple_pre = path.pre.values().all(simple);
         let mut dependencies = Dependencies {
             definitions: HashMap::new(),
@@ -245,6 +248,9 @@ impl<B: BV> SamplePath<B> {
         facts: &FastFacts,
         consume: impl FnMut(&mut Sample, &mut Model<B>) -> Result<(), ExecError>,
     ) -> Result<Option<JudgedSample>, ExecError> {
+        if matches!(self.terminal, super::Terminal::ExecutionError { .. }) {
+            return self.judge(solver, shared, input, records, signature, consume);
+        }
         let mut memory = BTreeMap::new();
         let mut functional = true;
         for cell in &input.pre_memory {

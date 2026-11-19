@@ -44,8 +44,8 @@ impl SampleOptions {
         {
             return Err("--path-cache-only 只支持独立缓存写出；请读回缓存后导出或认证".into());
         }
-        if self.path_cache.enabled() && self.resident.is_some() {
-            return Err("缓存选项不能与旧常驻 judge 同时运行".into());
+        if self.path_cache.write.is_some() && self.resident.is_some() {
+            return Err("缓存写出不能与常驻 judge 同时运行".into());
         }
         if self.resident_fast && self.resident.is_none() {
             return Err("--judge-resident-fast 需要 --judge-resident".into());
@@ -323,13 +323,22 @@ pub fn path<B: BV>(
         .region_merge_records()
         .iter()
         .flat_map(|record| record.memory_reads.iter().map(|(index, guard, _)| (*index, guard.clone())))
+        .chain(frame.arm_error_memory_guards().iter().cloned())
         .collect();
     SamplePath {
-        terminal: match frame.get_exception() {
-            Some((_, location)) => {
-                isla_lib::executor::samples::Terminal::SailException { throw_location: location.into() }
+        terminal: if let Some(error) = frame.arm_error() {
+            use isla_lib::error::IslaError;
+            isla_lib::executor::samples::Terminal::ExecutionError {
+                message: error.to_string(),
+                location: error.source_loc().location_string(shared.symtab.files()),
             }
-            None => isla_lib::executor::samples::Terminal::Normal,
+        } else {
+            match frame.get_exception() {
+                Some((_, location)) => {
+                    isla_lib::executor::samples::Terminal::SailException { throw_location: location.into() }
+                }
+                None => isla_lib::executor::samples::Terminal::Normal,
+            }
         },
         pre,
         post,
@@ -462,6 +471,19 @@ mod tests {
             let concrete = sample.materialize(&mut Model::new(&solver), &shared, "regression", 0, None).unwrap();
             assert_eq!(sample.check(&mut solver, &shared, &concrete).unwrap(), Some(true));
         }
+    }
+
+    #[test]
+    fn resident_allows_cache_read_but_rejects_cache_write() {
+        let mut options = SampleOptions {
+            resident: Some("in.jsonl".into()),
+            resident_out: Some("out.jsonl".into()),
+            ..Default::default()
+        };
+        options.path_cache.read = Some("cache".into());
+        assert!(options.validate().is_ok());
+        options.path_cache.write = Some("new-cache".into());
+        assert!(options.validate().is_err());
     }
 
     #[test]

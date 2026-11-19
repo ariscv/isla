@@ -46,7 +46,7 @@ use crate::fraction::Fraction;
 use crate::ir::*;
 use crate::memory::Memory;
 use crate::register::RegisterBindings;
-use crate::smt::{Checkpoint, Solver, Sym};
+use crate::smt::{smtlib, Checkpoint, Solver, Sym};
 use crate::timeout::{SmtCallStats, SmtDumpNames};
 #[cfg(feature = "tracetool")]
 use crate::tracetool::TracePerPath;
@@ -138,6 +138,8 @@ pub struct Frame<'ir, B> {
     pub(super) region_replay: Option<(usize, crate::ir::regions::RegionPoint)>,
     pub(super) region_execution: Option<super::region_merge::RegionExecution>,
     pub(super) region_merge_records: super::MergeHistory<B>,
+    pub(super) arm_error: Option<ExecError>,
+    pub(super) arm_error_memory_guards: Arc<[(usize, smtlib::Exp<Sym>)]>,
     pub(super) pending_retry_operand: Option<(usize, Val<B>)>,
     pub(super) execution_limit_state: Arc<ExecutionLimitPathState>,
     pub(super) local_state: Arc<LocalState<'ir, B>>,
@@ -178,6 +180,8 @@ pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
         region_merge_records: frame.region_merge_records.clone(),
         region_arrivals: Vec::new(),
         region_arm: None,
+        arm_error: frame.arm_error.clone(),
+        arm_error_memory_guards: frame.arm_error_memory_guards.clone(),
         pending_retry_operand: frame.pending_retry_operand.clone(),
         execution_limit_state: Arc::clone(&frame.execution_limit_state),
         local_state: Arc::clone(&frame.local_state),
@@ -210,7 +214,8 @@ pub struct LocalFrame<'ir, B> {
     pub(super) region_arrivals: Vec<LocalFrame<'ir, B>>,
     pub(super) region_arm: Option<crate::smt::LogicalArm>,
     pub(super) region_merge_records: super::MergeHistory<B>,
-    // 使用 Vector 保存同一条 primop 的全部已求值操作数，重试时不能重新生成 Undefined。
+    pub(super) arm_error: Option<ExecError>,
+    pub(super) arm_error_memory_guards: Arc<[(usize, smtlib::Exp<Sym>)]>,
     pub(super) pending_retry_operand: Option<(usize, Val<B>)>,
     pub(super) execution_limit_state: Arc<ExecutionLimitPathState>,
     pub(super) local_state: Arc<LocalState<'ir, B>>,
@@ -264,6 +269,8 @@ impl<'ir, B: Clone> Clone for LocalFrame<'ir, B> {
             region_arrivals: Vec::new(),
             region_arm: self.region_arm,
             region_merge_records: self.region_merge_records.clone(),
+            arm_error: self.arm_error.clone(),
+            arm_error_memory_guards: self.arm_error_memory_guards.clone(),
             pending_retry_operand: self.pending_retry_operand.clone(),
             execution_limit_state: self.execution_limit_state.clone(),
             local_state: self.local_state.clone(),
@@ -292,6 +299,8 @@ pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
         region_execution: frame.region_execution.clone(),
         region_replay: frame.region_replay,
         region_merge_records: frame.region_merge_records.clone(),
+        arm_error: frame.arm_error.clone(),
+        arm_error_memory_guards: frame.arm_error_memory_guards.clone(),
         pending_retry_operand: frame.pending_retry_operand.clone(),
         execution_limit_state: Arc::clone(&frame.execution_limit_state),
         local_state: Arc::clone(&frame.local_state),
@@ -309,6 +318,14 @@ pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
 }
 
 impl<'ir, B: BV> LocalFrame<'ir, B> {
+    pub fn arm_error_memory_guards(&self) -> &[(usize, smtlib::Exp<Sym>)] {
+        &self.arm_error_memory_guards
+    }
+
+    pub fn arm_error(&self) -> Option<&ExecError> {
+        self.arm_error.as_ref()
+    }
+
     pub fn region_merge_records(&self) -> &super::MergeHistory<B> {
         &self.region_merge_records
     }
@@ -543,6 +560,8 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             region_arm: None,
             region_replay: None,
             region_merge_records: super::MergeHistory::default(),
+            arm_error: None,
+            arm_error_memory_guards: Arc::from([]),
             pending_retry_operand: None,
             execution_limit_state: Arc::new(ExecutionLimitPathState::default()),
             local_state: Arc::new(LocalState {

@@ -13,6 +13,7 @@ pub(super) fn run<B: BV>(
     let cpu = thread_cpu_seconds();
     let facts = {
         let mut config = Config::new();
+        config.solver_options.no_smt = false;
         config.set_param_value("model", "true");
         let context = Context::new(config);
         paths
@@ -44,6 +45,7 @@ pub(super) fn run<B: BV>(
                 profile::reset();
                 let timing = profile::Span::new("context");
                 let mut config = Config::new();
+                config.solver_options.no_smt = false;
                 config.set_param_value("model", "true");
                 let context = Context::new(config);
                 drop(timing);

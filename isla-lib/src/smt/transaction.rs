@@ -457,31 +457,56 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     pub(crate) fn commit_region_groups(&mut self, arms: &[LogicalArm]) -> Vec<RegionGroupEffects<B>> {
         let [root] = self.savepoints.as_slice() else { panic!("只能从最外层事务交付多个汇合组") };
         assert!(!root.order_register_reads);
-        assert_eq!(self.transaction_events.len(), self.transaction_event_guards.len());
         let prefix = root.token.head_len;
-        let groups = arms
-            .iter()
-            .map(|arm| {
-                let mut cycles = root.cycles;
-                let events = self
-                    .transaction_events
-                    .iter()
-                    .zip(&self.transaction_event_guards)
-                    .zip(self.logical_arms.group_events(*arm))
-                    .filter_map(|((event, guard), (selected, cycle))| {
-                        cycles += i128::from(selected && cycle);
-                        // 未进入本组的定义仍可能被守卫或条件断言引用。
-                        (selected || matches!(event, Event::Smt(..))).then(|| (guard.clone(), event.clone()))
-                    })
-                    .collect();
-                RegionGroupEffects { events, cycles }
-            })
-            .collect();
+        let groups = arms.iter().map(|arm| self.project_logical_arm(*arm)).collect();
         self.commit_transaction();
         self.trace.head.truncate(prefix);
         self.trace.checkpoint(self.next_var);
         self.last_committed_transaction = None;
         groups
+    }
+
+    fn project_logical_arm(&self, arm: LogicalArm) -> RegionGroupEffects<B> {
+        assert_eq!(self.transaction_events.len(), self.transaction_event_guards.len());
+        let mut cycles = self.savepoints.first().expect("投影必须处于区域事务中").cycles;
+        let events = self
+            .transaction_events
+            .iter()
+            .zip(&self.transaction_event_guards)
+            .zip(self.logical_arms.group_events(arm))
+            .filter_map(|((event, guard), (selected, cycle))| {
+                cycles += i128::from(selected && cycle);
+                // 定义和受保护的断言仍可能被本臂引用。
+                (selected || matches!(event, Event::Smt(..))).then(|| (guard.clone(), event.clone()))
+            })
+            .collect();
+        RegionGroupEffects { events, cycles }
+    }
+
+    /// 在排除正常域之前，冻结当前臂的前缀和完整到达条件。
+    pub(crate) fn arm_error_snapshot(&self, arm: LogicalArm) -> (Checkpoint<B>, Vec<(usize, Exp<Sym>)>) {
+        assert_eq!(self.current_logical_arm(), Some(arm));
+        let effects = self.project_logical_arm(arm);
+        let mut head = self.trace.head.clone();
+        let mut index = self.trace.to_vec().iter().filter(|event| event.is_memory_read_or_write()).count();
+        let mut guards = Vec::new();
+        for (guard, event) in effects.events {
+            if event.is_memory_read_or_write() {
+                if let (true, Some(guard)) = (event.is_memory_read(), guard) {
+                    guards.push((index, guard));
+                }
+                index += 1;
+            }
+            head.push(event);
+        }
+        head.extend(
+            self.transaction_conditions
+                .iter()
+                .cloned()
+                .map(|guard| Event::Smt(Def::Assert(guard), DefAttrs::default(), SourceLoc::unknown())),
+        );
+        let trace = Arc::new(Some(Trace { checkpoints: self.trace.checkpoints, head, tail: self.trace.tail.clone() }));
+        (Checkpoint { num: self.trace.checkpoints + 1, next_var: self.next_var, trace, cycles: effects.cycles }, guards)
     }
 
     /// 各组共用事务前的迹和已提交 SMT 约束，分别发布组内非 SMT 事件。

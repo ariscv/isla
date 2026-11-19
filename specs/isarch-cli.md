@@ -524,6 +524,11 @@ progress = true
 
 使用线程中断功能构建时，`--smt-timeout` 设置单次 Z3 调用的软中断限时，缺省 60 秒。终态查询的专用限时独立生效。直接调用构建没有这两种单次限时。
 
+### 臂内执行错误叶子
+
+`[execution_limits.path_merge].arm_error_leaf` 默认关闭，`--arm-error-leaf=true|false` 可覆盖。
+延迟区域检查下，位置和到达条件随错误保留。执行器按逻辑臂冻结访存前缀并撤销该臂的正常出口，兄弟臂继续参与汇合。启用 SMT 时，区域出口证明错误不可达后才提交。无 SMT 时，缓存写出未认证的 `ExecutionError` 终态，支持用 `--path-cache-read` 配合 `--check-samples` 或 `--judge-resident` 重新判定。不可达的错误终态不影响正常路径接纳，可达的执行错误会使签收失败。
+
 ## 投影枚举与样本输出
 
 在 `[execution_limits.path_merge.enumeration]` 设置 `enabled=true` 后开始枚举。每个守卫类的 `class_cap` 与每条完成路径的 `path_cap` 缺省均不限，可显式设置正整数。达到上限且仍有可行解时记录截断。`sample_stride` 缺省为 1，显式大于 1 时按步长选择输出，计数仍包含已枚举的解。

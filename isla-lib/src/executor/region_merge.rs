@@ -10,6 +10,18 @@ use crate::config::MergeMode;
 use crate::executor::stats::region_cost as cost;
 use crate::ir::regions::{FunctionRegions, Region, RegionOptions, RegionPoint, RegionRejection};
 
+/// 任一祖先区域拒绝时，随该次推演撤销失败任务的发布。
+struct ArmErrorSink<'ir, 'task, B: BV> {
+    tasks: Mutex<Vec<Task<'ir, 'task, B>>>,
+}
+
+impl<'ir, 'task, B: BV> ForkSink<'ir, 'task, B> for ArmErrorSink<'ir, 'task, B> {
+    fn submit(&self, task: Task<'ir, 'task, B>) {
+        assert!(task.frame.arm_error.is_some(), "区域内仅允许缓冲错误终态");
+        self.tasks.lock().unwrap().push(task);
+    }
+}
+
 /// 普通区域的两臂与调用共享预算；可收敛的只读循环按完整轮核算，单轮仍受限。
 /// 这只限制一次合并尝试，不截断普通符号执行的路径；配置 -1 时不创建或续配计数器。
 pub const DEFAULT_REGION_STEP_BUDGET: Option<usize> = None;
@@ -520,6 +532,8 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
         }
     };
     let replay_join = candidate.as_ref().ok().map(|region| region.join);
+    let mut pending_errors = ArmErrorSink { tasks: Mutex::new(Vec::new()) };
+    let mut publish_errors = false;
     let mut segmented = false;
     let result = match candidate {
         Err(error) => {
@@ -585,7 +599,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         fraction,
                         timeout,
                         stop,
-                        sink,
+                        &pending_errors,
                         match &mut candidate_frame {
                             Some(candidate) => candidate,
                             None => &mut *frame,
@@ -615,6 +629,22 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                                 return Err(reject(frame, SpeculativeRejectReason::SolverUnknown));
                             }
                             Some(SmtResult::Error(error)) => return Err(ExecError::Smt(error)),
+                        }
+                        publish_errors = checked.is_none();
+                        for task in pending_errors.tasks.lock().unwrap().iter() {
+                            let Some((_, Event::Fork(_, guard, _, location))) = &task.fork_cond else {
+                                unreachable!("失败前沿必须有分叉元数据")
+                            };
+                            match solver.check_rolled_back_arm_error(*guard, &task.checkpoint, *location) {
+                                None | Some(SmtResult::Unsat) => (),
+                                Some(SmtResult::Sat) => {
+                                    return Err(reject(frame, SpeculativeRejectReason::SymbolicAssertion))
+                                }
+                                Some(SmtResult::Unknown) => {
+                                    return Err(reject(frame, SpeculativeRejectReason::SolverUnknown))
+                                }
+                                Some(SmtResult::Error(error)) => return Err(ExecError::Smt(error)),
+                            }
                         }
                     }
                     output
@@ -661,6 +691,29 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         // 出口义务或可行性验证拒绝时，调用者帧仍停留在入口。
                         if let Some(candidate_frame) = candidate_frame {
                             *frame = candidate_frame;
+                        }
+                        if !nested && publish_errors {
+                            for mut task in std::mem::take(pending_errors.tasks.get_mut().unwrap()) {
+                                let Some((_, Event::Fork(id, _, _, _))) = &mut task.fork_cond else {
+                                    unreachable!("失败前沿必须有分叉元数据")
+                                };
+                                *id = cost::make_mut(&mut frame.execution_limit_state).record_fork();
+                                task.frame.execution_limit_state = frame.execution_limit_state.clone();
+                                cost::make_mut(&mut task.frame.execution_limit_state).advance_path_signature(true);
+                                cost::make_mut(&mut frame.execution_limit_state).advance_path_signature(false);
+                                for group in frame
+                                    .region_arrivals
+                                    .iter_mut()
+                                    .chain(continuation.iter_mut().map(|(_, frame)| frame))
+                                {
+                                    let limits = cost::make_mut(&mut group.execution_limit_state);
+                                    assert_eq!(limits.record_fork(), *id, "继续前沿继承同一区域的分叉计数");
+                                    limits.advance_path_signature(false);
+                                }
+                                fraction.halve();
+                                task.fraction = fraction.clone();
+                                sink.submit(task);
+                            }
                         }
                         if grouped_root {
                             assert!(continuation.is_none(), "分组出口和预算续配不能共用调度");
@@ -727,6 +780,11 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
             }
         }
     };
+    if nested && result.is_ok() {
+        for task in pending_errors.tasks.into_inner().unwrap() {
+            sink.submit(task);
+        }
+    }
     match result {
         Ok(RegionResult::Separate { reason, merged_groups }) => {
             assert_eq!(nested, !frame.region_arrivals.is_empty());
@@ -1086,6 +1144,8 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     promote_initials(&mut base, fragment, shared, solver);
                 }
             }
+        } else if crate::config::RegionOptions::current().arm_error_leaf {
+            solver.discard_logical_arm_effects(owner);
         }
     }
     finish_arrivals(record_id, condition, &region, &base, arms, frame, state, shared, solver, info)
@@ -1733,6 +1793,9 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 work.active_arm = None;
             }
         } else {
+            if crate::config::RegionOptions::current().arm_error_leaf {
+                solver.discard_logical_arm_effects(owner);
+            }
             work.completed += 1;
             work.active_arm = None;
         }
