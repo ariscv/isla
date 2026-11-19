@@ -3097,7 +3097,8 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             if let Some(execution) = &frame.region_execution {
                                 let access =
                                     cost::make_mut(&mut frame.local_state).speculative_access.as_mut().unwrap();
-                                access.call_scope = caller_scope.expect("推演返回必须恢复调用作用域");
+                                access.call_scope =
+                                    caller_scope.or(execution.catch_return).expect("推演返回必须恢复调用作用域");
                                 access.writes_allowed = frame.backtrace.len() == execution.write_depth;
                                 access.function = frame.function_name;
                                 access.pc = caller_pc;
@@ -3393,7 +3394,12 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             // C++ compilers). The value should never be used, so we
             // return Val::Poison here.
             Instr::Arbitrary => {
-                branch_decision(frame, task_state, SpeculativeRejectReason::Arbitrary)?;
+                if !frame.region_execution.as_ref().is_some_and(|execution| {
+                    execution.catch_return.is_some() && frame.backtrace.len() == execution.entry_depth + 1
+                }) || frame.get_exception().is_none()
+                {
+                    branch_decision(frame, task_state, SpeculativeRejectReason::Arbitrary)?;
+                }
                 if frame.local_state.should_probe(shared_state, &frame.function_name) {
                     let symbol = zencode::decode(shared_state.symtab.to_str(frame.function_name));
                     log_from!(

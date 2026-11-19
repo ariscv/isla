@@ -105,7 +105,7 @@ pub struct RegionCfg {
     assertion_tails: HashSet<usize>,
 }
 
-fn exception_polarity(exp: &Exp<Name>, name: Name) -> Option<bool> {
+pub(crate) fn exception_polarity(exp: &Exp<Name>, name: Name) -> Option<bool> {
     match exp {
         Exp::Id(id) if *id == name => Some(true),
         Exp::Call(Op::Not, args) if matches!(args.as_slice(), [Exp::Id(id)] if *id == name) => Some(false),

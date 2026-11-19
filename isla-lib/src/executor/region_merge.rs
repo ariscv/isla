@@ -12,6 +12,7 @@ use crate::executor::stats::region_cost as cost;
 use crate::ir::regions::{FunctionRegions, Region, RegionOptions, RegionPoint, RegionRejection};
 
 mod consumer_continuation;
+mod exception_continuation;
 
 /// 任一祖先区域拒绝时，随该次推演撤销失败任务的发布。
 struct ArmErrorSink<'ir, 'task, B: BV> {
@@ -62,6 +63,7 @@ pub(super) struct RegionExecution {
     pub region: Arc<Region>,
     pub entry_depth: usize,
     pub write_depth: usize,
+    pub catch_return: Option<usize>,
     pub depth: usize,
     pub remaining: Option<Arc<AtomicUsize>>,
     pub iteration_budget: Option<usize>,
@@ -286,7 +288,9 @@ pub(super) fn step<B: BV>(frame: &mut LocalFrame<B>) -> Result<bool, ExecError> 
         if execution.region.join == RegionPoint::Instruction(frame.pc) {
             return Ok(true);
         }
-        if execution.region.join == RegionPoint::FunctionExit && matches!(frame.instrs.get(frame.pc), Some(Instr::End))
+        if execution.region.join == RegionPoint::FunctionExit
+            && (matches!(frame.instrs.get(frame.pc), Some(Instr::End))
+                || (execution.catch_return.is_some() && matches!(frame.instrs.get(frame.pc), Some(Instr::Arbitrary))))
         {
             return Ok(true);
         }
@@ -1017,6 +1021,7 @@ pub(super) fn prepare_region_base<'ir, B: BV>(
         region: region.clone(),
         pending_branch: None,
         entry_depth: frame.backtrace.len(),
+        catch_return: None,
         write_depth: parent.as_ref().map_or(frame.backtrace.len(), |execution| execution.write_depth),
         // 可按轮收敛的子循环独立核算单轮预算；非循环仍共享调用者预算。
         // 总路径限时仍生效，未完成的一轮仍会正常拒绝，不据此猜测循环会终止。
@@ -1187,6 +1192,10 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             shared, solver, info,
         );
     }
+    let catcher = (consumer.is_none() && region.join == RegionPoint::FunctionExit)
+        .then(|| exception_continuation::find_catcher(frame, &region, shared))
+        .flatten();
+    base.region_execution.as_mut().unwrap().catch_return = catcher.as_ref().map(|_| fresh_call_scope());
     let mut arms = [Vec::new(), Vec::new()];
     let mut ready = ReadyFragments::new(state);
     let guards = match &consumer {
@@ -1242,6 +1251,15 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         }
     }
     live_forks.set(arms.iter().map(Vec::len).sum::<usize>().saturating_sub(1));
+    if let Some(catcher) = catcher {
+        if arms.iter().flatten().any(|arm| matches!(arm.instrs[arm.pc], Instr::Arbitrary)) {
+            return exception_continuation::finish_catch(
+                catcher, record_id, condition, base, arms, tid, task_id, fraction, timeout, stop, sink, frame, state,
+                shared, solver, info,
+            )
+            .map(RegionOutput::complete);
+        }
+    }
     finish_arrivals(record_id, condition, &region, consumer.is_some(), &base, arms, frame, state, shared, solver, info)
         .map(RegionOutput::complete)
 }

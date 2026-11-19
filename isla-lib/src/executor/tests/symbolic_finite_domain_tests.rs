@@ -188,6 +188,7 @@ fn symbolic_finite_domain_region_preserves_retry_and_rollback() {
             local_variables: Default::default(),
         }),
         entry_depth: 0,
+        catch_return: None,
         write_depth: 0,
         depth: 1,
         remaining: None,

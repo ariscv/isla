@@ -5,8 +5,6 @@
 // expect_paths_unmerged = 2
 // expect_paths_merged = 1
 // must_merge = "异常被捕获后有共同的正常后继。"
-// status = "xfail"
-// reason = "merge-principle-audit.md §5（异常出口与调用方延续）：捕获异常的分支已正常返回，在共同后继仍与普通返回分别完成。"
 // ---
 default Order dec
 $include <prelude.sail>

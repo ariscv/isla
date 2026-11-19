@@ -29,6 +29,9 @@ mod filtered_match_tests;
 #[path = "region_filtered_exception_tests.rs"]
 mod filtered_exception_tests;
 
+#[path = "region_exception_catch_tests.rs"]
+mod exception_catch_tests;
+
 // 调试构建的真实执行循环需要大于 libtest 默认线程栈。只扩大已复现的深夹具，
 // 不改变整个测试进程或产品的栈设置。
 fn run_deep_region_test(test: impl FnOnce() + Send + 'static) {
@@ -1793,6 +1796,7 @@ fn region_merge_unique_retry_gate_preserves_guard_checkpoint_and_fraction() {
             local_variables: Default::default(),
         }),
         entry_depth: 0,
+        catch_return: None,
         write_depth: 0,
         depth: 1,
         remaining: Some(Arc::new(AtomicUsize::new(10))),
