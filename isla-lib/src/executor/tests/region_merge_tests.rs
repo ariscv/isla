@@ -119,7 +119,7 @@ fn paths_with_solver_state(
         &output,
         &move |_, _, result, _, mut solver, output| match result {
             Ok((Run::Finished(value), frame)) => match solver.check_candidate_sat(info()) {
-                Some(SmtResult::Sat) => output.lock().unwrap().0.push(Path {
+                Some(SmtResult::Sat) | None => output.lock().unwrap().0.push(Path {
                     records: frame.region_merge_records().to_vec(),
                     value,
                     exception: frame.get_exception().map(|(value, _)| value.clone()),
@@ -332,7 +332,10 @@ fn unordered_register_reads_observe_same_arm_writes() {
 pub(super) fn equivalent_paths(forked: &[Path], merged: &[Path], inputs: usize, complete: bool) -> (usize, usize) {
     use smtlib::Exp::*;
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
-    let context = Context::new(Config::new());
+    let mut config = Config::new();
+    // 差分判据离线验证守卫，执行候选时可以关闭求解。
+    config.solver_options.no_smt = false;
+    let context = Context::new(config);
     let mut solver = Solver::<B64>::new(&context);
     let input_symbols: Vec<_> = (0..inputs).map(|_| solver.declare_const(smtlib::Ty::Bool, info())).collect();
     let relation = |paths: &[Path], solver: &mut Solver<B64>| {
@@ -459,6 +462,115 @@ fn region_merge_grouped_arrivals_keep_guards_and_register_traces() {
             }
         }
     }
+}
+
+#[test]
+fn region_merge_each_string_group_keeps_its_register_read() {
+    let no_smt =
+        run_in_diagnostics_process(concat!(module_path!(), "::region_merge_each_string_group_keeps_its_register_read"));
+    if no_smt {
+        crate::smt::configure_solver_options(crate::smt::SolverOptions { no_smt: true, ..Default::default() });
+    }
+    check_group_register_reads(false, false);
+    check_group_register_reads(false, true);
+    check_group_register_reads(true, false);
+}
+
+fn check_group_register_reads(repeated: bool, omit_one: bool) {
+    let mut shared = empty_shared_state();
+    let slot = shared.symtab.intern("zgroup_read_string");
+    let register = shared.symtab.intern("zgroup_read_reg");
+    let bit = shared.symtab.intern("zgroup_read_bit");
+    shared.registers.insert(register, Ty::Bool);
+    let read =
+        || Instr::PrimopUnary(Loc::Id(bit), primop::unary_primops()["isla_bool_to_bit"], Exp::Id(register), info());
+    let second_read = |next| if repeated { read() } else { Instr::Goto(next) };
+    let store = |value: &str| Instr::Copy(Loc::Id(slot), Exp::String(value.into()), info());
+    let program = vec![
+        Instr::Decl(slot, Ty::String, info()),
+        Instr::Decl(bit, Ty::Bits(1), info()),
+        Instr::Jump(input(0), 12, info()),
+        Instr::Jump(input(1), 8, info()),
+        read(),
+        store("a"),
+        second_read(7),
+        Instr::Goto(11),
+        if omit_one { Instr::Goto(9) } else { read() },
+        store("b"),
+        second_read(11),
+        Instr::Goto(21),
+        Instr::Jump(input(1), 17, info()),
+        read(),
+        store("c"),
+        second_read(16),
+        Instr::Goto(20),
+        read(),
+        store("d"),
+        second_read(20),
+        Instr::Goto(21),
+        Instr::PrimopBinary(
+            Loc::Id(RETURN),
+            primop::binary_primops()["eq_string"],
+            Exp::Id(slot),
+            Exp::String("b".into()),
+            info(),
+        ),
+        Instr::End,
+    ];
+    let run = |limits| paths_with_state(program.clone(), &shared, 2, limits, crate::memory::Memory::new(), |_| ());
+    let read_counts = |paths: &[Path]| {
+        let mut counts = paths
+            .iter()
+            .map(|path| {
+                let reads: Vec<_> = path
+                    .events
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, event)| match event {
+                        Event::ReadReg(reg, accessor, Val::Symbolic(value))
+                            if *reg == register && accessor.is_empty() =>
+                        {
+                            Some((index, *value))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if let Some((read, value)) = reads.first() {
+                    let (use_index, _) = path.events.iter().enumerate().find(|(_, event)| {
+                        matches!(event, Event::Smt(Def::DefineConst(_, exp), ..) if exp.variables().contains(value))
+                    }).expect("夹具必须通过 SMT 定义使用读取的寄存器值");
+                    assert!(*read < use_index, "首个读取必须位于依赖其值的定义之前");
+                }
+                if let Some(root) = path.records.last() {
+                    assert_eq!(
+                        reads.len(),
+                        root.single_arm_reads.iter().filter(|read| read.register == register).count()
+                    );
+                }
+                let Val::Bool(is_b) = path.value else { panic!("字符串比较必须返回具体布尔值") };
+                (is_b, reads.len())
+            })
+            .collect::<Vec<_>>();
+        counts.sort_unstable();
+        counts
+    };
+    let ordinary = run(ExecutionLimits::default().with_path_merging(false));
+    let expected = read_counts(&ordinary);
+    let count = if repeated { 2 } else { 1 };
+    assert_eq!(expected, [(false, count), (false, count), (false, count), (true, if omit_one { 0 } else { count })]);
+    let mut observed = Vec::new();
+    for strategy in [crate::config::MergeStrategy::Recursive, crate::config::MergeStrategy::Flat] {
+        let mut limits = ExecutionLimits::default().with_path_merging(true);
+        limits.merge_strategy = strategy;
+        limits.ordered_events = repeated;
+        // 本夹具要把四个不同字符串保持成四组，逐组检查读事件；缺省的具体值合并会把它们并成一条。
+        limits.merge_concrete_values = false;
+        let grouped = run(limits);
+        assert_eq!(equivalent_paths(&ordinary, &grouped, 2, true), (4, 4), "{strategy:?}");
+        assert!(grouped.iter().all(|path| !path.records.is_empty()), "{strategy:?}");
+        observed.push((strategy, read_counts(&grouped)));
+    }
+    assert!(observed.iter().all(|(_, counts)| *counts == expected), "分叉 {expected:?}，分组 {observed:?}");
 }
 
 /// 每条分叉路径都与覆盖它的合并路径比较完整最终寄存器映射，结构字段递归展开。

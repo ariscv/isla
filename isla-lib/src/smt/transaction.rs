@@ -19,6 +19,13 @@ pub(crate) struct RegionGroupEffects<B> {
     cycles: i128,
 }
 
+struct RegisterReadSelection<'events, B> {
+    value: &'events Val<B>,
+    first: usize,
+    // 该组第一次读取的位置，以及组内所有等价读取的条件。
+    selected: Option<(usize, Option<Exp<Sym>>)>,
+}
+
 // 独立持有保存点的模型引用，提交、回滚以及带活动保存点销毁 Solver 都会正确释放。
 struct SavedModel<'ctx> {
     model: Option<Z3_model>,
@@ -446,6 +453,24 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             if let Some(prefix) = &mut self.finite_prefix {
                 prefix.remove_suffix(BUFFERED, &self.transaction_events, 0);
             }
+            if self.logical_arms.has_register_reads() {
+                let mut reads = self.project_register_reads(None);
+                let mut owners = self.logical_arms.group_events(None).enumerate();
+                self.transaction_events.retain(|_| {
+                    let (index, (_, _, read)) = owners.next().unwrap();
+                    read.is_none() || reads.contains_key(&index)
+                });
+                let mut owners = self.logical_arms.group_events(None).enumerate();
+                self.transaction_event_guards.retain_mut(|guard| {
+                    let (index, (_, _, read)) = owners.next().unwrap();
+                    if let Some(condition) = reads.remove(&index) {
+                        *guard = condition;
+                        true
+                    } else {
+                        read.is_none()
+                    }
+                });
+            }
             if savepoint.order_register_reads {
                 order_register_reads(&mut self.transaction_events, &mut self.transaction_event_guards, 0);
             }
@@ -492,18 +517,90 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     fn project_logical_arm(&self, arm: LogicalArm) -> RegionGroupEffects<B> {
         assert_eq!(self.transaction_events.len(), self.transaction_event_guards.len());
         let mut cycles = self.savepoints.first().expect("投影必须处于区域事务中").cycles;
+        let mut reads = self.project_register_reads(Some(arm));
         let events = self
             .transaction_events
             .iter()
             .zip(&self.transaction_event_guards)
-            .zip(self.logical_arms.group_events(arm))
-            .filter_map(|((event, guard), (selected, cycle))| {
+            .zip(self.logical_arms.group_events(Some(arm)))
+            .enumerate()
+            .filter_map(|(index, ((event, guard), (selected, cycle, read)))| {
                 cycles += i128::from(selected && cycle);
+                if read.is_some() {
+                    return reads.remove(&index).map(|guard| (guard, event.clone()));
+                }
                 // 定义和受保护的断言仍可能被本臂引用。
                 (selected || matches!(event, Event::Smt(..))).then(|| (guard.clone(), event.clone()))
             })
             .collect();
         RegionGroupEffects { events, cycles }
+    }
+
+    pub(crate) fn add_region_register_read(&mut self, event: Event<B>, occurrence: usize) {
+        self.add_event(event);
+        self.logical_arms.mark_register_read(occurrence);
+    }
+
+    /// 只合并组内实际读取的同值同序号事件。跨组复用较早的位置时，
+    /// 保持读取在引用其值的定义前，并遵守组内非 SMT 事件的顺序。
+    fn project_register_reads(&self, arm: Option<LogicalArm>) -> HashMap<usize, Option<Exp<Sym>>> {
+        let mut reads: HashMap<_, Vec<RegisterReadSelection<'_, B>>> = HashMap::new();
+        for (index, ((event, guard), (selected, _, occurrence))) in self
+            .transaction_events
+            .iter()
+            .zip(&self.transaction_event_guards)
+            .zip(self.logical_arms.group_events(arm))
+            .enumerate()
+        {
+            let Some(occurrence) = occurrence else { continue };
+            let Event::ReadReg(register, accessor, value) = event else {
+                unreachable!("只有寄存器读取拥有读取序号")
+            };
+            let candidates = reads.entry((*register, accessor.as_slice(), occurrence)).or_default();
+            let entry = if let Some(entry) = candidates.iter_mut().find(|entry| entry.value == value) {
+                entry
+            } else {
+                candidates.push(RegisterReadSelection { value, first: index, selected: None });
+                candidates.last_mut().unwrap()
+            };
+            if selected {
+                match &mut entry.selected {
+                    None => entry.selected = Some((index, guard.clone())),
+                    Some((_, condition)) => {
+                        *condition = match (condition.take(), guard) {
+                            (Some(left), Some(right)) if &left != right => {
+                                Some(Exp::Or(Box::new(left), Box::new(right.clone())))
+                            }
+                            (Some(left), Some(_)) => Some(left),
+                            _ => None,
+                        };
+                    }
+                }
+            }
+        }
+        let mut selected: HashMap<_, _> = reads
+            .into_values()
+            .flatten()
+            .filter_map(|entry| entry.selected.map(|(index, guard)| (index, (entry.first, guard))))
+            .collect();
+
+        if selected.is_empty() {
+            return HashMap::new();
+        }
+        let mut projected = HashMap::with_capacity(selected.len());
+        let mut next = 0;
+        for (index, (event, (visible, _, read))) in
+            self.transaction_events.iter().zip(self.logical_arms.group_events(arm)).enumerate()
+        {
+            if let Some((first, guard)) = selected.remove(&index) {
+                let position = if first >= next { first } else { index };
+                projected.insert(position, guard);
+                next = position + 1;
+            } else if visible && read.is_none() && !matches!(event, Event::Smt(..)) {
+                next = index + 1;
+            }
+        }
+        projected
     }
 
     /// 在排除正常域之前，冻结当前臂的前缀和完整到达条件。

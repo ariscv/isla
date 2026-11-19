@@ -100,7 +100,6 @@ fn region_util_defer_ctor_obligation_checks_original_guard() {
             speculative_access: Some(region_merge::AccessLog {
                 writes: WriteSet::default(),
                 reads: Vec::new(),
-                published_reads: Vec::new(),
                 read_guards: Vec::new(),
                 guard: Some(smtlib::Exp::Bool(true)),
                 initial_registers: HashMap::new(),
