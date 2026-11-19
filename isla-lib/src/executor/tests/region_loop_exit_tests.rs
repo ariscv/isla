@@ -68,7 +68,7 @@ fn region_loop_exit_budget_publishes_one_task_per_guarded_continuation() {
         let mut limits = ExecutionLimits::default().with_path_merging(merge).with_region_loop_analysis(true);
         limits.merge_strategy = strategy;
         segment_paths(program.clone(), &shared, 4, limits, 32, crate::memory::Memory::new(), |frame| {
-            let input_value = |index| match frame.vars()[&test_name(900 + index)] {
+            let input_value = |index: u32| match frame.vars()[&test_name(900 + index)] {
                 UVal::Init(ref value) => value.clone(),
                 _ => panic!("输入须初始化"),
             };
