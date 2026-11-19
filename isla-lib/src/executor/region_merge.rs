@@ -57,7 +57,6 @@ pub(super) struct RegionExecution {
 pub(super) struct AccessLog<B> {
     pub writes: WriteSet,
     pub reads: Vec<(Name, Vec<Accessor>, Val<B>)>,
-    pub published_reads: Vec<(Name, Vec<Accessor>, Val<B>)>,
     pub read_guards: Vec<smtlib::Exp<Sym>>,
     pub guard: Option<smtlib::Exp<Sym>>,
     pub initial_registers: HashMap<Name, Val<B>>,
@@ -73,15 +72,21 @@ pub(super) struct AccessLog<B> {
 }
 
 impl<B: BV> AccessLog<B> {
-    /// 发布发生在真实读取处，保证读取先于使用它的 SMT 定义；第二臂复用已发布的同序号读取。
-    /// 计数属于帧快照，死臂/拒绝回滚后不会抑制存活臂的事件。
-    pub fn record_read(&mut self, reg: Name, accessor: Vec<Accessor>, value: Val<B>) -> Result<bool, ExecError> {
+    /// 每个臂在实际读取处缓冲事件，投影时按读取序号复用事件。
+    pub fn record_read(
+        &mut self,
+        reg: Name,
+        accessor: Vec<Accessor>,
+        value: &Val<B>,
+        traced: bool,
+        solver: &mut Solver<B>,
+    ) -> Result<(), ExecError> {
         let cost_scope = cost::Scope::enter(cost::Category::StateMerge);
         let _ = &cost_scope;
         if self.global_state || !self.ordered_events {
             // 内部读取使用当前臂的值；前态足迹按寄存器和字段路径只记录一次。
             if self.writes.modified_regs.contains(&reg) {
-                return Ok(false);
+                return Ok(());
             }
             if let Some(index) = self.reads.iter().position(|(name, path, _)| *name == reg && *path == accessor) {
                 // 内层仅一臂读取后，汇合点之后的读取可以扩大原足迹的条件。
@@ -89,22 +94,20 @@ impl<B: BV> AccessLog<B> {
                     Box::new(self.read_guards[index].clone()),
                     Box::new(self.guard.clone().expect("区域读取必须有臂条件")),
                 );
-                return Ok(false);
+                return Ok(());
             }
         } else if !self.writes.register_write_order.is_empty() {
             return Err(self.reject(SpeculativeRejectReason::RegisterReadAfterWrite));
         }
         let occurrence = self.reads.iter().filter(|(name, path, _)| *name == reg && *path == accessor).count();
-        let published = self.published_reads.iter().filter(|(name, path, _)| *name == reg && *path == accessor).count();
         self.initial_registers.entry(reg).or_insert_with(|| value.clone());
         self.writes.read_regs.insert(reg);
         self.read_guards.push(self.guard.clone().expect("区域读取必须有臂条件"));
-        self.reads.push((reg, accessor.clone(), value.clone()));
-        if occurrence < published {
-            return Ok(false);
+        if traced {
+            solver.add_region_register_read(Event::ReadReg(reg, accessor.clone(), value.clone()), occurrence);
         }
-        self.published_reads.push((reg, accessor, value));
-        Ok(true)
+        self.reads.push((reg, accessor, value.clone()));
+        Ok(())
     }
 
     pub fn reject(&self, reason: SpeculativeRejectReason) -> ExecError {
@@ -191,13 +194,17 @@ pub(super) fn record_read<B: BV>(
     state: &mut LocalState<B>,
     reg: Name,
     accessor: Vec<Accessor>,
-    value: Val<B>,
-) -> Result<bool, ExecError> {
+    value: &Val<B>,
+    solver: &mut Solver<B>,
+) -> Result<(), ExecError> {
     let cost_scope = cost::Scope::enter(cost::Category::StateMerge);
     let _ = &cost_scope;
     match &mut state.speculative_access {
-        Some(log) => log.record_read(reg, accessor, value),
-        None => Ok(true),
+        Some(log) => log.record_read(reg, accessor, value, true, solver),
+        None => {
+            solver.add_event(Event::ReadReg(reg, accessor, value.clone()));
+            Ok(())
+        }
     }
 }
 
@@ -1013,7 +1020,6 @@ pub(super) fn prepare_region_base<'ir, B: BV>(
         cost::make_mut(&mut base.local_state).speculative_access = Some(AccessLog {
             writes: WriteSet::default(),
             reads: Vec::new(),
-            published_reads: Vec::new(),
             read_guards: Vec::new(),
             guard: None,
             initial_registers: HashMap::new(),
@@ -1246,8 +1252,6 @@ pub(super) fn promote_initials<'ir, B: BV>(
     let _ = &cost_scope;
     // 首臂惰性初始化的前置寄存器在另臂复用；无读事件的提升不扩大足迹。
     let access = arm.local_state.speculative_access.as_ref().unwrap();
-    cost::make_mut(&mut base.local_state).speculative_access.as_mut().unwrap().published_reads =
-        access.published_reads.clone();
     for (reg, initial) in &access.initial_registers {
         if base.regs().get_last_if_initialized(*reg).is_none() {
             assert_initial_type(initial, solver);

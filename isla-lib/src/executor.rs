@@ -193,16 +193,15 @@ fn get_id_and_initialize<'state, 'ir, B: BV>(
                     if !for_write {
                         stats::call_census::read(local_state.call_instance, id, value, &shared_state.symtab);
                     }
-                    let publish_read = if !for_write {
+                    if !for_write {
+                        let traced = !shared_state.untraced_registers.contains(&id);
                         match &mut local_state.speculative_access {
-                            Some(access) => access.record_read(id, accessor.to_vec(), value.clone())?,
-                            None => true,
+                            Some(access) => access.record_read(id, accessor.to_vec(), value, traced, solver)?,
+                            None if traced => {
+                                solver.add_event(Event::ReadReg(id, accessor.to_vec(), value.clone()));
+                            }
+                            None => (),
                         }
-                    } else {
-                        false
-                    };
-                    if publish_read && !shared_state.untraced_registers.contains(&id) {
-                        solver.add_event(Event::ReadReg(id, accessor.to_vec(), value.clone()));
                     }
                     Borrowed(value)
                 }
@@ -402,10 +401,7 @@ fn read_register_from_vector<'ir, B: BV>(
             .unwrap()
             .clone();
             stats::call_census::read(local_state.call_instance, regs[i], &value, &shared_state.symtab);
-            let publish = region_merge::record_read(local_state, regs[i], Vec::new(), value.clone())?;
-            if publish {
-                solver.add_event(Event::ReadReg(regs[i], Vec::new(), value.clone()));
-            }
+            region_merge::record_read(local_state, regs[i], Vec::new(), &value, solver)?;
             Ok(value)
         }
         SymbolicIndex(i) => {
@@ -421,10 +417,8 @@ fn read_register_from_vector<'ir, B: BV>(
             .unwrap()
             .clone();
             stats::call_census::read(local_state.call_instance, regs[0], &chain, &shared_state.symtab);
-            if local_state.speculative_access.is_some()
-                && region_merge::record_read(local_state, regs[0], Vec::new(), chain.clone())?
-            {
-                solver.add_event(Event::ReadReg(regs[0], Vec::new(), chain.clone()));
+            if let Some(access) = &mut local_state.speculative_access {
+                access.record_read(regs[0], Vec::new(), &chain, true, solver)?;
             }
             let mut reg_values = vec![chain.clone()];
             for (j, reg) in regs[1..].iter().enumerate() {
@@ -442,10 +436,8 @@ fn read_register_from_vector<'ir, B: BV>(
                 .unwrap()
                 .clone();
                 stats::call_census::read(local_state.call_instance, *reg, &value, &shared_state.symtab);
-                if local_state.speculative_access.is_some()
-                    && region_merge::record_read(local_state, *reg, Vec::new(), value.clone())?
-                {
-                    solver.add_event(Event::ReadReg(*reg, Vec::new(), value.clone()));
+                if let Some(access) = &mut local_state.speculative_access {
+                    access.record_read(*reg, Vec::new(), &value, true, solver)?;
                 }
                 reg_values.push(value.clone());
                 chain = match solver.with_def_attrs(DefAttrs::uninteresting(), |solver| {
@@ -1592,11 +1584,7 @@ fn run_special_primop<'ir, B: BV>(
                     .cloned()
                     .ok_or_else(|| ExecError::Type(format!("reg_deref {:?}", &reg), info))?;
             stats::call_census::read(frame.local_state.call_instance, reg, &value, &shared_state.symtab);
-            let publish =
-                region_merge::record_read(cost::make_mut(&mut frame.local_state), reg, Vec::new(), value.clone())?;
-            if publish {
-                solver.add_event(Event::ReadReg(reg, Vec::new(), value.clone()));
-            }
+            region_merge::record_read(cost::make_mut(&mut frame.local_state), reg, Vec::new(), &value, solver)?;
             assign(tid, loc, value, cost::make_mut(&mut frame.local_state), shared_state, solver, info)?;
         } else {
             return Err(ExecError::Type(format!("reg_deref (not a register) {:?}", &f), info));
@@ -5146,8 +5134,10 @@ mod tests {
                     Instr::End,
                 ]);
                 frame.regs_mut().insert(reg, false, UVal::Init(Val::Bits(B64::new(42, 8))));
-                let state =
-                    TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(enabled));
+                let mut limits = ExecutionLimits::default().with_path_merging(enabled);
+                // 严格模式保留每次读取，默认模式记录去重后的前态足迹。
+                limits.ordered_events = true;
+                let state = TaskState::new().with_execution_limits(limits);
                 let out = Mutex::new(Vec::new());
                 start_single(frame.task(TaskId::fresh(), &state), &shared, &out, &|_, _, result, _, solver, out| {
                     assert!(matches!(result, Ok((Run::Finished(_), _))));

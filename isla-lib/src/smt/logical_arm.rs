@@ -9,6 +9,8 @@ pub(crate) struct LogicalArm(NonZeroUsize);
 struct EffectOwner {
     arm: Option<LogicalArm>,
     cycle: bool,
+    register_read: Option<NonZeroUsize>,
+    discarded: bool,
 }
 
 struct Arm {
@@ -26,7 +28,7 @@ pub(super) struct LogicalArms {
 impl LogicalArms {
     pub(super) fn record_event(&mut self) {
         if !self.arms.is_empty() {
-            self.owners.push(EffectOwner { arm: self.active, cycle: false });
+            self.owners.push(EffectOwner { arm: self.active, ..EffectOwner::default() });
         }
     }
 
@@ -34,6 +36,16 @@ impl LogicalArms {
         if !self.arms.is_empty() {
             self.owners.last_mut().expect("周期计数必须有缓冲事件").cycle = true;
         }
+    }
+
+    pub(super) fn mark_register_read(&mut self, occurrence: usize) {
+        assert!(self.active.is_some(), "区域读取必须属于活动逻辑臂");
+        self.owners.last_mut().expect("区域读取必须有缓冲事件").register_read =
+            Some(NonZeroUsize::new(occurrence.checked_add(1).expect("读取序号溢出")).unwrap());
+    }
+
+    pub(super) fn has_register_reads(&self) -> bool {
+        self.owners.iter().any(|owner| owner.register_read.is_some())
     }
 
     pub(super) fn truncate(&mut self, len: usize) {
@@ -73,9 +85,16 @@ impl LogicalArms {
     }
 
     /// 汇合组可见其成员、成员依赖及共同执行前缀。
-    pub(super) fn group_events(&self, arm: LogicalArm) -> impl Iterator<Item = (bool, bool)> + '_ {
-        let seen = self.reachable(arm, |_, arm, pending| pending.extend(arm.parent));
-        self.owners.iter().map(move |owner| (owner.arm.is_none_or(|id| seen[id.0.get() - 1]), owner.cycle))
+    pub(super) fn group_events(
+        &self,
+        arm: Option<LogicalArm>,
+    ) -> impl Iterator<Item = (bool, bool, Option<NonZeroUsize>)> + '_ {
+        let seen = arm.map(|arm| self.reachable(arm, |_, arm, pending| pending.extend(arm.parent)));
+        self.owners.iter().map(move |owner| {
+            let selected =
+                !owner.discarded && owner.arm.is_none_or(|id| seen.as_ref().is_none_or(|seen| seen[id.0.get() - 1]));
+            (selected, owner.cycle, owner.register_read)
+        })
     }
 }
 
@@ -114,7 +133,7 @@ impl<B: BV> Solver<'_, B> {
     /// 已提交断言受完整守卫保护；保留它们及定义，以供冻结的义务和其它存活记录使用。
     pub(crate) fn discard_logical_arm_effects(&mut self, arm: LogicalArm) {
         assert!(!self.savepoints.is_empty(), "死臂必须在根提交前撤销");
-        let journal = &self.logical_arms;
+        let journal = &mut self.logical_arms;
         assert_eq!(journal.owners.len(), self.transaction_events.len(), "事件归属必须对齐");
         assert_eq!(self.transaction_event_guards.len(), self.transaction_events.len(), "事件条件必须对齐");
         let mut children = vec![Vec::new(); journal.arms.len()];
@@ -132,15 +151,20 @@ impl<B: BV> Solver<'_, B> {
         let remove: Vec<_> = self
             .transaction_events
             .iter()
-            .zip(&journal.owners)
+            .zip(&mut journal.owners)
             .enumerate()
             .map(|(index, (event, owner))| {
-                let drop = !matches!(event, Event::Smt(..)) && owned_by_arm(owner.arm);
-                if drop {
+                if !matches!(event, Event::Smt(..)) && owned_by_arm(owner.arm) {
                     assert!(index >= savepoint, "逻辑臂事件不能越过活动保存点");
+                    if owner.register_read.is_some() {
+                        // 保留原始位置供仍实际读取的臂使用，撤去死臂的读取条件。
+                        owner.discarded = true;
+                        return false;
+                    }
                     removed_cycles += i128::from(owner.cycle);
+                    return true;
                 }
-                drop
+                false
             })
             .collect();
         assert!(removed_cycles <= self.cycles, "撤销的周期不能超过当前计数");

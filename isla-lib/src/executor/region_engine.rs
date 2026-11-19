@@ -926,7 +926,6 @@ fn merge_states<'ir, B: BV>(
         order
     };
     let mut access = lhs.clone();
-    access.published_reads = rhs.published_reads.clone();
     cost::make_mut(&mut merged.local_state).pure_definitions = left.local_state.pure_definitions.clone();
     cost::make_mut(&mut merged.local_state)
         .pure_definitions
