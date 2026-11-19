@@ -23,7 +23,20 @@ pub(super) fn resolve<B: BV>(
     info: SourceLoc,
 ) -> Result<(), ExecError> {
     if let Some(choices) = choices {
-        resolve_value(value, choices, solver, info)?;
+        resolve_value(value, choices, solver, info, false)?;
+    }
+    Ok(())
+}
+
+/// 位宽候选可以交给直接比较和终态读者。其它候选仍按原方式选择。
+pub(super) fn resolve_non_bit_choices<B: BV>(
+    value: &mut Val<B>,
+    choices: &Option<HashMap<Sym, bool>>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<(), ExecError> {
+    if let Some(choices) = choices {
+        resolve_value(value, choices, solver, info, true)?;
     }
     Ok(())
 }
@@ -33,7 +46,12 @@ fn resolve_value<B: BV>(
     choices: &HashMap<Sym, bool>,
     solver: &mut Solver<B>,
     info: SourceLoc,
+    preserve_widths: bool,
 ) -> Result<(), ExecError> {
+    if preserve_widths && matches!(value, Val::Guarded(..)) && crate::primop_util::guarded_bits::is_bits(value, solver)
+    {
+        return Ok(());
+    }
     match value {
         Val::Guarded(guard, values) => {
             let selected = choices
@@ -42,21 +60,21 @@ fn resolve_value<B: BV>(
                 .or_else(|| solver.structural_bool(&smtlib::Exp::Var(*guard)))
                 .ok_or(ExecError::ConcreteChoice(*guard, info))?;
             *value = if selected { values.0.clone() } else { values.1.clone() };
-            resolve_value(value, choices, solver, info)
+            resolve_value(value, choices, solver, info, preserve_widths)
         }
         Val::Struct(fields) | Val::SymbolicCtor(_, fields) => {
             for value in fields.values_mut() {
-                resolve_value(value, choices, solver, info)?;
+                resolve_value(value, choices, solver, info, preserve_widths)?;
             }
             Ok(())
         }
         Val::Vector(values) | Val::List(values) => {
             for value in values {
-                resolve_value(value, choices, solver, info)?;
+                resolve_value(value, choices, solver, info, preserve_widths)?;
             }
             Ok(())
         }
-        Val::Ctor(_, value) => resolve_value(value, choices, solver, info),
+        Val::Ctor(_, value) => resolve_value(value, choices, solver, info, preserve_widths),
         _ => Ok(()),
     }
 }

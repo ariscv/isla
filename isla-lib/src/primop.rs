@@ -1047,8 +1047,13 @@ fn sub_nat<B: BV>(x: Val<B>, y: Val<B>, solver: &mut Solver<B>, info: SourceLoc)
 
 // Bitvector operations
 
-fn length<B: BV>(x: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+pub(crate) fn length<B: BV>(x: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
     match x {
+        Val::Guarded(guard, values) => {
+            let yes = guarded_comparison_arm(guard, length(values.0, solver, info), info)?;
+            let no = guarded_comparison_arm(guard, length(values.1, solver, info), info)?;
+            crate::primop_util::build_ite(guard, &yes, &no, solver, info)
+        }
         Val::Symbolic(v) => match solver.length(v) {
             Some(len) => Ok(Val::I128(i128::from(len))),
             None => Err(ExecError::Type(format!("length (solver cannot determine length) {:?}", &v), info)),
@@ -1062,7 +1067,15 @@ fn length<B: BV>(x: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<V
     }
 }
 
-fn eq_bits<B: BV>(x: Val<B>, y: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+pub(crate) fn eq_bits<B: BV>(
+    x: Val<B>,
+    y: Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    if matches!(x, Val::Guarded(..)) || matches!(y, Val::Guarded(..)) {
+        return compare_guarded(x, y, solver, info, eq_bits);
+    }
     let x_len = length_bits(&x, solver, info)?;
     let y_len = length_bits(&y, solver, info)?;
     if x_len != y_len {
@@ -1076,7 +1089,12 @@ fn eq_bits<B: BV>(x: Val<B>, y: Val<B>, solver: &mut Solver<B>, info: SourceLoc)
     try_concretize_bool_exp(Exp::Eq(Box::new(smt_value(&x, info)?), Box::new(smt_value(&y, info)?)), solver, info)
 }
 
-fn neq_bits<B: BV>(x: Val<B>, y: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+pub(crate) fn neq_bits<B: BV>(
+    x: Val<B>,
+    y: Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
     not_bool(eq_bits(x, y, solver, info)?, solver, info)
 }
 unary_primop_copy!(not_bits, "not_bits".to_string(), Val::Bits, Val::Bits, B::not, Exp::Bvnot, define_bitvector);
@@ -1706,6 +1724,11 @@ fn slice<B: BV>(
     slice_internal(args[0].clone(), args[1].clone(), args[2].clone(), solver, info)
 }
 
+/// Sail 切片用高低端点的差决定结果位宽。
+pub(crate) fn subrange_width(high: Sym, low: Sym) -> Exp<Sym> {
+    Exp::Bvadd(Box::new(Exp::Bvsub(Box::new(Exp::Var(high)), Box::new(Exp::Var(low)))), Box::new(smt_i128(1)))
+}
+
 pub fn subrange_internal<B: BV>(
     bits: Val<B>,
     high: Val<B>,
@@ -1766,13 +1789,7 @@ pub fn subrange_internal<B: BV>(
             )
         }
         (bits, Val::Symbolic(high), Val::Symbolic(low)) => {
-            let width = solver.define_const(
-                Exp::Bvadd(
-                    Box::new(Exp::Bvsub(Box::new(Exp::Var(high)), Box::new(Exp::Var(low)))),
-                    Box::new(smt_i128(1)),
-                ),
-                info,
-            );
+            let width = solver.define_const(subrange_width(high, low), info);
 
             let width = concretize_proven_i128(Val::Symbolic(width), solver, info)?;
             panic_if_negative_concretized_nat("subrange_internal", &width);
@@ -3089,12 +3106,53 @@ fn string_to_i128<B: BV>(s: Val<B>, _: &mut Solver<B>, info: SourceLoc) -> Resul
     }
 }
 
+// 如果某个备选比较会失败，交给当前指令的候选事务保存错误叶。
+fn guarded_comparison_arm<B: BV>(
+    guard: Sym,
+    result: Result<Val<B>, ExecError>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    result.map_err(|error| match error {
+        ExecError::Type(..) | ExecError::SymbolicLength(..) | ExecError::ConcreteChoice(..) => {
+            ExecError::ConcreteChoice(guard, info)
+        }
+        _ => error,
+    })
+}
+
+fn compare_guarded<B: BV>(
+    left: Val<B>,
+    right: Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+    compare: Binary<B>,
+) -> Result<Val<B>, ExecError> {
+    let (guard, yes, no) = match (left, right) {
+        (Val::Guarded(a, left), Val::Guarded(b, right)) if a == b => (a, (left.0, right.0), (left.1, right.1)),
+        (Val::Guarded(guard, values), right) => (guard, (values.0, right.clone()), (values.1, right)),
+        (left, Val::Guarded(guard, values)) => (guard, (left.clone(), values.0), (left, values.1)),
+        _ => unreachable!("比较的至少一个操作数必须有守卫"),
+    };
+    match solver.structural_bool(&Exp::Var(guard)) {
+        Some(true) => compare(yes.0, yes.1, solver, info),
+        Some(false) => compare(no.0, no.1, solver, info),
+        None => {
+            let yes = guarded_comparison_arm(guard, compare(yes.0, yes.1, solver, info), info)?;
+            let no = guarded_comparison_arm(guard, compare(no.0, no.1, solver, info), info)?;
+            crate::primop_util::build_ite(guard, &yes, &no, solver, info)
+        }
+    }
+}
+
 pub fn eq_anything<B: BV>(
     lhs: Val<B>,
     rhs: Val<B>,
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if matches!(lhs, Val::Guarded(..)) || matches!(rhs, Val::Guarded(..)) {
+        return compare_guarded(lhs, rhs, solver, info, eq_anything);
+    }
     if let (Some(left), Some(right)) = (merge_bit_width(&lhs, solver, info)?, merge_bit_width(&rhs, solver, info)?) {
         if left != right {
             return Ok(Val::Bool(false));
@@ -3255,7 +3313,12 @@ pub fn eq_anything<B: BV>(
     }
 }
 
-fn neq_anything<B: BV>(lhs: Val<B>, rhs: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+pub(crate) fn neq_anything<B: BV>(
+    lhs: Val<B>,
+    rhs: Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
     if let (Some(left), Some(right)) = (merge_bit_width(&lhs, solver, info)?, merge_bit_width(&rhs, solver, info)?) {
         if left != right {
             return Ok(Val::Bool(true));

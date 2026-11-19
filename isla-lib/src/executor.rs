@@ -712,8 +712,13 @@ fn eval_exp_with_accessor<'state, 'ir, B: BV>(
             for arg in unevaluated_args {
                 args.push(eval_exp(arg, local_state, shared_state, solver, info)?.into_owned());
             }
+            let resolve = if matches!(op, Op::Eq | Op::Neq) {
+                concrete_values::resolve_non_bit_choices
+            } else {
+                concrete_values::resolve
+            };
             for value in &mut args {
-                concrete_values::resolve(value, &local_state.concrete_choices, solver, info)?;
+                resolve(value, &local_state.concrete_choices, solver, info)?;
             }
             let result = match op {
                 Op::Lt => primop::op_lt(args[0].clone(), args[1].clone(), solver, info),
@@ -2529,7 +2534,11 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 {
                     branch_decision(frame, task_state, SpeculativeRejectReason::Assume)?;
                 }
-                let mut args = symbolic_length::eval_operands([arg], frame, shared_state, solver, *info)?;
+                let mut args = if std::ptr::fn_addr_eq(*f, primop::length::<B> as primop::Unary<B>) {
+                    symbolic_length::eval_operands_before_concrete_choice([arg], frame, shared_state, solver, *info)?
+                } else {
+                    symbolic_length::eval_operands([arg], frame, shared_state, solver, *info)?
+                };
                 assert_eq!(args.len(), 1, "一元算子必须有一个操作数");
                 let arg = args.pop().unwrap();
                 let value = match merge_record::evaluate_primop(
@@ -2588,7 +2597,16 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 {
                     branch_decision(frame, task_state, SpeculativeRejectReason::Assert)?;
                 }
-                let mut args = if std::ptr::fn_addr_eq(*f, primop::eq_string::<B> as primop::Binary<B>) {
+                let compares_bits = [
+                    primop::eq_anything::<B> as primop::Binary<B>,
+                    primop::neq_anything::<B>,
+                    primop::eq_bits::<B>,
+                    primop::neq_bits::<B>,
+                ]
+                .into_iter()
+                .any(|comparison| std::ptr::fn_addr_eq(*f, comparison));
+                let compares_strings = std::ptr::fn_addr_eq(*f, primop::eq_string::<B> as primop::Binary<B>);
+                let mut args = if compares_bits || compares_strings {
                     symbolic_length::eval_operands_before_concrete_choice(
                         [arg1, arg2],
                         frame,
@@ -2599,6 +2617,16 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 } else {
                     symbolic_length::eval_operands([arg1, arg2], frame, shared_state, solver, *info)?
                 };
+                if compares_bits {
+                    for value in &mut args {
+                        concrete_values::resolve_non_bit_choices(
+                            value,
+                            &frame.local_state.concrete_choices,
+                            solver,
+                            *info,
+                        )?;
+                    }
+                }
                 assert_eq!(args.len(), 2, "二元算子必须有两个操作数");
                 let arg2 = args.pop().unwrap();
                 let arg1 = args.pop().unwrap();
@@ -3103,7 +3131,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     };
 
                     if frame.stack_call.is_none() {
-                        concrete_values::resolve(
+                        concrete_values::resolve_non_bit_choices(
                             &mut value,
                             &frame.local_state.concrete_choices,
                             solver,

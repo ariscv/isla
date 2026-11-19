@@ -809,6 +809,8 @@ pub fn symbolic<B: BV>(
     symbolic_from_typedefs(ty, shared_state.typedefs(), solver, info)
 }
 
+pub(crate) mod guarded_bits;
+
 pub fn merge_val<B: BV>(
     cond: Sym,
     val_a: &Val<B>,
@@ -903,7 +905,16 @@ fn merge_val_inner_mode<B: BV, const CONCRETE: bool>(
             return Ok(Val::Symbolic(solver.define_const(expr, info)));
         }
     }
-    if merge_bit_width(val_a, solver, info)? != merge_bit_width(val_b, solver, info)? {
+    let a_width = merge_bit_width(val_a, solver, info)?;
+    let b_width = merge_bit_width(val_b, solver, info)?;
+    if CONCRETE
+        && (a_width != b_width || matches!(val_a, Val::Guarded(..)) || matches!(val_b, Val::Guarded(..)))
+        && guarded_bits::is_bits(val_a, solver)
+        && guarded_bits::is_bits(val_b, solver)
+    {
+        return Ok(if val_a == val_b { val_a.clone() } else { guarded_bits::merge(cond, val_a, val_b, solver, info) });
+    }
+    if a_width != b_width {
         return Err(ExecError::IncompatibleMerge);
     }
     match (val_a, val_b) {

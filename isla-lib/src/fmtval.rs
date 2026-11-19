@@ -199,6 +199,10 @@ impl FmtVal {
             Val::MixedBits(segments) => Self::from_segments(segments, model)?,
             Val::Struct(fields) => Self::from_single_field_struct(fields, model)?,
             Val::Ctor(_, inner) => Some(Self::from_val(inner, model)?),
+            Val::Guarded(guard, values) => {
+                let selected = model.select_guarded(*guard, values)?;
+                Some(Self::from_val(selected, model)?)
+            }
             _ => None,
         };
 

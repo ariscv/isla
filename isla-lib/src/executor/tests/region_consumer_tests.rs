@@ -95,7 +95,7 @@ fn region_consumer_mixed_integer_and_strict_operand_read() {
 }
 
 #[test]
-fn region_consumer_known_domain_joins_and_different_widths_stay_local() {
+fn region_consumer_known_domain_joins_native_widths() {
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     for strategy in strategies() {
         for no_smt in [false, true] {
@@ -111,7 +111,7 @@ fn region_consumer_known_domain_joins_and_different_widths_stay_local() {
                     ),
                     1,
                 ),
-                (Instr::PrimopUnary(Loc::Id(RETURN), primop::unary_primops()["zeros"], width, info()), 4),
+                (Instr::PrimopUnary(Loc::Id(RETURN), primop::unary_primops()["zeros"], width, info()), 1),
             ];
             for (consumer, expected) in consumers {
                 let mut config = Config::new();

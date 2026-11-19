@@ -160,6 +160,46 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
     if !finite_enabled && solver.no_smt() {
         return Err(ExecError::Smt(solver.no_smt_cannot_continue(op, info)));
     }
+    // 两个端点都可继续保持符号时，按两者的差拆分即可。只有原语已经
+    // 检查过联合端点范围，才会以 subrange_internal 报告长度重试。
+    if op == "subrange_internal"
+        && finite_enabled
+        && consumer.is_some()
+        && task_state.execution_limits.as_ref().is_some_and(|limits| limits.merge_concrete_values)
+        && super::region_merge::policy(frame, task_state, info) != crate::config::MergeMode::Off
+    {
+        if let [bits, Val::Symbolic(high), Val::Symbolic(low)] = operands {
+            let width = solver.define_const(primop::subrange_width(*high, *low), info);
+            let source_width = crate::primop_util::length_bits(bits, solver, info)?;
+            let valid = 1..=i128::from(source_width);
+            let finite = match solver.finite_domain(width) {
+                FiniteDomain::Known(values) | FiniteDomain::Bounded(values) => finite_values_in_bounds(&values, &valid),
+                FiniteDomain::Unknown => false,
+            };
+            if finite {
+                match fork_symbolic_value(
+                    width,
+                    Some(valid),
+                    consumer,
+                    operands,
+                    info,
+                    task_id,
+                    task_fraction,
+                    stop_conditions,
+                    fork_sink,
+                    frame,
+                    task_state,
+                    solver,
+                    shared,
+                )? {
+                    ValueRetry::Forked => return Ok(true),
+                    ValueRetry::Dead => return Ok(false),
+                    ValueRetry::Unique => (),
+                }
+            }
+        }
+    }
+
     // 只枚举消费者必须具体化的参数：长度、索引和字符串转换的输入。
     // 向量元素及其余位向量数据仍然保留符号关系。
     let indices: &[usize] = match op {
@@ -500,6 +540,17 @@ pub(super) enum ValueRetry {
     Dead,
 }
 
+fn finite_values_in_bounds(values: &[smtlib::Exp<crate::smt::Sym>], bounds: &std::ops::RangeInclusive<i128>) -> bool {
+    values.iter().all(|value| {
+        let length = match value {
+            smtlib::Exp::Bits64(bits) => Some(i128::from(bits.signed())),
+            smtlib::Exp::Bits(bits) => primop::i128_from_model_bits(bits),
+            _ => unreachable!("有限域只含位向量常量"),
+        };
+        length.is_some_and(|length| bounds.contains(&length))
+    })
+}
+
 /// 将符号值拆为当前候选和剩余候选；唯一值不需要分叉。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
@@ -533,18 +584,7 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
     let values = match &domain {
         FiniteDomain::Known(values) => Some(values),
         // 未认证的候选也可能被执行。仅在所有候选满足原语边界时拆分。
-        FiniteDomain::Bounded(values)
-            if safe_bounds.is_some_and(|bounds| {
-                values.iter().all(|value| {
-                    let length = match value {
-                        Bits64(bits) => Some(i128::from(bits.signed())),
-                        Bits(bits) => primop::i128_from_model_bits(bits),
-                        _ => unreachable!("有限域只含位向量常量"),
-                    };
-                    length.is_some_and(|length| bounds.contains(&length))
-                })
-            }) =>
-        {
+        FiniteDomain::Bounded(values) if safe_bounds.is_some_and(|bounds| finite_values_in_bounds(values, &bounds)) => {
             Some(values)
         }
         _ => None,

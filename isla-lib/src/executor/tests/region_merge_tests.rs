@@ -6145,3 +6145,6 @@ fn region_merge_checks_callee_state_effect_when_reached() {
         }
     }
 }
+
+#[path = "region_union_width_tests.rs"]
+mod region_union_width_tests;

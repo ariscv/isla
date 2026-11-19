@@ -85,6 +85,11 @@ fn materialized<B: BV>(value: &Val<B>, model: &mut Model<B>, shared: &SharedStat
             Ok(if matches!(value, Val::Vector(_)) { json!({"vector":values}) } else { json!({"list":values}) })
         }
         Val::SymbolicCtor(..) => materialized(&model.get_val(value)?, model, shared),
+        Val::Guarded(guard, values) => {
+            let selected = model.select_guarded(*guard, values)?;
+            materialized(selected, model, shared)
+        }
+        Val::Poison => Err(ExecError::Type("样本包含活动的 Poison".into(), SourceLoc::unknown())),
         _ => Ok(encode(value, shared)),
     }
 }
@@ -98,7 +103,10 @@ fn decode<B: BV>(value: &Value, shared: &SharedState<B>) -> Val<B> {
         "bool" => Val::Bool(payload.as_bool().unwrap()),
         "bits" => {
             let text = payload.as_str().unwrap();
-            assert!(!text.is_empty() && text.len() <= B::MAX_WIDTH as usize, "样本位宽超出执行器能力");
+            assert!(text.len() <= B::MAX_WIDTH as usize, "样本位宽超出执行器能力");
+            if text.is_empty() {
+                return Val::Bits(B::zeros(0));
+            }
             Val::Bits(text.bytes().fold(B::zeros(text.len() as u32), |bits, bit| {
                 assert!(bit == b'0' || bit == b'1');
                 (bits << B::new(1, text.len() as u32)) | B::new(u64::from(bit == b'1'), text.len() as u32)
@@ -200,13 +208,31 @@ fn equal<B: BV>(
     shared: &SharedState<B>,
     solver: &mut Solver<B>,
 ) -> Result<Exp<Sym>, ExecError> {
+    if let Val::Guarded(guard, values) = left {
+        return Ok(Exp::Ite(
+            Box::new(Exp::Var(*guard)),
+            Box::new(equal(&values.0, right, shared, solver)?),
+            Box::new(equal(&values.1, right, shared, solver)?),
+        )
+        .eval());
+    }
+    if matches!(left, Val::Poison) {
+        return Ok(Exp::Bool(false));
+    }
     if let Some(bits) = right.get("bits") {
         if let Val::Bits(value) = left {
             return Ok(Exp::Bool(concrete_bits(*value) == *right));
         }
-        let bits =
-            crate::bitvector::bit_vector_from_str(&format!("#b{}", bits.as_str().unwrap())).expect("样本位串无效");
-        return Ok(Exp::Eq(Box::new(smt_value(left, SourceLoc::unknown())?), Box::new(Exp::Bits(bits))));
+        let info = SourceLoc::unknown();
+        let bits = bits.as_str().unwrap();
+        if crate::primop_util::merge_bit_width(left, solver, info)?.map(|width| width as usize) != Some(bits.len()) {
+            return Ok(Exp::Bool(false));
+        }
+        if bits.is_empty() {
+            return Ok(Exp::Bool(true));
+        }
+        let bits = crate::bitvector::bit_vector_from_str(&format!("#b{bits}")).expect("样本位串无效");
+        return Ok(Exp::Eq(Box::new(smt_value(left, info)?), Box::new(Exp::Bits(bits))));
     }
     match left {
         Val::Struct(fields) if right.get("struct").is_some() => {
