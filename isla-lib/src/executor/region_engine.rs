@@ -253,16 +253,22 @@ pub(super) fn publish_committed_records<B: BV>(
 /// 同一循环的退出前沿可能有多个兼容组。一次折叠失败只留下原两个前沿。
 pub(super) fn append_loop_exit<'ir, B: BV>(
     exits: &mut Vec<LocalFrame<'ir, B>>,
+    history_ids: &mut Option<HashSet<usize>>,
     next: LocalFrame<'ir, B>,
     solver: &mut Solver<B>,
-    fold: impl FnOnce(LocalFrame<'ir, B>, LocalFrame<'ir, B>, &mut Solver<B>) -> Result<LocalFrame<'ir, B>, ExecError>,
+    fold: impl FnOnce(
+        LocalFrame<'ir, B>,
+        LocalFrame<'ir, B>,
+        &mut Option<HashSet<usize>>,
+        &mut Solver<B>,
+    ) -> Result<LocalFrame<'ir, B>, ExecError>,
 ) -> Result<(), ExecError> {
     let Some(previous) = exits.pop() else {
         exits.push(next);
         return Ok(());
     };
     let tx = solver.start_transaction();
-    match fold(previous.clone(), next.clone(), solver) {
+    match fold(previous.clone(), next.clone(), history_ids, solver) {
         Ok(frame) => {
             solver.commit_transaction();
             exits.push(frame);
@@ -280,6 +286,7 @@ pub(super) fn append_loop_exit<'ir, B: BV>(
             }
             charge_fragment_growth(&next, 1)?;
             exits.extend([previous, next]);
+            *history_ids = None;
             Ok(())
         }
     }
@@ -353,12 +360,21 @@ pub(super) fn finish_arrivals<'ir, B: BV>(
         let mut sides = Vec::with_capacity(2);
         for side in arms {
             let mut combined = None;
+            let mut history_ids = None;
             for fragment in side {
                 combined = Some(match combined {
                     None => fragment,
-                    Some(previous) => {
-                        fold_exit_frontiers(previous, fragment, base, region, state, shared, solver, info)?
-                    }
+                    Some(previous) => fold_exit_frontiers(
+                        previous,
+                        fragment,
+                        &mut history_ids,
+                        base,
+                        region,
+                        state,
+                        shared,
+                        solver,
+                        info,
+                    )?,
                 });
             }
             sides.push(combined);
@@ -422,21 +438,16 @@ pub(super) fn record_projected_arrival<B: BV>(
     let guard = fragment.local_state.speculative_access.as_ref().unwrap().guard.as_ref().unwrap();
     let selector = solver.define_const(guard.clone(), info);
     let id = super::region_merge::next_region_record();
-    attach_child_records(fragment, base.region_merge_records.len(), id, "then");
+    let prefix = base.region_merge_records.len();
+    attach_child_records(fragment, prefix, id, "then");
     record_single_arrival(fragment, base, region, id, selector, info);
+    fragment.region_merge_records.mark_closed(prefix);
     cost::make_mut(&mut fragment.local_state).speculative_access.as_mut().unwrap().guard =
         Some(smtlib::Exp::Var(selector));
 }
 
 fn attach_child_records<B: BV>(arm: &mut LocalFrame<B>, start: usize, parent: usize, side: &'static str) {
-    arm.region_merge_records.edit_suffix(start, |records| {
-        for record in records {
-            if record.parent_record.is_none() {
-                record.parent_record = Some(parent);
-                record.arm = side;
-            }
-        }
-    });
+    arm.region_merge_records.attach_roots(start, parent, side);
 }
 
 fn record_single_arrival<B: BV>(
@@ -494,11 +505,12 @@ pub(super) fn finish_region<'ir, B: BV>(
     let cost_scope = cost::Scope::enter(cost::Category::StateMerge);
     let _ = &cost_scope;
     let depth = base.region_execution.as_ref().unwrap().depth;
+    let prefix = frame.region_merge_records.len();
     // 只修改本次推演产生的根记录。历史前缀和已连接的后代保持原上下文。
     for (index, arm) in arms.iter_mut().enumerate() {
         if let Some(arm) = arm {
             let side = if index == 0 { "then" } else { "else" };
-            attach_child_records(arm, frame.region_merge_records.len(), record_id, side);
+            attach_child_records(arm, prefix, record_id, side);
         }
     }
     let right = arms.pop().unwrap();
@@ -522,6 +534,7 @@ pub(super) fn finish_region<'ir, B: BV>(
                 single_arm_reads: Vec::new().into(),
                 memory_reads: Vec::new().into(),
             });
+            frame.region_merge_records.mark_closed(prefix);
             return Ok(RegionResult::Dead);
         }
         (Some(mut arm), None) | (None, Some(mut arm)) => {
@@ -564,6 +577,7 @@ pub(super) fn finish_region<'ir, B: BV>(
     }
     solver.add_event(Event::Fork(0, condition, 0, info));
     solver.add_event(Event::Merge(0, 2, info));
+    merged.region_merge_records.mark_closed(prefix);
     *frame = merged;
     Ok(RegionResult::Merged)
 }

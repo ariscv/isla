@@ -467,10 +467,13 @@ fn loop_iteration_frontiers_finish_sixty_four_rounds_in_one_region() {
 fn loop_iteration_frontiers_finish_sixty_four_rounds_in_one_region_body() {
     let shared = empty_shared_state();
     let off = scan_paths(&shared, 64, 128, false, None);
+    crate::executor::region_merge::FOLD_HISTORY_ID_VISITS.set(0);
     let on = scan_paths(&shared, 64, 128, true, None);
     equivalent_scalar_paths(&off, &on, 64);
     assert_eq!(on.len(), 1, "累计返回与继续前沿应逐轮收敛，完整函数只有一个合并状态");
     let records = &on[0].records;
+    let visits = crate::executor::region_merge::FOLD_HISTORY_ID_VISITS.get();
+    assert!(visits <= records.len(), "累计侧 ID 只应登记一次：{visits} 次访问，{} 条记录", records.len());
     let ids: std::collections::HashSet<_> = records.iter().map(|r| r.record_id).collect();
     assert_eq!(ids.len(), records.len(), "共享前缀在不同条件下出现时必须保持记录ID唯一");
     assert!(records.iter().all(|r| r.parent_record.is_none_or(|id| ids.contains(&id))), "任何父记录都必须存在");
