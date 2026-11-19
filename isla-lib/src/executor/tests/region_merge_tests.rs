@@ -14,6 +14,9 @@ mod loop_round_review_tests;
 #[path = "region_global_state_tests.rs"]
 mod global_state_tests;
 
+#[path = "region_callee_write_tests.rs"]
+mod callee_write_tests;
+
 #[path = "region_poison_slots_tests.rs"]
 mod poison_slots_tests;
 
