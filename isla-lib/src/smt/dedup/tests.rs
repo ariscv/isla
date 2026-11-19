@@ -38,6 +38,30 @@ fn dedup_assertion_prunes_dead_branch_before_poison() {
     assert_eq!(s.check_sat_with_for_branch(&Var(x), info, true), Some(Sat));
 }
 #[test]
+fn dedup_deferred_branch_discards_structurally_false_condition() {
+    configure_tastic(Tactic::Qfaufbv);
+    let info = SourceLoc::unknown();
+    for no_smt in [false, true] {
+        let mut config = Config::new();
+        config.solver_options.no_smt = no_smt;
+        config.solver_options.finite_domain_enumeration = true;
+        let context = Context::new(config);
+        let mut solver = Solver::<B64>::new(&context);
+        let address_matches = solver.declare_const(Ty::Bool, info);
+        // 地址是符号值，当前调用的访问宽度为 4 字节。8 字节分支的两臂都为假。
+        let wrong_width = solver
+            .define_const(Ite(Box::new(Var(address_matches)), Box::new(Bool(false)), Box::new(Bool(false))), info);
+        reset_path_smt_stats();
+        solver.with_deferred_region_queries(|solver| {
+            assert_eq!(solver.check_sat_with_for_branch(&Var(wrong_width), info, true), Some(Unsat));
+            assert_eq!(solver.check_sat_with_for_branch(&Not(Box::new(Var(wrong_width))), info, true), None);
+            assert_eq!(solver.check_sat_with_for_branch(&Var(address_matches), info, true), None);
+        });
+        assert_eq!(path_smt_stats().solver_checks, 0, "结构不可能的分支不用求解，其他分支仍待认证");
+    }
+}
+
+#[test]
 fn dedup_definition_arm_close_does_not_require_model() {
     configure_tastic(Tactic::Qfaufbv);
     let ctx = Context::new(Config::new());
@@ -481,7 +505,9 @@ fn unify_characterization_unknown_branch_is_a_guarded_candidate() {
         cfg.solver_options.no_smt = no_smt;
         let ctx = Context::new(cfg);
         let mut s = Solver::<B64>::new(&ctx);
-        let x = s.define_const(Bool(false), info);
+        let x = s.declare_const(Ty::Bool, info);
+        // 这里依赖路径断言，单看分支表达式无法证明为假。
+        s.assert(Not(Box::new(Var(x))));
         reset_path_smt_stats();
         assert_eq!(s.check_sat_with_for_branch(&Var(x), info, false), if no_smt { None } else { Some(Unsat) });
         if no_smt {

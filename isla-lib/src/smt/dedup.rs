@@ -42,12 +42,18 @@ impl<B: BV> Solver<'_, B> {
         info: SourceLoc,
         speculative: bool,
     ) -> Option<SmtResult> {
+        let skip_query = self.deferred_region_queries || self.branch_checks_skipped();
+        // 延后或关闭查询时也要排除表达式恒假的分支。恒真只说明本条件，
+        // 当前路径仍须由原有的出口检查或认证入口判定。
+        if skip_query && self.translate_exp(exp).structural_bool() == Some(false) {
+            return Some(Unsat);
+        }
         if self.finite_domain_enabled() && self.finite_domain_bool(exp) == Some(false) {
             self.note_finite_domain_use("finite_domain_dead_condition", info);
             return Some(Unsat);
         }
         // 这里只回答可行性，不承诺交付模型。普通查询与最终取值仍用原接口。
-        if self.deferred_region_queries || self.branch_checks_skipped() {
+        if skip_query {
             if self.deferred_region_queries {
                 self.note_deferred_mandatory_query("branch_feasibility", info);
             }
