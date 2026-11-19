@@ -173,10 +173,15 @@ fn primitive_gf_symbolic_and_mixed_match_original_loop() -> Result<(), ExecError
                     info,
                 );
             }
-            assert_eq!(
-                solver.check_sat_with(&Exp::Neq(Box::new(smt_value(&result, info)?), Box::new(Exp::Var(z))), info),
-                SmtResult::Unsat
-            );
+            let actual = smt_value(&result, info)?;
+            for output in 0..width {
+                let lane = |value| Box::new(Exp::Extract(output, output, Box::new(value)));
+                assert_eq!(
+                    solver.check_sat_with(&Exp::Neq(lane(actual.clone()), lane(Exp::Var(z))), info),
+                    SmtResult::Unsat,
+                    "GF W={width}, mode={mode}, bit={output}"
+                );
+            }
         }
     }
     Ok(())
