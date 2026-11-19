@@ -56,7 +56,63 @@ pub struct Word {
     pub expected_value: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
+pub struct Construction {
+    pub walk: Vec<WalkSlot>,
+    pub stop: StopReason,
+    pub data: Option<DataCheck>,
+    pub bytes: Vec<ByteOrigin>,
+    pub undetermined: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WalkSlot {
+    pub level: usize,
+    pub slot_pa: u64,
+    pub pte_value: Option<u64>,
+    pub source: SlotSource,
+    /// 下一级表的物理基址。
+    pub next: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SlotSource {
+    Solved,
+    Missing,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum StopReason {
+    Leaf { level: usize, pa: u64 },
+    Invalid { level: usize },
+    NonCanonical,
+    MissingBytes { level: usize, slot_pa: u64 },
+    HoleExpectedFault,
+    NoTranslation,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DataCheck {
+    pub va: u64,
+    pub leaf_pa: u64,
+    pub width: u64,
+    pub expected_bytes_match: Option<bool>,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct ByteOrigin {
+    pub address: u64,
+    pub solved: u8,
+    pub unknown_old_filled: u8,
+    pub zero_padded: u8,
+    pub decoy: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instruction_fetch: Option<u8>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct Generated {
     pub registers: BTreeMap<String, u64>,
     pub satp: u64,
@@ -67,6 +123,7 @@ pub struct Generated {
     pub pte_addresses: Vec<u64>,
     pub assembly: String,
     pub linker: String,
+    pub construction: Construction,
 }
 
 #[derive(Debug, Serialize)]
@@ -77,7 +134,7 @@ pub struct Built {
 }
 
 pub fn generate(sample: &Sample, platform: &Platform, mode: EntryMode) -> Result<Generated, String> {
-    let mut generated = sample::prepare(sample, platform, mode)?;
+    let mut generated = sample::prepare(sample, platform, mode).map_err(sample::PreparationError::into_detail)?;
     let mut entry = format!(
         "    li t0, {:#x}\n    csrw satp, t0\n    sfence.vma x0, x0\n    li t0, {:#x}\n    csrw mscratch, t0\n",
         generated.satp, generated.status
