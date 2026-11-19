@@ -501,6 +501,13 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
             let bounds = if finite_enabled || consumer.is_some() {
                 use crate::primop_util::length_bits;
                 match (op, index, operands) {
+                    ("zeros" | "ones", _, _) => {
+                        // 位宽定义本身须保证自然数范围，独立于待认证的前缀。
+                        let width = solver.length(sym).expect("位宽参数必须为位向量");
+                        let max = if width > 32 { u64::from(u32::MAX) } else { (1u64 << (width - 1)) - 1 };
+                        let safe = Bvule(Box::new(Var(sym)), Box::new(smtlib::bits64(max, width)));
+                        (solver.structural_bool(&safe) == Some(true)).then_some(0..=i128::from(max))
+                    }
                     ("slice_internal", _, _) => Some(0..=i128::from(u32::MAX)),
                     ("vector_access" | "vector_update", 1, [Val::Vector(elements), ..]) => {
                         Some(0..=i128::try_from(elements.len()).unwrap() - 1)

@@ -129,3 +129,27 @@ fn region_slice_endpoints_keep_eight_guards_and_join() {
         }
     }
 }
+
+#[test]
+fn finite_domain_width_proved_safe_by_its_definition() {
+    use super::symbolic_finite_domain_tests::run_length_consumer;
+    use smtlib::Exp::{Bvule, Ite, Var};
+
+    for no_smt in [true, false] {
+        let (results, queries) = run_length_consumer(no_smt, true, |solver, unrelated, variable| {
+            let mode = solver.declare_const(smtlib::Ty::Bool, info());
+            solver.assert(Bvule(Box::new(Var(unrelated)), Box::new(smtlib::bits64(100, 64))));
+            let width = solver.define_const(
+                Ite(Box::new(Var(mode)), Box::new(smtlib::bits64(2, 128)), Box::new(smtlib::bits64(3, 128))),
+                info(),
+            );
+            (width, Instr::PrimopUnary(Loc::Id(RETURN), primop::unary_primops()["zeros"], Exp::Id(variable), info()))
+        });
+        let mut widths: Vec<_> = results.into_iter().map(|result| result.unwrap().0).collect();
+        widths.sort_unstable();
+        assert_eq!(widths, [2, 3]);
+        if no_smt {
+            assert_eq!(queries, 0);
+        }
+    }
+}

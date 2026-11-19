@@ -16,7 +16,7 @@ fn lengths(
     })
 }
 
-fn run_length_consumer(
+pub(super) fn run_length_consumer(
     no_smt: bool,
     enabled: bool,
     consumer: impl FnOnce(&mut Solver<B64>, Sym, Name) -> (Sym, Instr<Name, B64>),
