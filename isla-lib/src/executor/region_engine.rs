@@ -640,7 +640,7 @@ fn diagnose_slot<B: BV>(
     failure: Option<diagnostics::Failure>,
     error: Option<&ExecError>,
     shared: &SharedState<B>,
-    solver: &Solver<B>,
+    solver: &dyn MergeTerms<B>,
 ) {
     use serde_json::json;
     let original = match space {
@@ -850,7 +850,7 @@ fn prepare_state<'ir, B: BV>(
                 }
             }
             let (Some(UVal::Init(a)), Some(UVal::Init(b))) = (va.as_deref(), vb.as_deref()) else {
-                if let Some(solver) = solver.diagnostics() {
+                if diagnostics::enabled() {
                     diagnose_slot(
                         base,
                         region,
@@ -872,7 +872,7 @@ fn prepare_state<'ir, B: BV>(
             register_value_enums(b, &shared.type_info, solver);
             // 帧内普通Sail整数已固定为128位表示，可沿用通用ITE承载计数数据。
             // 机器整数、寄存器及复合载荷仍走严格合并，保持长度／位宽与载荷边界。
-            let mut value_trace = solver.diagnostics().map(|_| diagnostics::ValueTrace::start());
+            let mut value_trace = diagnostics::enabled().then(diagnostics::ValueTrace::start);
             let value = match (a, b) {
                 (Val::I128(_), Val::I128(_)) => build_ite_terms(condition, a, b, solver, info),
                 _ if state.execution_limits.as_ref().is_some_and(|limits| limits.merge_concrete_values) => {
@@ -881,9 +881,7 @@ fn prepare_state<'ir, B: BV>(
                 _ => merge_val_mode::<B, false>(condition, a, b, solver, info),
             }
             .map_err(|error| {
-                if let Some(solver) =
-                    solver.diagnostics().filter(|_| !matches!(error, ExecError::Smt(_) | ExecError::Timeout))
-                {
+                if diagnostics::enabled() && !matches!(error, ExecError::Smt(_) | ExecError::Timeout) {
                     diagnose_slot(
                         base,
                         region,
@@ -958,7 +956,7 @@ fn prepare_state<'ir, B: BV>(
             let b = b.or(initial.as_ref()).unwrap();
             register_value_enums(a, &shared.type_info, solver);
             register_value_enums(b, &shared.type_info, solver);
-            let mut value_trace = solver.diagnostics().map(|_| diagnostics::ValueTrace::start());
+            let mut value_trace = diagnostics::enabled().then(diagnostics::ValueTrace::start);
             let merge = if state.execution_limits.as_ref().is_some_and(|limits| limits.merge_concrete_values)
                 && (matches!(a, Val::MixedBits(_)) || matches!(b, Val::MixedBits(_)))
             {
@@ -967,9 +965,7 @@ fn prepare_state<'ir, B: BV>(
                 merge_val_mode::<B, false>
             };
             merge(condition, a, b, solver, info).map_err(|error| {
-                if let Some(solver) =
-                    solver.diagnostics().filter(|_| !matches!(error, ExecError::Smt(_) | ExecError::Timeout))
-                {
+                if diagnostics::enabled() && !matches!(error, ExecError::Smt(_) | ExecError::Timeout) {
                     let declared = shared.registers.get(reg).expect("诊断寄存器必须有声明");
                     let raw_a = left
                         .regs()

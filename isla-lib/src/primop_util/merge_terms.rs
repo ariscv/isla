@@ -12,7 +12,6 @@ pub(crate) trait MergeTerms<B: BV> {
     fn assume_reg(&mut self, reg: Name, value: Val<B>);
     fn structural_bool(&self, exp: &Exp<Sym>) -> Option<bool>;
     fn record_guarded_value(&mut self);
-    fn diagnostics(&self) -> Option<&Solver<'_, B>>;
 
     fn expression_sort(&self, exp: &Exp<Sym>) -> Option<smtlib::Ty> {
         use smtlib::{Exp::*, Ty};
@@ -98,9 +97,5 @@ impl<B: BV> MergeTerms<B> for Solver<'_, B> {
 
     fn record_guarded_value(&mut self) {
         crate::executor::concrete_values::created();
-    }
-
-    fn diagnostics(&self) -> Option<&Solver<'_, B>> {
-        crate::executor::stats::merge_diagnostics::enabled().then_some(self)
     }
 }

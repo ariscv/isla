@@ -188,7 +188,12 @@ pub(crate) fn with_swapped<T>(action: impl FnOnce() -> T) -> T {
 }
 
 /// 首个错误在原递归返回处保存；外层错误映射不能覆盖叶子位置。
-pub(crate) fn failed<B: BV>(left: &Val<B>, right: &Val<B>, solver: &Solver<B>, error: &ExecError) {
+pub(crate) fn failed<B: BV>(
+    left: &Val<B>,
+    right: &Val<B>,
+    solver: &dyn crate::primop_util::merge_terms::MergeTerms<B>,
+    error: &ExecError,
+) {
     if !trace_enabled() {
         return;
     }
@@ -255,7 +260,7 @@ fn sort_name(sort: &smtlib::Ty) -> String {
         _ => bounded_debug(sort, 64),
     }
 }
-fn shape<B: BV>(value: &Val<B>, solver: &Solver<B>) -> Value {
+fn shape<B: BV>(value: &Val<B>, solver: &dyn crate::primop_util::merge_terms::MergeTerms<B>) -> Value {
     let kind = match value {
         Val::Guarded(..) => "Guarded",
         Val::Symbolic(_) => "Symbolic",
@@ -279,7 +284,7 @@ fn shape<B: BV>(value: &Val<B>, solver: &Solver<B>) -> Value {
     match value {
         Val::Symbolic(sym) => {
             result["symbol"] = json!(sym.id);
-            if let Some(sort) = solver.scalar_sort(*sym) {
+            if let Some(sort) = solver.sort(*sym) {
                 result["sort"] = json!(sort_name(&sort));
                 if let smtlib::Ty::BitVec(n) = sort {
                     result["width"] = json!(n);
@@ -309,7 +314,7 @@ fn shape<B: BV>(value: &Val<B>, solver: &Solver<B>) -> Value {
             for part in parts {
                 let n = match part {
                     BitsSegment::Concrete(bits) => Some(bits.len()),
-                    BitsSegment::Symbolic(sym) => match solver.scalar_sort(*sym) {
+                    BitsSegment::Symbolic(sym) => match solver.sort(*sym) {
                         Some(smtlib::Ty::BitVec(n)) => Some(n),
                         _ => None,
                     },
@@ -417,7 +422,11 @@ impl<'a, B> RawValue<'a, B> {
         matches!(self, Self::Missing)
     }
 }
-pub(crate) fn describe_raw<B: BV>(value: RawValue<B>, solver: &Solver<B>, symtab: &Symtab) -> Value {
+pub(crate) fn describe_raw<B: BV>(
+    value: RawValue<B>,
+    solver: &dyn crate::primop_util::merge_terms::MergeTerms<B>,
+    symtab: &Symtab,
+) -> Value {
     match value {
         RawValue::Missing => json!({"raw":"Missing"}),
         RawValue::Uninit(ty) => json!({"raw":"Uninit","decl_type":type_string(ty,symtab)}),
@@ -425,10 +434,18 @@ pub(crate) fn describe_raw<B: BV>(value: RawValue<B>, solver: &Solver<B>, symtab
     }
 }
 #[cfg(test)]
-pub(crate) fn describe_uval<B: BV>(value: Option<&UVal<B>>, solver: &Solver<B>, symtab: &Symtab) -> Value {
+pub(crate) fn describe_uval<B: BV>(
+    value: Option<&UVal<B>>,
+    solver: &dyn crate::primop_util::merge_terms::MergeTerms<B>,
+    symtab: &Symtab,
+) -> Value {
     describe_raw(RawValue::from_uval(value), solver, symtab)
 }
-pub(crate) fn describe_value<B: BV>(value: Option<&Val<B>>, solver: &Solver<B>, symtab: &Symtab) -> Value {
+pub(crate) fn describe_value<B: BV>(
+    value: Option<&Val<B>>,
+    solver: &dyn crate::primop_util::merge_terms::MergeTerms<B>,
+    symtab: &Symtab,
+) -> Value {
     match value {
         Some(value) => decode_shape(shape(value, solver), symtab),
         None => Value::Null,

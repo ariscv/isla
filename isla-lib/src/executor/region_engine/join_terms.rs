@@ -135,8 +135,4 @@ impl<B: BV> MergeTerms<B> for Terms<'_, '_, B> {
     fn record_guarded_value(&mut self) {
         self.operations.push(Operation::GuardedValue);
     }
-
-    fn diagnostics(&self) -> Option<&Solver<'_, B>> {
-        None
-    }
 }

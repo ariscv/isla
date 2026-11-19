@@ -394,7 +394,7 @@ fn build_ite_with<B: BV>(
     merge_payload: fn(Sym, &Val<B>, &Val<B>, &mut dyn MergeTerms<B>, SourceLoc) -> Result<Val<B>, ExecError>,
 ) -> Result<Val<B>, ExecError> {
     let result = build_ite_with_inner(b, lhs, rhs, solver, info, merge_payload);
-    if let (Err(error), Some(solver)) = (&result, solver.diagnostics()) {
+    if let Err(error) = &result {
         crate::executor::stats::merge_diagnostics::failed(lhs, rhs, solver, error);
     }
     result
@@ -909,7 +909,7 @@ pub(crate) fn merge_val_mode<B: BV, const CONCRETE: bool>(
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
     let result = merge_val_inner_mode::<B, CONCRETE>(cond, a, b, solver, info);
-    if let (Err(error), Some(solver)) = (&result, solver.diagnostics()) {
+    if let Err(error) = &result {
         crate::executor::stats::merge_diagnostics::failed(a, b, solver, error);
     }
     result
