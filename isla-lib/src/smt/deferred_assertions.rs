@@ -147,22 +147,12 @@ impl<B: BV> Solver<'_, B> {
         serde_json::json!({"definition_events":definitions,"definition_expression_nodes":nodes,"assertion_expression_nodes":assertions,"obligations":self.deferred_assertions.as_ref().map_or(0,|s|s.obligations.len())})
     }
 
-    /// 若继续前沿整体死亡，原保存点的聚合义务随回滚清除。
-    /// 用错误点冻结的前缀重查，防止用剩余正常域排除可达错误。
-    pub(crate) fn check_rolled_back_arm_error(
-        &self,
-        guard: Sym,
-        point: &Checkpoint<B>,
-        info: SourceLoc,
-    ) -> Option<SmtResult> {
+    /// 使用失败点的前缀认证错误，后续正常域的约束不参与检查。
+    pub(crate) fn check_arm_error(&self, guard: Sym, point: &Checkpoint<B>, info: SourceLoc) -> Option<SmtResult> {
         if !self.validates_candidates() {
             return None;
         }
-        if self.decls.contains_key(&guard) {
-            Some(Unsat)
-        } else {
-            Solver::from_checkpoint(self.ctx, point.clone()).check_candidate_sat(info)
-        }
+        Solver::from_checkpoint(self.ctx, point.clone()).check_candidate_sat_with(&Exp::Var(guard), info)
     }
 
     pub(crate) fn check_deferred_assertions(&mut self, info: SourceLoc) -> Option<SmtResult> {

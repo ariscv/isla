@@ -16,19 +16,15 @@ mod consumer_continuation;
 /// 任一祖先区域拒绝时，随该次推演撤销失败任务的发布。
 struct ArmErrorSink<'ir, 'task, B: BV> {
     tasks: Mutex<Vec<Task<'ir, 'task, B>>>,
-    consumer_errors: Mutex<Vec<Task<'ir, 'task, B>>>,
 }
 
 impl<'ir, 'task, B: BV> ArmErrorSink<'ir, 'task, B> {
     fn new() -> Self {
-        Self { tasks: Mutex::new(Vec::new()), consumer_errors: Mutex::new(Vec::new()) }
+        Self { tasks: Mutex::new(Vec::new()) }
     }
 
     fn forward(self, sink: &(impl ForkSink<'ir, 'task, B> + ?Sized)) {
         for task in self.tasks.into_inner().unwrap() {
-            sink.submit(task);
-        }
-        for task in self.consumer_errors.into_inner().unwrap() {
             sink.submit_consumer_error(task);
         }
     }
@@ -41,8 +37,7 @@ impl<'ir, 'task, B: BV> ForkSink<'ir, 'task, B> for ArmErrorSink<'ir, 'task, B> 
     }
 
     fn submit_consumer_error(&self, task: Task<'ir, 'task, B>) {
-        assert!(task.frame.arm_error.is_some(), "候选错误必须携带错误终态");
-        self.consumer_errors.lock().unwrap().push(task);
+        self.submit(task);
     }
 }
 
@@ -585,7 +580,6 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
     };
     let replay_join = candidate.as_ref().ok().map(|region| region.join);
     let mut pending_errors = ArmErrorSink::new();
-    let mut publish_errors = false;
     let mut segmented = false;
     let result = match candidate {
         Err(error) => {
@@ -684,22 +678,6 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                             }
                             Some(SmtResult::Error(error)) => return Err(ExecError::Smt(error)),
                         }
-                        publish_errors = checked.is_none();
-                        for task in pending_errors.tasks.lock().unwrap().iter() {
-                            let Some((_, Event::Fork(_, guard, _, location))) = &task.fork_cond else {
-                                unreachable!("失败前沿必须有分叉元数据")
-                            };
-                            match solver.check_rolled_back_arm_error(*guard, &task.checkpoint, *location) {
-                                None | Some(SmtResult::Unsat) => (),
-                                Some(SmtResult::Sat) => {
-                                    return Err(reject(frame, SpeculativeRejectReason::SymbolicAssertion))
-                                }
-                                Some(SmtResult::Unknown) => {
-                                    return Err(reject(frame, SpeculativeRejectReason::SolverUnknown))
-                                }
-                                Some(SmtResult::Error(error)) => return Err(ExecError::Smt(error)),
-                            }
-                        }
                     }
                     output
                 };
@@ -717,6 +695,12 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         None | Some(SmtResult::Sat) => result,
                         // 分段可能还有继续前沿；退出前沿为空不代表整次调用为空。
                         // 保守回滚，让普通执行分别判断两个前沿。
+                        Some(SmtResult::Unsat)
+                            if result.as_ref().unwrap().continuation.is_none()
+                                && !pending_errors.tasks.get_mut().unwrap().is_empty() =>
+                        {
+                            Ok(RegionOutput::complete(RegionResult::Dead))
+                        }
                         Some(SmtResult::Unsat) => Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
                         Some(SmtResult::Unknown) => Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
                         Some(SmtResult::Error(crate::error::SmtError::Unknown { .. }))
@@ -747,17 +731,11 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                             *frame = candidate_frame;
                         }
                         if !nested {
-                            if publish_errors {
-                                pending_errors
-                                    .consumer_errors
-                                    .get_mut()
-                                    .unwrap()
-                                    .append(pending_errors.tasks.get_mut().unwrap());
-                            }
                             publish_arm_errors(
                                 frame,
                                 continuation.as_mut().map(|(_, frame)| frame),
-                                std::mem::take(pending_errors.consumer_errors.get_mut().unwrap()),
+                                std::mem::take(pending_errors.tasks.get_mut().unwrap()),
+                                solver,
                                 fraction,
                                 sink,
                             );
@@ -922,13 +900,19 @@ fn publish_arm_errors<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     frame: &mut LocalFrame<'ir, B>,
     mut continued: Option<&mut LocalFrame<'ir, B>>,
     errors: Vec<Task<'ir, 'task, B>>,
+    solver: &Solver<B>,
     fraction: &mut Fraction,
     sink: &S,
 ) {
     for mut task in errors {
-        let Some((_, Event::Fork(id, _, _, _))) = &mut task.fork_cond else {
+        let Some((_, Event::Fork(id, guard, _, location))) = &mut task.fork_cond else {
             unreachable!("失败前沿必须有分叉元数据")
         };
+        let checked = solver.check_arm_error(*guard, &task.checkpoint, *location);
+        if matches!(checked, Some(SmtResult::Unsat)) {
+            continue;
+        }
+        task.frame.arm_error.as_mut().unwrap().1 = matches!(checked, Some(SmtResult::Sat));
         *id = cost::make_mut(&mut frame.execution_limit_state).record_fork();
         task.frame.execution_limit_state = frame.execution_limit_state.clone();
         cost::make_mut(&mut task.frame.execution_limit_state).advance_path_signature(true);
@@ -2088,7 +2072,7 @@ pub(super) fn concrete_consumer<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + 
     if nested {
         pending_errors.forward(sink);
     } else {
-        publish_arm_errors(frame, None, pending_errors.consumer_errors.into_inner().unwrap(), fraction, sink);
+        publish_arm_errors(frame, None, pending_errors.tasks.into_inner().unwrap(), solver, fraction, sink);
         if grouped_root {
             publish_join_groups(frame, record_start, task_id, fraction, stop, sink, state, shared, solver, info);
         } else {

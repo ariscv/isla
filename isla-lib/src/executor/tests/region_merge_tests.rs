@@ -5985,12 +5985,14 @@ fn arm_error_leaf_fixture(mode: &str) {
         info(),
     )
     .unwrap();
-    if ["nosmt", "flat"].contains(&mode) {
+    if ["deferred_live", "nosmt", "flat"].contains(&mode) {
         assert!(matches!(result, region_merge::RegionResult::Merged));
-        let leaf = queue.pop().expect("无SMT必须保存失败叶子");
+        let leaf = queue.pop().expect("可达失败必须保留为独立错误叶");
+
         assert!(matches!(leaf.fork_cond, Some((_, Event::Fork(_, _, 0, _)))), "失败前沿须走真实分叉提交接口");
         let error_frame = unfreeze_frame(&leaf.frame);
         assert!(matches!(error_frame.arm_error(), Some(ExecError::Type(..))));
+        assert_eq!(error_frame.arm_error_certified(), mode == "deferred_live");
         assert_ne!(error_frame.path_signature(), frame.path_signature(), "失败与正常前沿签名不可相同");
         let checked_context = Context::new(Config::new());
         let mut replay = Solver::from_checkpoint(&checked_context, leaf.checkpoint);
@@ -6014,11 +6016,11 @@ fn arm_error_leaf_fixture(mode: &str) {
             .is_unsat()
             .unwrap());
         assert!(queue.is_empty());
-    } else if mode == "deferred_dead" || mode == "structural_dead" {
+    } else if ["normal", "deferred_dead", "structural_dead"].contains(&mode) {
         assert!(matches!(result, region_merge::RegionResult::Merged), "不可行错误臂应在出口丢弃");
         assert!(queue.is_empty());
     } else {
-        assert!(matches!(result, region_merge::RegionResult::Rejected), "普通模式/关闭/可达错误保持拒绝");
+        assert!(matches!(result, region_merge::RegionResult::Rejected), "关闭错误叶或整次事务拒绝时不交付缓冲错误");
         assert!(queue.is_empty());
         assert_eq!(frame.pc, 0);
     }

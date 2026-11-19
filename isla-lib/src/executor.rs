@@ -3429,6 +3429,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 if !matches!(cause, ExitCause::AssertionFailure)
                     || frame.region_execution.is_none()
                     || (!solver.region_queries_deferred()
+                        && !crate::config::RegionOptions::current().arm_error_leaf
                         && !task_state.execution_limits.as_ref().is_some_and(|limits| limits.region_loop_analysis))
                 {
                     branch_decision(frame, task_state, SpeculativeRejectReason::Exit)?;

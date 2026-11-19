@@ -2007,11 +2007,13 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             }
             if let Err((error, frame)) = &exec_result {
                 if frame.arm_error().is_some() {
-                    assert!(solver.no_smt(), "有 SMT 的错误臂必须在区域出口证明不可达或拒绝提交");
+                    let certified = frame.arm_error_certified();
+                    let certification = if certified { "checked" } else { "uncertified" };
                     let mut state = collected.lock().expect("solve collector mutex poisoned");
-                    state.summary.uncertified = true;
+                    state.summary.uncertified |= !certified;
+                    state.summary.errors += 1;
                     state.diagnostics.push(serde_json::json!({
-                        "status":"uncertified", "reason":"arm-error-leaf",
+                        "status":certification, "reason":"arm-error-leaf",
                         "path-signature":frame.path_signature(), "error":error.to_string(),
                         "source":error.source_loc().location_string(shared_state.symtab.files()),
                     }));
@@ -2063,7 +2065,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                             shared_state.execution_stats.terminal_path_retained(frame.region_merge_records().len());
                         }
                     }
-                    eprintln!("[PATH_CACHE_TERMINAL] paths={} terminal=execution_error certification=uncertified source={} error={}",
+                    eprintln!("[PATH_CACHE_TERMINAL] paths={} terminal=execution_error certification={certification} source={} error={}",
                         resident_paths.lock().unwrap().len(),error.source_loc().location_string(shared_state.symtab.files()),error);
                     isla_lib::executor::submit_trace_for_local_frame_with_diagnostics(frame, shared_state, Vec::new());
                     return;

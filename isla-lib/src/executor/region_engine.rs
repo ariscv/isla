@@ -55,41 +55,24 @@ pub(super) fn advance_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized
 ) -> Result<Option<bool>, ExecError> {
     let result = run_loop(tid, task_id, fraction, timeout, stop, sink, arm, state, shared, solver);
     if let Err(error) = &result {
-        let deferred_error = crate::config::RegionOptions::current().arm_error_leaf
-            && solver.region_queries_deferred()
-            && is_arm_execution_error(error);
-        let consumer_error =
-            consumer && (is_arm_execution_error(error) || matches!(error, ExecError::AssertionFailure(..)));
-        if consumer_error || deferred_error {
+        let keep_error = (consumer || crate::config::RegionOptions::current().arm_error_leaf)
+            && (is_arm_execution_error(error) || matches!(error, ExecError::AssertionFailure(..)));
+        if keep_error {
             let reach = arm.local_state.speculative_access.as_ref().unwrap().guard.clone().unwrap();
-            let mut dead = solver.structural_bool(&reach) == Some(false);
-            if consumer_error && !dead {
-                let checked = solver.check_candidate_sat(error.source_loc());
-                if let Some(result) = checked {
-                    match super::region_merge::path_is_feasible(result, arm, solver, shared) {
-                        Ok(feasible) => dead = !feasible,
-                        Err(error) => {
-                            solver.rollback_transaction(tx);
-                            return Err(error);
-                        }
-                    }
-                }
-            }
-            if dead {
-                solver.commit_dead_transaction();
-            } else {
+            if solver.structural_bool(&reach) != Some(false) {
                 let owner = arm.region_arm.expect("失败前沿必须有逻辑臂");
                 let location = error.source_loc();
                 let selector = solver.define_const(reach, location);
-                let (checkpoint, memory_guards) = solver.arm_error_snapshot(owner);
                 let mut failed = arm.clone();
-                failed.arm_error = Some(error.clone());
+                publish_register_writes(&mut failed, shared, solver);
+                let (checkpoint, memory_guards) = solver.arm_error_snapshot(owner);
+                failed.arm_error = Some((error.clone(), false));
                 failed.arm_error_memory_guards = memory_guards.into();
                 failed.speculation_mode = SpeculationMode::Off;
                 failed.region_execution = None;
                 failed.region_replay = None;
                 failed.capture_path_smt_stats();
-                let task = Task {
+                sink.submit_consumer_error(Task {
                     id: task_id,
                     fraction: fraction.clone(),
                     frame: freeze_frame(&failed),
@@ -100,17 +83,10 @@ pub(super) fn advance_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized
                     )),
                     state,
                     stop_conditions: stop,
-                };
-                if consumer_error {
-                    sink.submit_consumer_error(task);
-                    solver.commit_dead_transaction();
-                } else {
-                    sink.submit(task);
-                    // 保留已冻结的义务和定义，由根区域认证。
-                    solver.defer_assertion(smtlib::Exp::Bool(false), location);
-                    solver.commit_transaction();
-                }
+                });
             }
+            // 正常域排除此臂。失败守卫已在独立前缀冻结，后续断言不会改变它。
+            solver.commit_dead_transaction();
             return Ok(Some(false));
         }
     }

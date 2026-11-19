@@ -140,7 +140,7 @@ pub struct Frame<'ir, B> {
     pub(super) region_replay: Option<(usize, crate::ir::regions::RegionPoint)>,
     pub(super) region_execution: Option<super::region_merge::RegionExecution>,
     pub(super) region_merge_records: super::MergeHistory<B>,
-    pub(super) arm_error: Option<ExecError>,
+    pub(super) arm_error: Option<(ExecError, bool)>,
     pub(super) arm_error_memory_guards: Arc<[(usize, smtlib::Exp<Sym>)]>,
     pub(super) pending_retry_operand: Option<(usize, Val<B>)>,
     pub(super) execution_limit_state: Arc<ExecutionLimitPathState>,
@@ -216,7 +216,7 @@ pub struct LocalFrame<'ir, B> {
     pub(super) region_arrivals: Vec<LocalFrame<'ir, B>>,
     pub(super) region_arm: Option<crate::smt::LogicalArm>,
     pub(super) region_merge_records: super::MergeHistory<B>,
-    pub(super) arm_error: Option<ExecError>,
+    pub(super) arm_error: Option<(ExecError, bool)>,
     pub(super) arm_error_memory_guards: Arc<[(usize, smtlib::Exp<Sym>)]>,
     pub(super) pending_retry_operand: Option<(usize, Val<B>)>,
     pub(super) execution_limit_state: Arc<ExecutionLimitPathState>,
@@ -325,7 +325,11 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
     }
 
     pub fn arm_error(&self) -> Option<&ExecError> {
-        self.arm_error.as_ref()
+        self.arm_error.as_ref().map(|(error, _)| error)
+    }
+
+    pub fn arm_error_certified(&self) -> bool {
+        self.arm_error.as_ref().is_some_and(|(_, certified)| *certified)
     }
 
     pub fn region_merge_records(&self) -> &super::MergeHistory<B> {
