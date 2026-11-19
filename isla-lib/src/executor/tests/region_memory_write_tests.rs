@@ -193,13 +193,14 @@ fn region_memory_write_barriers_roll_back_before_device_or_exclusive_attempt() {
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let shared = empty_shared_state();
-    let state = TaskState::new()
-        .with_execution_limits(ExecutionLimits::default().with_path_merging(true).with_region_global_state(true));
     let plain = TaskState::new();
     let dst = test_name(2910);
     let guard_id = test_name(2911);
     let concrete = |n| Exp::Bits(B64::new(n, 64));
     for exclusive in [false, true] {
+        let mut state = TaskState::new()
+            .with_execution_limits(ExecutionLimits::default().with_path_merging(true).with_region_global_state(true));
+        state.speculation_stats = speculation::SpeculationStats::new(true);
         let attempts = Arc::new(AtomicUsize::new(0));
         let mut solver = Solver::<B64>::new(&context);
         let cond = solver.declare_const(smtlib::Ty::Bool, info());
@@ -246,10 +247,9 @@ fn region_memory_write_barriers_roll_back_before_device_or_exclusive_attempt() {
             &mut solver,
             info(),
         );
-        assert!(matches!(
-            result,
-            Err(ExecError::SpeculativeReject { reason: SpeculativeRejectReason::StateEffect, .. })
-        ));
+        assert!(matches!(result, Ok(region_merge::RegionResult::Rejected)));
+        assert_eq!(state.speculation_stats().reject_json()["reason_counts"]["state_effect"].as_u64(), Some(1));
+        assert_eq!(solver.transaction_depth(), 0);
         assert_eq!(attempts.load(Ordering::Relaxed), 0);
         assert_eq!(frame.memory().ram_version(), Some(version));
         assert!(solver.trace().to_vec().iter().all(|event| !event.is_memory_write()));
