@@ -3,7 +3,7 @@ use super::region_merge::{reject, AccessLog, RegionResult};
 use super::stats::merge_diagnostics as diagnostics;
 use super::*;
 use crate::executor::stats::region_cost as cost;
-use crate::ir::regions::Region;
+use crate::ir::regions::{Region, RegionPoint};
 use crate::primop_util::{build_ite_terms, merge_terms::MergeTerms, merge_val_mode, symbolic_terms};
 use std::borrow::Cow;
 
@@ -729,7 +729,10 @@ fn prepare_state<'ir, B: BV>(
     let cost_scope = cost::Scope::enter(cost::Category::StateMerge);
     let _ = &cost_scope;
     let incompatible = || reject(base, SpeculativeRejectReason::IncompatibleState);
-    if left.pc != right.pc
+    let same_virtual_return = region.join == RegionPoint::FunctionExit
+        && matches!(left.instrs.get(left.pc), Some(Instr::End))
+        && matches!(right.instrs.get(right.pc), Some(Instr::End));
+    if (left.pc != right.pc && !same_virtual_return)
         || left.function_name != right.function_name
         || !std::ptr::eq(left.instrs, right.instrs)
         || !match (&left.stack_call, &right.stack_call) {
