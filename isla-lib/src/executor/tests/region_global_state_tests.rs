@@ -881,7 +881,13 @@ fn region_m2_pre_state_read_after_nested_join_widens_footprint_guard() {
         Instr::End,
     ];
     let forked = run(program.clone(), &shared, 2, false, |_| ());
+    use crate::executor::region_engine::{READ_FOOTPRINT_INPUTS, READ_FOOTPRINT_VISITS};
+    READ_FOOTPRINT_INPUTS.set(0);
+    READ_FOOTPRINT_VISITS.set(0);
     let merged = run(program, &shared, 2, true, |_| ());
+    let inputs = READ_FOOTPRINT_INPUTS.get();
+    assert!(inputs > 0, "夹具必须经过前态读取汇合");
+    assert_eq!(READ_FOOTPRINT_VISITS.get(), inputs, "确定单臂读取时无需重扫任一臂");
     assert_eq!(equivalent_paths(&forked, &merged, 2, true), (3, 1));
     equivalent_register_paths(&forked, &merged, 2);
     let root = merged[0].records.iter().find(|record| record.parent_record.is_none()).unwrap();

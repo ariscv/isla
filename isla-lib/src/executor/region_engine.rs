@@ -12,6 +12,12 @@ mod poison_slots;
 pub(super) use dependencies::LoopDependencies;
 pub(super) use organizer::ReadyFragments;
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static READ_FOOTPRINT_INPUTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static READ_FOOTPRINT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// 构造具体臂帧并保存完整守卫；片段由调用栈或队列持有。
 pub(super) fn branch_arm<'ir, B: BV>(
     base: &LocalFrame<'ir, B>,
@@ -954,7 +960,12 @@ fn merge_states<'ir, B: BV>(
         };
         merged.regs_mut().assign(*reg, value, shared);
     }
-    let shared_regs: HashSet<_> = lhs.writes.read_regs.intersection(&rhs.writes.read_regs).copied().collect();
+    let merge_read_footprint = lhs.global_state || !lhs.ordered_events;
+    let shared_regs: HashSet<_> = if merge_read_footprint {
+        HashSet::new()
+    } else {
+        lhs.writes.read_regs.intersection(&rhs.writes.read_regs).copied().collect()
+    };
     let write_order = if lhs.ordered_events {
         let common = |access: &AccessLog<B>| {
             access
@@ -994,17 +1005,23 @@ fn merge_states<'ir, B: BV>(
         .pure_definitions
         .extend(right.local_state.pure_definitions[base.local_state.pure_definitions.len()..].iter().copied());
     let mut single_arm_reads = Vec::new();
-    if lhs.global_state || !lhs.ordered_events {
+    if merge_read_footprint {
         // 与写入相同，前态读取按两臂首次访问的偏序合并；节点包含完整 accessor。
         let mut graph = petgraph::graph::DiGraph::new();
         let mut nodes = HashMap::new();
         let mut reads = HashMap::new();
-        for source in [lhs, rhs] {
+        for (side, source) in [lhs, rhs].into_iter().enumerate() {
+            let side = 1u8 << side;
             let mut previous = None;
             for ((reg, accessor, value), guard) in source.reads.iter().zip(&source.read_guards) {
-                let key = (*reg, accessor.clone());
+                #[cfg(test)]
+                {
+                    READ_FOOTPRINT_INPUTS.set(READ_FOOTPRINT_INPUTS.get() + 1);
+                    READ_FOOTPRINT_VISITS.set(READ_FOOTPRINT_VISITS.get() + 1);
+                }
+                let key = (*reg, accessor.as_slice());
                 if lhs.ordered_events {
-                    let node = *nodes.entry(key.clone()).or_insert_with(|| graph.add_node(key.clone()));
+                    let node = *nodes.entry(key).or_insert_with(|| graph.add_node(key));
                     if let Some(previous) = previous {
                         graph.update_edge(previous, node, ());
                     }
@@ -1012,7 +1029,8 @@ fn merge_states<'ir, B: BV>(
                 }
                 reads
                     .entry(key)
-                    .and_modify(|(_, old_guard): &mut (Val<B>, smtlib::Exp<Sym>)| {
+                    .and_modify(|(_, old_guard, sides): &mut (Val<B>, smtlib::Exp<Sym>, u8)| {
+                        *sides |= side;
                         // 两臂继承同一个读取条件时，直接保留它。新的条件才需要共享定义。
                         if old_guard != guard {
                             *old_guard = smtlib::Exp::Var(solver.define_const(
@@ -1021,17 +1039,17 @@ fn merge_states<'ir, B: BV>(
                             ));
                         }
                     })
-                    .or_insert_with(|| (value.clone(), guard.clone()));
+                    .or_insert_with(|| (value.clone(), guard.clone(), side));
             }
         }
         let order = if lhs.ordered_events {
             petgraph::algo::toposort(&graph, None)
                 .map_err(|_| reject(base, SpeculativeRejectReason::RegisterSequence))?
                 .into_iter()
-                .map(|node| graph[node].clone())
+                .map(|node| graph[node])
                 .collect::<Vec<_>>()
         } else {
-            let mut order: Vec<_> = reads.keys().cloned().collect();
+            let mut order: Vec<_> = reads.keys().copied().collect();
             order.sort_unstable_by(|(a, p), (b, q)| {
                 a.cmp(b).then_with(|| {
                     let name = |accessor: &Accessor| match accessor {
@@ -1045,10 +1063,9 @@ fn merge_states<'ir, B: BV>(
         access.reads.clear();
         access.read_guards.clear();
         for (reg, accessor) in order {
-            let (value, guard) = reads.remove(&(reg, accessor.clone())).unwrap();
-            let in_arm =
-                |source: &AccessLog<B>| source.reads.iter().any(|(name, path, _)| *name == reg && *path == accessor);
-            if !in_arm(lhs) || !in_arm(rhs) {
+            let (value, guard, sides) = reads.remove(&(reg, accessor)).unwrap();
+            let accessor = accessor.to_vec();
+            if sides != 0b11 {
                 single_arm_reads.push(GuardedRegisterRead {
                     register: reg,
                     accessor: accessor.clone(),
