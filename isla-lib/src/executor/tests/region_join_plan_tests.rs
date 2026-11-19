@@ -15,15 +15,29 @@ fn permutations(prefix: &mut [usize], start: usize, check: &mut impl FnMut(&[usi
 
 #[test]
 fn region_join_plan_fixed_tree_integer_permutations() {
-    check_arrival_permutations(false);
+    check_arrival_permutations(ValueShape::Integer, crate::config::MergeStrategy::Recursive);
 }
 
 #[test]
 fn region_join_plan_fixed_tree_union_permutations() {
-    check_arrival_permutations(true);
+    check_arrival_permutations(ValueShape::Union, crate::config::MergeStrategy::Recursive);
 }
 
-fn check_arrival_permutations(union: bool) {
+#[test]
+fn region_join_plan_d8_five_leaves_in_stack_and_fifo_order() {
+    for strategy in [crate::config::MergeStrategy::Recursive, crate::config::MergeStrategy::Flat] {
+        check_arrival_permutations(ValueShape::Strings, strategy);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ValueShape {
+    Integer,
+    Union,
+    Strings,
+}
+
+fn check_arrival_permutations(shape: ValueShape, strategy: crate::config::MergeStrategy) {
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let mut shared = empty_shared_state();
     let slot = shared.symtab.intern("zjoinplan_value");
@@ -39,11 +53,13 @@ fn check_arrival_permutations(union: bool) {
         local_variables: Default::default(),
     });
     let mut limits = ExecutionLimits::default().with_path_merging(true);
-    limits.merge_concrete_values = false;
+    let strings = matches!(shape, ValueShape::Strings);
+    limits.merge_concrete_values = strings;
+    limits.merge_strategy = strategy;
     let state = TaskState::new().with_execution_limits(limits);
     let base = prepare_region_base(&frame, &region, 1, crate::config::MergeMode::Adaptive, &state, info());
     let context = Context::new(Config::new());
-    for count in 3..=5 {
+    for count in (if strings { 5 } else { 3 })..=5 {
         let mut order: Vec<_> = (0..count).collect();
         permutations(&mut order, 0, &mut |order| {
             let mut solver = Solver::new(&context);
@@ -58,20 +74,25 @@ fn check_arrival_permutations(union: bool) {
                         Box::new(crate::primop_util::smt_i64(index as i64)),
                     );
                     let mut leaf = branch_arm(&base, 1, guard, owner);
-                    let value = match (union, index) {
-                        (false, 1) => Val::Symbolic(input),
-                        (false, _) => Val::I64(3 + 2 * index as i64),
-                        (true, 1 | 3) => Val::Ctor(q, Box::new(Val::Unit)),
-                        (true, 2) => Val::Ctor(p, Box::new(Val::String("c".into()))),
-                        (true, _) => Val::Ctor(p, Box::new(Val::String("a".into()))),
+                    let value = match (shape, index) {
+                        (ValueShape::Integer, 1) => Val::Symbolic(input),
+                        (ValueShape::Integer, _) => Val::I64(3 + 2 * index as i64),
+                        (ValueShape::Union, 1 | 3) => Val::Ctor(q, Box::new(Val::Unit)),
+                        (ValueShape::Union, 2) => Val::Ctor(p, Box::new(Val::String("c".into()))),
+                        (ValueShape::Union, _) => Val::Ctor(p, Box::new(Val::String("a".into()))),
+                        (ValueShape::Strings, _) => Val::String(["a", "b", "c", "a", "b"][index].into()),
                     };
                     leaf.vars_mut().insert(slot, UVal::Init(value));
                     leaf
                 })
                 .collect::<Vec<_>>();
-            let arrivals = order
-                .iter()
-                .map(|&index| join_groups::Arrival {
+            let mut pending = crate::executor::region_engine::ReadyFragments::new(&state);
+            pending.extend(order[..2].iter().copied());
+            let first = pending.pop().unwrap();
+            pending.extend(order[2..].iter().copied());
+            let arrivals = std::iter::once(first)
+                .chain(std::iter::from_fn(|| pending.pop()))
+                .map(|index| join_groups::Arrival {
                     source: (usize::from(index % 2 == 1), index),
                     frame: leaves[index].clone(),
                 })
@@ -91,6 +112,7 @@ fn check_arrival_permutations(union: bool) {
             )
             .unwrap();
             assert_eq!(solver.next_join_symbol(), before, "纯计划不得分配实际符号");
+            let union = matches!(shape, ValueShape::Union);
             let expected = if union {
                 let first = (0..count).filter(|&i| i != 2).map(|i| (i % 2, i));
                 let mut first = first.collect::<Vec<_>>();
