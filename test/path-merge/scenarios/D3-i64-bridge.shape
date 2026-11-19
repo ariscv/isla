@@ -1,0 +1,5 @@
+(declare-const path_x (_ BitVec 2))
+(declare-const path_y (_ BitVec 1))
+(= path_x #b00)
+(= path_x #b01)
+(= ((_ extract 1 1) path_x) #b1)
