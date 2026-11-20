@@ -64,7 +64,7 @@ pub struct PathMergeSolverConfig {
 
 impl Default for PathMergeSolverConfig {
     fn default() -> Self {
-        Self { arm_error_batch_size: std::num::NonZeroUsize::new(16).unwrap() }
+        Self { arm_error_batch_size: std::num::NonZeroUsize::new(64).unwrap() }
     }
 }
 
