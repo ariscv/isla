@@ -3,7 +3,7 @@
 //! 前半部分封装 thread-interrupt 状态与 watchdog；后半部分集中封装所有受保护的
 //! `Z3_*` 调用。local/thread-interrupt 的执行差异只在这些 wrapper 内选择。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::convert::TryInto;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -85,6 +85,8 @@ pub fn configured_operation_timeout() -> Option<Duration> {
 // 将其冻结到 Frame，并在任务恢复时写回这个线程局部变量。统计本身只有几个标量，始终开启。
 thread_local! {
     static PATH_SMT_STATS: RefCell<SmtCallStats> = const { RefCell::new(SmtCallStats::empty()) };
+    // 实际完成的查询属于当前线程，路径恢复和事务回滚不能抹去这部分工作。
+    static THREAD_SMT_CHECKS: Cell<u64> = const { Cell::new(0) };
 }
 
 /// 有界短探针逐查询记录；开关关闭时不计算事件、时钟或快照。
@@ -122,6 +124,7 @@ pub(crate) fn probe_query_event(event: impl FnOnce() -> serde_json::Value) {
 
 fn record_path_smt_call(operation: SmtOperation, source_loc: SourceLoc, wall: Duration, timed_out: bool) {
     if matches!(operation, SmtOperation::CheckSat | SmtOperation::CheckSatAssuming) {
+        THREAD_SMT_CHECKS.with(|checks| checks.set(checks.get() + 1));
         probe_query_event(
             || serde_json::json!({"type":"check", "operation":format!("{operation:?}"), "seconds":wall.as_secs_f64(), "source":source_loc, "timed_out":timed_out}),
         );
@@ -153,8 +156,8 @@ pub fn path_smt_stats() -> SmtCallStats {
     PATH_SMT_STATS.with(|stats| stats.borrow().clone())
 }
 
-pub(crate) fn path_smt_check_count() -> u64 {
-    PATH_SMT_STATS.with(|stats| stats.borrow().solver_checks)
+pub(crate) fn thread_smt_check_count() -> u64 {
+    THREAD_SMT_CHECKS.with(Cell::get)
 }
 
 /// 用调度快照恢复当前线程正在推进的路径级 SMT 统计。

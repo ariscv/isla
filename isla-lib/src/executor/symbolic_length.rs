@@ -25,9 +25,19 @@ static MODEL_CANDIDATES: AtomicU64 = AtomicU64::new(0);
 
 struct EnumerationChecks(u64);
 
+impl EnumerationChecks {
+    fn start() -> Self {
+        Self(crate::smt::thread_smt_check_count())
+    }
+
+    fn checks(&self) -> u64 {
+        crate::smt::thread_smt_check_count() - self.0
+    }
+}
+
 impl Drop for EnumerationChecks {
     fn drop(&mut self) {
-        ENUMERATION_CHECKS.fetch_add(crate::smt::path_smt_check_count() - self.0, Relaxed);
+        ENUMERATION_CHECKS.fetch_add(self.checks(), Relaxed);
         ENUMERATION_COMPLETED.fetch_add(1, Relaxed);
     }
 }
@@ -627,7 +637,7 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
     let diagnostics = crate::config::RegionOptions::current().progress;
     let _checks = diagnostics.then(|| {
         ENUMERATION_CALLS.fetch_add(1, Relaxed);
-        EnumerationChecks(crate::smt::path_smt_check_count())
+        EnumerationChecks::start()
     });
     if frame.region_execution.is_none() {
         branch_decision(frame, task_state, SpeculativeRejectReason::SymbolicValueEnumeration)?;
@@ -945,4 +955,34 @@ pub(super) fn fork_retry_operand<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> +
     solver.add(Assert(equal.clone()));
     btrace_push_branch_condition!(frame, equal);
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bitvector::b64::B64;
+    use crate::smt::{Config, Context, SmtResult};
+
+    #[test]
+    fn enumeration_counts_checks_across_savepoint_rollback() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        crate::smt::reset_path_smt_stats();
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let info = SourceLoc::unknown();
+        let choice = solver.declare_const(smtlib::Ty::Bool, info);
+        let savepoint = solver.start_transaction();
+        assert_eq!(solver.check_sat_with_for_range(&smtlib::Exp::Var(choice), info), SmtResult::Sat);
+        assert_eq!(crate::smt::path_smt_stats().solver_checks, 1);
+
+        let checks = std::mem::ManuallyDrop::new(EnumerationChecks::start());
+        assert_eq!(
+            solver.check_sat_with_for_range(&smtlib::Exp::Not(Box::new(smtlib::Exp::Var(choice))), info),
+            SmtResult::Sat
+        );
+        assert_eq!(crate::smt::path_smt_stats().solver_checks, 2);
+        solver.rollback_transaction(savepoint);
+        assert_eq!(crate::smt::path_smt_stats().solver_checks, 0);
+        assert_eq!(checks.checks(), 1);
+    }
 }
