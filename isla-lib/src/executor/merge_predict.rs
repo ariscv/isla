@@ -443,6 +443,7 @@ mod tests {
 
     #[test]
     fn predict_a1_精确结果超出浮点范围仍返回字符串() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
         let bits: Vec<_> =
