@@ -15,6 +15,7 @@ use z3_sys::{
 };
 
 use crate::error::SmtError;
+use crate::executor::stats::path_account;
 use crate::log;
 use crate::source_loc::SourceLoc;
 #[cfg(feature = "smt-thread-interrupt")]
@@ -97,6 +98,7 @@ pub(crate) fn probe_query_event(event: impl FnOnce() -> serde_json::Value) {
     if !probe_query_timings_enabled() {
         return;
     }
+    let _scope = path_account::Scope::enter(path_account::Category::Log);
     static START: OnceLock<Instant> = OnceLock::new();
     static EMITTED: [std::sync::atomic::AtomicUsize; 3] = [const { std::sync::atomic::AtomicUsize::new(0) }; 3];
     let clock = START.get_or_init(Instant::now);
@@ -332,8 +334,9 @@ fn thread_interrupt_call_with_timeout<T>(
 }
 
 macro_rules! interruptible_z3_call {
-    ($operation:expr, $source_loc:expr, $context:expr, $call:expr) => {{
+    ($operation:expr, $source_loc:expr, $context:expr, $formula_size:expr, $call:expr) => {{
         let started = Instant::now();
+        let account = path_account::Scope::smt(started);
         let result = interruptible_z3_call!($context, {
             let timer = crate::executor::stats::region_progress::WorkTimer::start(
                 if matches!($operation, SmtOperation::ModelEval) {
@@ -347,6 +350,7 @@ macro_rules! interruptible_z3_call {
             value
         });
         let elapsed = started.elapsed();
+        account.finish_query(started, elapsed, $operation, $source_loc, $formula_size);
         record_path_smt_call($operation, $source_loc, elapsed, result.is_err());
         #[cfg(feature = "smtperf")]
         record_solve_result($operation, elapsed, &result);
@@ -362,6 +366,16 @@ macro_rules! interruptible_z3_call {
             Ok($call)
         }
     }};
+}
+
+fn formula_size(context: Z3_context, solver: Z3_solver, assumptions: usize) -> (u32, usize) {
+    unsafe {
+        let vector = z3_sys::Z3_solver_get_assertions(context, solver);
+        z3_sys::Z3_ast_vector_inc_ref(context, vector);
+        let assertions = z3_sys::Z3_ast_vector_size(context, vector);
+        z3_sys::Z3_ast_vector_dec_ref(context, vector);
+        (assertions, assumptions)
+    }
 }
 
 #[allow(non_snake_case)]
@@ -381,13 +395,19 @@ pub(super) fn timeout_Z3_solver_check(
         return Ok(result);
     }
     let count = assumptions.len().try_into().expect("Z3 查询假设数量超出上限");
-    interruptible_z3_call!(SmtOperation::CheckSat, source_loc, context, unsafe {
-        if assumptions.is_empty() {
-            Z3_solver_check(context, solver)
-        } else {
-            Z3_solver_check_assumptions(context, solver, count, assumptions.as_ptr())
+    interruptible_z3_call!(
+        SmtOperation::CheckSat,
+        source_loc,
+        context,
+        || { Some(formula_size(context, solver, assumptions.len())) },
+        unsafe {
+            if assumptions.is_empty() {
+                Z3_solver_check(context, solver)
+            } else {
+                Z3_solver_check_assumptions(context, solver, count, assumptions.as_ptr())
+            }
         }
-    })
+    )
 }
 
 /// 带独立 deadline 的 `Z3_solver_check`：与全局 `--smt-timeout` 相互独立，
@@ -412,6 +432,7 @@ pub(super) fn timeout_Z3_solver_check_deadline(
         return Ok(result);
     }
     let count = assumptions.len().try_into().expect("Z3 查询假设数量超出上限");
+    let account = path_account::Scope::smt(started);
     let check = || unsafe {
         let timer = crate::executor::stats::region_progress::WorkTimer::start(
             crate::executor::stats::region_progress::WorkKind::Z3Check,
@@ -435,7 +456,11 @@ pub(super) fn timeout_Z3_solver_check_deadline(
             Ok(check())
         }
     };
-    record_path_smt_call(SmtOperation::CheckSat, source_loc, started.elapsed(), result.is_err());
+    let elapsed = started.elapsed();
+    account.finish_query(started, elapsed, SmtOperation::CheckSat, source_loc, || {
+        Some(formula_size(context, solver, assumptions.len()))
+    });
+    record_path_smt_call(SmtOperation::CheckSat, source_loc, elapsed, result.is_err());
     #[cfg(feature = "smtperf")]
     record_solve_result(SmtOperation::CheckSat, started.elapsed(), &result);
     result
@@ -458,13 +483,19 @@ pub(super) fn timeout_Z3_solver_check_assumptions(
         return Ok(result);
     }
     let count = assumptions.len().try_into().expect("Z3 查询假设数量超出上限");
-    interruptible_z3_call!(SmtOperation::CheckSatAssuming, source_loc, context, unsafe {
-        if assumptions.is_empty() {
-            Z3_solver_check(context, solver)
-        } else {
-            Z3_solver_check_assumptions(context, solver, count, assumptions.as_ptr())
+    interruptible_z3_call!(
+        SmtOperation::CheckSatAssuming,
+        source_loc,
+        context,
+        || { Some(formula_size(context, solver, assumptions.len())) },
+        unsafe {
+            if assumptions.is_empty() {
+                Z3_solver_check(context, solver)
+            } else {
+                Z3_solver_check_assumptions(context, solver, count, assumptions.as_ptr())
+            }
         }
-    })
+    )
 }
 
 #[allow(non_snake_case)]
@@ -476,7 +507,7 @@ pub(super) fn timeout_Z3_model_eval(
     result: &mut Z3_ast,
     source_loc: SourceLoc,
 ) -> Result<bool, Z3TimeoutError> {
-    interruptible_z3_call!(SmtOperation::ModelEval, source_loc, context, unsafe {
+    interruptible_z3_call!(SmtOperation::ModelEval, source_loc, context, || None, unsafe {
         Z3_model_eval(context, model, ast, model_completion, result)
     })
 }

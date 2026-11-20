@@ -4,6 +4,8 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use std::time::Instant;
 
+use super::path_account;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Category {
     Guard,
@@ -75,23 +77,39 @@ pub(crate) fn enabled() -> bool {
 pub(crate) struct Scope {
     previous: Option<Category>,
     active: bool,
+    _path: Option<path_account::Scope>,
 }
 impl Scope {
     pub(crate) fn enter(category: Category) -> Self {
+        use path_account::Category as PathCategory;
+        let path_category = match category {
+            Category::Interpreter => Some(PathCategory::Interpreter),
+            Category::Guard | Category::StateMerge => Some(PathCategory::Merge),
+            Category::Savepoint | Category::FrameClone | Category::Release => Some(PathCategory::Frame),
+            Category::EventBuffer => Some(PathCategory::Event),
+            Category::Definitions
+            | Category::Translate
+            | Category::Simplify
+            | Category::ReplayAssert
+            | Category::Traverse
+            | Category::NativeScope => Some(PathCategory::SolverSetup),
+            Category::StateCow | Category::Diagnostics | Category::Unknown => None,
+        };
+        let path = path_category.map(path_account::Scope::enter);
         if !enabled() {
-            return Self { previous: None, active: false };
+            return Self { previous: None, active: false, _path: path };
         }
         STATE.with(|state| {
             let mut state = state.borrow_mut();
             state.totals[category as usize].calls += 1;
             // 同类递归不再读时钟；不同类子调用才切换独占时间归属。
             if state.current == Some(category) {
-                return Self { previous: None, active: false };
+                return Self { previous: None, active: false, _path: path };
             }
             state.settle();
             let previous = state.current;
             state.current = Some(category);
-            Self { previous, active: true }
+            Self { previous, active: true, _path: path }
         })
     }
 }
@@ -146,7 +164,10 @@ pub(crate) fn make_mut<T: Clone>(value: &mut Arc<T>) -> &mut T {
     if enabled() && Arc::strong_count(value) > 1 {
         count(Category::StateCow, 1, std::mem::size_of::<T>());
     }
+    let frame_copy = (path_account::active() && Arc::strong_count(value) > 1)
+        .then(|| path_account::Scope::enter(path_account::Category::Frame));
     let result = Arc::make_mut(value);
+    drop(frame_copy);
     drop(timer);
     result
 }
