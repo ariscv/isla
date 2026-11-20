@@ -58,6 +58,7 @@ open Jib_util
 
 let opt_isla_preserve = ref ([]:string list)
 let opt_isla_output_dir : string option ref = ref None
+let type_assume = mk_id "isla_type_assume"
 
 let isla_options = [
     ( Flag.create ~prefix:["isla"] ~arg:"id" "preserve",
@@ -239,7 +240,7 @@ module Ir_config : Jib_compile.CONFIG = struct
                     V_call (Eq, [V_id (id, ctyp); V_lit (VL_int n, ctyp)])) ints in
                 let condition = List.fold_left (fun acc test -> V_call (Bor, [acc; test]))
                     (V_lit (VL_bool false, CT_bool)) tests in
-                AE_aux (AE_app (Extern (mk_id "isla_type_assume", Some unit_typ),
+                AE_aux (AE_app (Extern (type_assume, Some unit_typ),
                     [AV_cval (condition, bool_typ)], unit_typ), annot)
               ) sets
         | AV_tuple vs | AV_list (vs, _) | AV_vector (vs, _) -> List.concat_map assumptions vs
@@ -267,11 +268,72 @@ module Ir_config : Jib_compile.CONFIG = struct
   let fun_to_wires = Bindings.empty
 end
 
+let mapping_argument_bounds env id =
+  let quant, Typ_aux (fn_typ, _) = Type_check.Env.get_val_spec id env in
+  match fn_typ with
+  | Typ_fn ([typ], _) ->
+      begin match Type_check.destruct_numeric (Type_check.Env.expand_synonyms env typ) with
+      | Some (_, nc, value) ->
+          let rec bounds (NC_aux (nc, _)) =
+            let bound op (Nexp_aux (constant, _)) candidate =
+              match constant with
+              | Nexp_constant n when nexp_identical value candidate -> [op, n]
+              | _ -> []
+            in
+            match nc with
+            | NC_and (lhs, rhs) -> bounds lhs @ bounds rhs
+            | NC_lt (lhs, rhs) -> bound Ilt rhs lhs @ bound Igt lhs rhs
+            | NC_le (lhs, rhs) -> bound Ilteq rhs lhs @ bound Igteq lhs rhs
+            | NC_gt (lhs, rhs) -> bound Igt rhs lhs @ bound Ilt lhs rhs
+            | NC_ge (lhs, rhs) -> bound Igteq rhs lhs @ bound Ilteq lhs rhs
+            | _ -> []
+          in
+          let checks = List.concat_map bounds (nc :: snd (quant_split quant)) in
+          let lower = List.exists (function (Igt | Igteq), _ -> true | _ -> false) checks in
+          let upper = List.exists (function (Ilt | Ilteq), _ -> true | _ -> false) checks in
+          if lower && upper then checks else []
+      | None -> []
+      end
+  | _ -> []
+
 let jib_of_ast env ast effect_info =
   let open Jib_compile in
   let module Jibc = Make(Ir_config) in
   let ctx = initial_ctx ~for_target:"c" env effect_info in
-  Jibc.compile_ast ctx ast
+  let cdefs, ctx = Jibc.compile_ast ctx ast in
+  (* 映射的穷尽匹配可以省去最后一个常量模式的比较。IR 调用者能构造符号整数，
+     因此在匹配之前保留 Sail 类型中的上下界，包括 Jib 生成的 infallible 入口。 *)
+  let mapping_bounds = List.fold_left (fun domains -> function
+      | DEF_aux (DEF_fundef (FD_aux (FD_function (_, _, [FCL_aux (FCL_funcl (id, _), _)]), _)), annot)
+        when Option.is_some (get_def_attribute "mapping_function" annot) ->
+          begin match mapping_argument_bounds annot.env id with
+          | [] -> domains
+          | bounds -> domains |> Bindings.add id bounds |> Bindings.add (append_id id "_infallible") bounds
+          end
+      | _ -> domains
+    ) Bindings.empty ast.defs in
+  let gensym = symbol_generator () in
+  let add_bounds = function
+    | CDEF_aux (CDEF_fundef (id, ret, [arg], body), annot) as cdef ->
+        begin match Bindings.find_opt id mapping_bounds, Bindings.find_opt id ctx.valspecs with
+        | Some bounds, Some (_, [((CT_fint _ | CT_lint) as ctyp)], _, _) ->
+            let width = match ctyp with CT_fint width -> width | _ -> 128 in
+            let limit = Big_int.pow_int_positive 2 (width - 1) in
+            if List.for_all (fun (_, n) -> Big_int.compare n (Big_int.negate limit) >= 0 && Big_int.compare n limit < 0) bounds then (
+              let loc = annot.loc in
+              let unused = gensym () in
+              let assume (op, n) =
+                let condition = V_call (op, [V_id (arg, ctyp); V_lit (VL_int n, ctyp)]) in
+                iextern loc (CL_id (unused, CT_unit)) (type_assume, []) [condition]
+              in
+              let prelude = idecl loc CT_unit unused :: List.map assume bounds in
+              CDEF_aux (CDEF_fundef (id, ret, [arg], prelude @ body), annot)
+            ) else cdef
+        | _ -> cdef
+        end
+    | cdef -> cdef
+  in
+  List.map add_bounds cdefs, ctx
 
 let remove_casts cdefs =
   let module StringMap = Map.Make(String) in
@@ -381,7 +443,7 @@ let isla_target out_file { ast; effect_info; env; _ } =
 
   (* let ast, env = Specialize.(specialize typ_ord_specialization env ast) in *)
   let cdefs, ctx = jib_of_ast env ast effect_info in
-  let assume = CDEF_aux (CDEF_val (mk_id "isla_type_assume", [], [CT_bool], CT_unit, Some "assume"),
+  let assume = CDEF_aux (CDEF_val (type_assume, [], [CT_bool], CT_unit, Some "assume"),
       mk_def_annot Parse_ast.Unknown ()) in
   let cdefs = assume :: cdefs in
   let cdefs, _ = Jib_optimize.remove_tuples cdefs ctx in
