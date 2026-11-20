@@ -174,6 +174,7 @@ pub fn print() {
         return;
     }
     EPOCH.fetch_add(1, Ordering::Relaxed);
+    let _scope = super::path_account::Scope::enter(super::path_account::Category::Log);
     eprintln!("[MEMORY_STATS] {}", snapshot());
     if crate::smt::no_smt::options().bv_rewrite.enabled() {
         eprintln!("{}", crate::smt::rewrite::diagnostics());

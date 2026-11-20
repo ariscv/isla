@@ -495,6 +495,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<RegionResult, ExecError> {
+    let _scope = super::path_account::Scope::enter(super::path_account::Category::Merge);
     let mode = policy(frame, state, info);
     let global_state = state.execution_limits.as_ref().is_some_and(|limits| limits.region_global_state);
     let defer_call_effect_checks =
@@ -809,6 +810,9 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
         Err(error) => {
             if shared.execution_stats.enabled() {
                 if let ExecError::Smt(error) = &error {
+                    let _log = crate::executor::stats::path_account::Scope::enter(
+                        crate::executor::stats::path_account::Category::Log,
+                    );
                     eprintln!(
                         "[REGION_SMT_REJECT] {}",
                         serde_json::json!({
@@ -1853,6 +1857,9 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     if super::stats::region_progress::enabled()
                         && LOGGED_ITERATION_FOLDS.fetch_add(1, Ordering::Relaxed) < 2048
                     {
+                        let _log = crate::executor::stats::path_account::Scope::enter(
+                            crate::executor::stats::path_account::Category::Log,
+                        );
                         eprintln!(
                             "{}",
                             serde_json::json!({"kind":"loop_iteration_fold",
@@ -1912,6 +1919,9 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         .expect("继续臂必须有完整条件");
                     let returned = solver.define_const(Not(Box::new(continued_guard.clone())), info);
                     if diagnostics::enabled() {
+                        let _log = crate::executor::stats::path_account::Scope::enter(
+                            crate::executor::stats::path_account::Category::Log,
+                        );
                         eprintln!(
                             "{}",
                             serde_json::json!({"kind":"loop_segment","function":diagnostics::name_string(original_frame.function_name,&shared.symtab),"pc":root_branch,"call_instance":original_frame.local_state.call_instance,"steps":used,"remaining":remaining.as_ref().map(|remaining| remaining.load(Ordering::Relaxed)),"completed_exits":completed_exits,"continuation_pc":arm.pc})

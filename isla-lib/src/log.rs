@@ -110,12 +110,19 @@ pub fn set_flags(flags: u32) {
     FLAGS.store(flags, SeqCst);
 }
 
+#[doc(hidden)]
+pub fn with_path_account(action: impl FnOnce()) {
+    use crate::executor::stats::path_account::{Category, Scope};
+    let _scope = Scope::enter(Category::Log);
+    action();
+}
+
 #[macro_export]
 macro_rules! log {
     ($flags: expr, $msg: expr) => {{
         let flags = $flags;
         if log::FLAGS.load(std::sync::atomic::Ordering::Relaxed) & flags > 0u32 {
-            eprintln!("[{}]: {}", log::flag_label(flags), $msg)
+            $crate::log::with_path_account(|| eprintln!("[{}]: {}", log::flag_label(flags), $msg))
         }
     }};
 }
@@ -125,7 +132,9 @@ macro_rules! log_from {
     ($tid: expr, $flags: expr, $msg: expr) => {{
         let flags = $flags;
         if log::FLAGS.load(std::sync::atomic::Ordering::Relaxed) & flags > 0u32 {
-            eprintln!("[{}{:<3}\x1b[0m][{}]: {}", log::color($tid), $tid, log::flag_label(flags), $msg)
+            $crate::log::with_path_account(|| {
+                eprintln!("[{}{:<3}\x1b[0m][{}]: {}", log::color($tid), $tid, log::flag_label(flags), $msg)
+            })
         }
     }};
 }

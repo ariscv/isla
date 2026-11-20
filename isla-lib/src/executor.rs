@@ -88,6 +88,7 @@ pub use frame::{backtrace_string, freeze_frame, unfreeze_frame, Backtrace, Frame
 use frame::{pop_call_stack, push_call_stack};
 use path_timing::PathTimeout;
 pub use speculation::{SpeculationMode, SpeculationStats, SpeculativeRejectReason, FORCE_MERGE_EXIT_CODE};
+use stats::path_account;
 pub use task::{StopAction, StopConditions, Task, TaskId, TaskInterrupt, TaskState, WriteSet};
 
 /// Gets a value from a variable `Bindings` map. Note that this function is set up to handle the
@@ -1214,7 +1215,14 @@ fn run<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         }
     });
     let mut frame = unfreeze_frame(frame);
-    frame.path_timing.start_active();
+    let account = if path_account::enabled() {
+        let at = Instant::now();
+        frame.path_timing.start_active_at(at, crate::timing::thread_cpu_time());
+        Some(path_account::TaskScope::start(frame.path_account.as_deref(), at, &shared_state.symtab))
+    } else {
+        frame.path_timing.start_active();
+        None
+    };
     #[cfg(feature = "tracetool")]
     if shared_state.trace.ftrace_enabled() && frame.trace_path.instruction_count == 0 {
         // 最外层入口不经过 IR Call；补入同一种 Function 事件，fork 恢复不重复记录。
@@ -1232,7 +1240,20 @@ fn run<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         shared_state,
         solver,
     );
-    frame.path_timing.pause_active();
+    if let Some(account) = account {
+        let at = Instant::now();
+        let cpu = crate::timing::thread_cpu_time();
+        let timing = frame.path_timing.snapshot_at(at, cpu);
+        frame.path_timing.pause_active_at(at, cpu);
+        frame.path_account = path_account::snapshot(at);
+        if matches!(&result, Ok(Run::Finished(_)) | Err(ExecError::Timeout)) {
+            let event = if result.is_ok() { "finished" } else { "timeout_final" };
+            emit_path_account(event, task_id, &frame, shared_state, timing, at);
+        }
+        drop(account);
+    } else {
+        frame.path_timing.pause_active();
+    }
     // collector 可能用完成帧继续执行，必须连同最后一次 fork 之后的 SMT 调用一起保留。
     frame.capture_path_smt_stats();
     #[cfg(feature = "tracetool")]
@@ -1868,6 +1889,28 @@ macro_rules! btrace_record_jump {
     }};
 }
 
+fn emit_path_account<B: BV>(
+    event: &str,
+    task: TaskId,
+    frame: &LocalFrame<B>,
+    shared: &SharedState<B>,
+    timing: crate::timeout::PathTimeSnapshot,
+    at: Instant,
+) {
+    let site = format!("{}:{}", zencode::decode(shared.symtab.to_str(frame.function_name)), frame.pc);
+    path_account::emit(
+        event,
+        timing,
+        at,
+        &site,
+        task.as_usize(),
+        frame.path_signature(),
+        frame.forks(),
+        frame.execution_limit_state.control_flow_steps(),
+        shared.symtab.files(),
+    );
+}
+
 /// 路径撞上 `--timeout` 预算时，输出这条路径的 SMT 用时构成与超时原因判定。
 ///
 /// 关键区分是"确实需要更多时间"还是"少数 SMT 操作打满单次上限把预算吃掉了"：前者放宽
@@ -2177,10 +2220,30 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             return Ok(Run::Finished(Val::Unit));
         }
 
-        if timeout.timed_out_with(|| frame.path_timing.snapshot()) {
+        let timed_out = if path_account::active() {
+            let at = Instant::now();
+            let timing = frame.path_timing.snapshot_at(at, crate::timing::thread_cpu_time());
+            let timed_out = timeout.timed_out_with(|| timing);
+            let marked = path_account::mark(timing.active_wall);
+            if timed_out || marked {
+                let event = if !timed_out {
+                    "progress"
+                } else if frame.region_execution.is_some() {
+                    "timeout_region"
+                } else {
+                    "timeout"
+                };
+                emit_path_account(event, task_id, frame, shared_state, timing, at);
+            }
+            timed_out
+        } else {
+            timeout.timed_out_with(|| frame.path_timing.snapshot())
+        };
+        if timed_out {
             report_path_timeout(tid, timeout, frame, shared_state);
             return Err(ExecError::Timeout);
         }
+        path_account::step(frame.function_name, frame.pc);
 
         if last_z3_reset.elapsed() > Duration::from_millis(500) {
             //let mut vars = HashSet::default();
@@ -2517,6 +2580,9 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     | ExecutionLimitDecision::KeepCurrentModel { .. } => {
                         panic!("goto returned an invalid execution-limit decision")
                     }
+                }
+                if *target < frame.pc {
+                    path_account::back_edge(frame.function_name);
                 }
                 frame.pc = *target;
             }

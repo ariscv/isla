@@ -62,6 +62,7 @@ pub(super) struct SolverSavepoint<'ctx> {
     model: SavedModel<'ctx>,
     performance_info: PerformanceInfo,
     smt_stats: crate::timeout::SmtCallStats,
+    path_account: Option<crate::executor::stats::path_account::Watermark>,
     condition_depth: usize,
     guard: Option<Exp<Sym>>,
     order_register_reads: bool,
@@ -206,6 +207,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 model: SavedModel { model: self.stashed_model, ctx: self.ctx },
                 performance_info: self.performance_info.clone(),
                 smt_stats: path_smt_stats(),
+                path_account: crate::executor::stats::path_account::watermark(),
                 condition_depth: self.transaction_conditions.len(),
                 guard,
                 order_register_reads: false,
@@ -298,6 +300,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         if let Some(state) = &mut self.deferred_assertions {
             state.obligations.truncate(savepoint.deferred_obligations_len);
             state.input_facts.truncate(savepoint.deferred_input_facts_len);
+        }
+        if let Some(saved) = savepoint.path_account {
+            crate::executor::stats::path_account::rollback(saved);
         }
         restore_path_smt_stats(savepoint.smt_stats);
         if let Some(prefix) = &mut self.finite_prefix {

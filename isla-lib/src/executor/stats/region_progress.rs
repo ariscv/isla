@@ -212,6 +212,9 @@ impl Drop for AttemptGuard {
             }
             if let Some(p) = p.filter(|p| p.counts.steps >= 256 && !p.back_edges.is_empty()) {
                 if EMITTED.fetch_add(1, Ordering::Relaxed) < 256 {
+                    let _log = crate::executor::stats::path_account::Scope::enter(
+                        crate::executor::stats::path_account::Category::Log,
+                    );
                     eprintln!(
                         "{}",
                         json!({"kind":"region_progress","origin":p.origin,"outcome":p.outcome,"counts":p.counts,"work_seconds":p.work,"query_footprint":p.footprint,"sites":p.sites,"query_phases":p.phases,"branch_results":p.branches,"back_edges":p.back_edges,"initial":p.initial,"call_instance":p.call_instance,"exhausted":p.exhausted,"note":"每个根尝试；真实Z3查询不含模型求值；步数含嵌套区域；回边仅记录实际执行前的无条件后跳"})
@@ -274,6 +277,9 @@ pub(crate) fn step<B: BV>(frame: &LocalFrame<B>, symtab: &Symtab, solver: &crate
                 }
                 let edge=json!({"function":function,"pc":frame.pc,"target":target,"steps":p.counts.steps,"queries":p.counts.queries,"smt_seconds":p.counts.smt_seconds,"work_seconds":p.work,"query_footprint":p.footprint,"query_phases":p.phases,"definition_footprint":solver.region_definition_footprint(),"integers":integers(frame,symtab)});
                 if p.origin["function"].as_str()==Some(function.as_str()) && LIVE_ROWS.fetch_add(1,Ordering::Relaxed)<2048 {
+                    let _log = crate::executor::stats::path_account::Scope::enter(
+                        crate::executor::stats::path_account::Category::Log,
+                    );
                     eprintln!("{}",json!({"kind":"region_iteration","origin":p.origin,"call_instance":p.call_instance,"edge":edge}));
                 }
                 p.back_edges.push(edge);
@@ -359,6 +365,8 @@ mod tests {
 
 pub(crate) fn loop_return<B: BV>(frame: &LocalFrame<B>, symtab: &Symtab) {
     if enabled() && frame.region_execution.is_none() && frame.local_state.loop_attempt_seen {
+        let _log =
+            crate::executor::stats::path_account::Scope::enter(crate::executor::stats::path_account::Category::Log);
         eprintln!(
             "{}",
             json!({"kind":"loop_call_return","call_instance":frame.local_state.call_instance,"function":crate::zencode::decode(symtab.to_str(frame.function_name)),"integers":integers(frame,symtab)})

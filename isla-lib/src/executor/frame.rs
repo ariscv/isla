@@ -40,6 +40,7 @@ use crate::bitvector::BV;
 use crate::error::{ExecError, SmtError};
 use crate::executor::execution_limits::ExecutionLimitPathState;
 use crate::executor::path_timing::{PathTimeTotals, PathTiming};
+use crate::executor::stats::path_account;
 use crate::executor::task::{Task, TaskId, TaskState, WriteSet};
 use crate::executor::SpeculationMode;
 use crate::fraction::Fraction;
@@ -133,6 +134,7 @@ pub struct Frame<'ir, B> {
     // 若在 Frame 中再缓存一份条件，fork、事务回滚和 checkpoint 恢复时可能出现两份约束不一致。
     pub(super) path_time_totals: PathTimeTotals,
     pub(super) path_smt_stats: SmtCallStats,
+    pub(super) path_account: Option<Arc<path_account::Totals>>,
     pub(super) function_name: Name,
     pub(super) pc: usize,
     pub(super) speculation_mode: SpeculationMode,
@@ -173,6 +175,7 @@ pub struct Frame<'ir, B> {
 pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
     LocalFrame {
         path_timing: PathTiming::from_snapshot(frame.path_time_totals),
+        path_account: frame.path_account.clone(),
         path_smt_stats: frame.path_smt_stats.clone(),
         function_name: frame.function_name,
         pc: frame.pc,
@@ -206,6 +209,7 @@ pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
 pub struct LocalFrame<'ir, B> {
     pub(super) path_timing: PathTiming,
     pub(super) path_smt_stats: SmtCallStats,
+    pub(super) path_account: Option<Arc<path_account::Totals>>,
     pub(super) function_name: Name,
     pub(super) pc: usize,
     pub(super) speculation_mode: SpeculationMode,
@@ -262,6 +266,7 @@ impl<'ir, B: Clone> Clone for LocalFrame<'ir, B> {
 
         Self {
             path_timing: self.path_timing.clone(),
+            path_account: self.path_account.clone(),
             path_smt_stats: self.path_smt_stats.clone(),
             function_name: self.function_name,
             pc: self.pc,
@@ -292,8 +297,16 @@ impl<'ir, B: Clone> Clone for LocalFrame<'ir, B> {
 
 pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
     assert!(frame.region_arrivals.is_empty(), "区域内片段不能向普通任务池发布");
+    let _scope = path_account::Scope::enter(path_account::Category::Frame);
+    let (path_time_totals, path_account) = if path_account::active() {
+        let now = std::time::Instant::now();
+        (frame.path_timing.snapshot_at(now, crate::timing::thread_cpu_time()), path_account::snapshot(now))
+    } else {
+        (frame.path_timing.fork_snapshot(), frame.path_account.clone())
+    };
     Frame {
-        path_time_totals: frame.path_timing.fork_snapshot(),
+        path_time_totals,
+        path_account,
         path_smt_stats: frame.path_smt_stats.clone(),
         function_name: frame.function_name,
         pc: frame.pc,
@@ -570,6 +583,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
 
         LocalFrame {
             path_timing: PathTiming::default(),
+            path_account: None,
             path_smt_stats: SmtCallStats::empty(),
             function_name: name,
             pc: 0,
@@ -659,6 +673,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         cost::make_mut(&mut new_frame.local_state).pure_definitions = self.local_state.pure_definitions.clone();
         cost::make_mut(&mut new_frame.local_state).enumerate_merges = self.local_state.enumerate_merges;
         new_frame.path_timing = self.path_timing.clone();
+        new_frame.path_account = self.path_account.clone();
         new_frame.path_smt_stats = self.path_smt_stats.clone();
         new_frame.execution_limit_state = self.execution_limit_state.clone();
         cost::make_mut(&mut new_frame.local_state).regs = self.local_state.regs.clone();
