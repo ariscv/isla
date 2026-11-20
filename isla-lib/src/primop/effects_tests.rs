@@ -241,6 +241,7 @@ fn effect_newly_pure_primops_have_positive_cases() {
 
 #[test]
 fn effect_writes_state_is_not_pure() {
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let f = unary_primops::<B129>()["assume"];
     assert_eq!(unary_effect(f), Some(Effect::WritesState));
     assert!(!is_pure_unary(f));

@@ -234,14 +234,26 @@ fn exp_bit_width<B: BV>(exp: &Exp<Sym>, solver: &Solver<B>) -> Option<u32> {
     }
 }
 
-/// 两个操作数位宽已知却不一致时 panic，并带上算子名和 Sail 站点；
-/// 这样不会把排序错误留给 Z3 的 C 错误处理（它只给排序、不给站点，并直接结束进程）。
-fn assert_same_width<B: BV>(op: &str, lhs: &Exp<Sym>, rhs: &Exp<Sym>, solver: &Solver<B>, info: SourceLoc) {
+/// 两个操作数位宽已知却不一致时返回类型错误，并带上算子名和 Sail 站点。
+/// 区域内按具体值拆分的不可行臂会带来这种组合（例如 Sv48 的 36 位 vpn 对 Sv39 的 27 位掩码）；
+/// 返回错误使该臂被拒绝并回到按守卫拆分，不把排序错误留给 Z3 的 C 错误处理（它直接结束进程）。
+/// 翻译入口另有同样核对，作为绕过原语时的兜底。
+fn check_same_width<B: BV>(
+    op: &str,
+    lhs: &Exp<Sym>,
+    rhs: &Exp<Sym>,
+    solver: &Solver<B>,
+    info: SourceLoc,
+) -> Result<(), ExecError> {
     if let (Some(left), Some(right)) = (exp_bit_width(lhs, solver), exp_bit_width(rhs, solver)) {
         if left != right {
-            panic!("{op} 的操作数位宽不一致：左 {left}，右 {right}；左 {lhs:?}，右 {rhs:?}；Sail 站点 {info:?}");
+            return Err(ExecError::Type(
+                format!("{op} 的操作数位宽不一致：左 {left}，右 {right}；左 {lhs:?}，右 {rhs:?}"),
+                info,
+            ));
         }
     }
+    Ok(())
 }
 
 macro_rules! binary_primop_copy {
@@ -253,17 +265,17 @@ macro_rules! binary_primop_copy {
             match (replace_mixed_bits(x, solver, info)?, replace_mixed_bits(y, solver, info)?) {
                 (Val::Symbolic(x), Val::Symbolic(y)) => {
                     let (lhs, rhs) = (Exp::Var(x), Exp::Var(y));
-                    assert_same_width(&$name, &lhs, &rhs, solver, info);
+                    check_same_width(&$name, &lhs, &rhs, solver, info)?;
                     solver.$define($smt_op(Box::new(lhs), Box::new(rhs)), info).into()
                 }
                 (Val::Symbolic(x), $unwrap(y)) => {
                     let (lhs, rhs) = (Exp::Var(x), $to_symbolic(y));
-                    assert_same_width(&$name, &lhs, &rhs, solver, info);
+                    check_same_width(&$name, &lhs, &rhs, solver, info)?;
                     solver.$define($smt_op(Box::new(lhs), Box::new(rhs)), info).into()
                 }
                 ($unwrap(x), Val::Symbolic(y)) => {
                     let (lhs, rhs) = ($to_symbolic(x), Exp::Var(y));
-                    assert_same_width(&$name, &lhs, &rhs, solver, info);
+                    check_same_width(&$name, &lhs, &rhs, solver, info)?;
                     solver.$define($smt_op(Box::new(lhs), Box::new(rhs)), info).into()
                 }
                 ($unwrap(x), $unwrap(y)) => Ok($wrap($concrete_op(x, y))),
@@ -6744,14 +6756,17 @@ mod tests {
 
     // long5 的报错形态：36 位符号值与 27 位全零常量相与（Sv48 的 vpn 对 Sv39 宽度的掩码）。
     #[test]
-    #[should_panic(expected = "and_bits 的操作数位宽不一致：左 36，右 27")]
-    fn and_bits_panics_on_symbolic_and_constant_width_mismatch() {
+    fn and_bits_rejects_symbolic_and_constant_width_mismatch() {
         crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let cfg = Config::new();
         let ctx = Context::new(cfg);
         let mut solver = Solver::<B64>::new(&ctx);
         let vpn = solver.declare_const(Ty::BitVec(36), SourceLoc::unknown());
-        let _ = and_bits(Val::Symbolic(vpn), Val::Bits(B64::zeros(27)), &mut solver, SourceLoc::unknown());
+        let result = and_bits(Val::Symbolic(vpn), Val::Bits(B64::zeros(27)), &mut solver, SourceLoc::unknown());
+        match result {
+            Err(ExecError::Type(message, _)) => assert!(message.contains("左 36，右 27"), "{message}"),
+            other => panic!("位宽不一致应返回类型错误：{other:?}"),
+        }
     }
 
     #[test]

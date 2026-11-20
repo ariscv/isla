@@ -148,6 +148,7 @@ fn region_concrete_values_nested_consumer_differential() {
 
 #[test]
 fn region_concrete_values_model_and_frozen_guard() {
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&context);
     let guard = solver.declare_const(smtlib::Ty::Bool, info());
