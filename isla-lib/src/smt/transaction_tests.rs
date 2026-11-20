@@ -889,3 +889,103 @@ fn smt_savepoint_snapshots_only_declaration_changes_and_restores_nested_rebindin
     assert!(!solver.decls.contains_key(&added));
     assert!(!solver.is_sail_bitvector(added));
 }
+
+fn arm_error_snapshot_fixture() -> (Checkpoint<B64>, Checkpoint<B64>, Sym) {
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let loc = SourceLoc::unknown();
+    let flag = solver.declare_const(Ty::Bool, loc);
+    checkpoint(&mut solver);
+    let read = |region| Event::ReadMem {
+        value: Val::Bool(true),
+        read_kind: Val::Unit,
+        address: Val::Bits(B64::new(64, 64)),
+        bytes: 1,
+        tag_value: None,
+        opts: ReadOpts::default(),
+        region,
+    };
+    solver.start_transaction_with_guard(Some(Var(flag)));
+    solver.add_event(read("prefix"));
+    solver.commit_transaction();
+    solver.cycle_count();
+    let root = solver.start_transaction();
+    let left = solver.new_logical_arm(None);
+    let right = solver.new_logical_arm(None);
+    let (left, right) = solver.with_deferred_region_queries(|solver| {
+        let (left, left_guards) = solver.with_logical_arm(left, |solver| {
+            solver.with_transaction_condition(&Var(flag), |solver| {
+                solver.cycle_count();
+                solver.add_event(read("left"));
+            });
+            solver.with_transaction_condition(&Var(flag), |solver| solver.arm_error_snapshot(left))
+        });
+        let negative = Not(Box::new(Var(flag)));
+        let (right, right_guards) = solver.with_logical_arm(right, |solver| {
+            solver.with_transaction_condition(&negative, |solver| {
+                solver.add_event(read("right"));
+            });
+            solver.with_transaction_condition(&negative, |solver| solver.arm_error_snapshot(right))
+        });
+        assert_eq!(left_guards, [(1, Var(flag))]);
+        assert_eq!(right_guards, [(1, negative)]);
+        (left, right)
+    });
+    solver.rollback_transaction(root);
+    assert_eq!(left.cycles, 2);
+    assert_eq!(right.cycles, 1);
+    (left, right, flag)
+}
+
+#[test]
+fn arm_error_snapshots_share_published_events() {
+    let (left, right, _) = arm_error_snapshot_fixture();
+    let read = |point: &Checkpoint<B64>| {
+        let event = point
+            .trace()
+            .as_ref()
+            .unwrap()
+            .to_vec()
+            .into_iter()
+            .find(|event| matches!(event, Event::ReadMem { region: "prefix", .. }))
+            .unwrap();
+        event as *const Event<B64>
+    };
+    assert_eq!(read(&left), read(&right), "同根错误叶只应持有一份事务前事件");
+}
+
+#[test]
+fn arm_error_snapshots_preserve_trace_cache_and_witness_bytes() {
+    use crate::executor::path_cache::{TraceReader, TraceWriter};
+
+    let (left, right, flag) = arm_error_snapshot_fixture();
+    let ctx = Context::new(Config::new());
+    let mut writer = TraceWriter::default();
+    let points = [writer.capture(&left), writer.capture(&right)];
+    let reader = TraceReader::new(&writer.segments);
+    let witness = |point| {
+        let mut replay = Solver::from_checkpoint(&ctx, point);
+        assert_eq!(replay.check_sat(SourceLoc::unknown()), Sat);
+        format!("{:?}", Model::new(&replay).get_val(&Val::Symbolic(flag)).unwrap())
+    };
+    let guards = [&left, &right].map(|point| {
+        point
+            .trace()
+            .as_ref()
+            .unwrap()
+            .events_with_guards_rev()
+            .map(|(event, guard)| format!("{event:?} @ {guard:?}"))
+            .collect::<Vec<_>>()
+    });
+    let values = [witness(left), witness(right)];
+    assert_eq!(values, [witness(reader.restore(&points[0])), witness(reader.restore(&points[1]))]);
+    let dto = (&points, &writer.segments);
+    let cache_json = serde_json::to_value(dto).unwrap();
+    let cache_bin = bincode::serialize(&dto).unwrap().iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    let actual = serde_json::json!({"cache": cache_json, "binary_hex": cache_bin, "events": guards, "witness": values});
+    assert_eq!(
+        serde_json::to_string_pretty(&actual).unwrap() + "\n",
+        include_str!("testdata/arm-error-snapshots.json")
+    );
+}

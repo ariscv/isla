@@ -1,6 +1,7 @@
 //! 求解器保存点及旧单层事务接口。日志共用一个缓冲，各层只保存起始偏移。
 use super::*;
 use finite_domain::BUFFERED;
+use std::cell::OnceCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_TRANSACTION_ID: AtomicU64 = AtomicU64::new(0);
@@ -47,8 +48,9 @@ pub(super) enum DeclarationUndo<'ctx> {
     Function(Sym, Option<FuncDecl<'ctx>>),
 }
 
-pub(super) struct SolverSavepoint<'ctx> {
+pub(super) struct SolverSavepoint<'ctx, B> {
     token: SolverTransaction,
+    arm_error_prefix: OnceCell<Arc<TraceHead<B>>>,
     pub(super) events_len: usize,
     // 只表示不支持的操作；新层继承父层状态，普通断言不会置位。
     pub(super) invalid: bool,
@@ -194,6 +196,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             let _ = &snapshot_scope;
             self.savepoints.push(SolverSavepoint {
                 token,
+                arm_error_prefix: OnceCell::new(),
                 events_len: self.transaction_events.len(),
                 invalid: self.transaction_invalid(),
                 declaration_undo_len: self.declaration_undo.len(),
@@ -609,9 +612,27 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     pub(crate) fn arm_error_snapshot(&self, arm: LogicalArm) -> (Checkpoint<B>, Vec<(usize, Exp<Sym>)>) {
         assert_eq!(self.current_logical_arm(), Some(arm));
         let effects = self.project_logical_arm(arm);
-        let mut trace = self.trace.clone();
-        trace.record_event_guards(trace.head.len(), &effects.events);
-        let mut index = self.trace.to_vec().iter().filter(|event| event.is_memory_read_or_write()).count();
+        let root = self.savepoints.first().expect("错误叶必须处于根保存点内");
+        let prefix = root.arm_error_prefix.get_or_init(|| {
+            Arc::new(TraceHead {
+                events: self.trace.head.clone(),
+                event_guards: self.trace.event_guards.clone(),
+                memory_events_before_arm: self
+                    .trace
+                    .events_rev()
+                    .filter(|event| event.is_memory_read_or_write())
+                    .count(),
+            })
+        });
+        let mut trace = Trace {
+            checkpoints: self.trace.checkpoints,
+            head: Vec::with_capacity(effects.events.len() + self.transaction_conditions.len()),
+            event_guards: Vec::new(),
+            head_prefix: Some(prefix.clone()),
+            tail: self.trace.tail.clone(),
+        };
+        trace.record_event_guards(0, &effects.events);
+        let mut index = prefix.memory_events_before_arm;
         let mut guards = Vec::new();
         for (guard, event) in effects.events {
             if event.is_memory_read_or_write() {
@@ -865,7 +886,7 @@ impl<B: BV> Solver<'_, B> {
             + self.sail_bitvectors.capacity() * size_of::<Sym>()
             + map_bytes::<Sym, FuncDecl>(self.func_decls.capacity());
         let mut models = usize::from(self.stashed_model.is_some());
-        bytes += self.savepoints.capacity() * size_of::<SolverSavepoint>()
+        bytes += self.savepoints.capacity() * size_of::<SolverSavepoint<B>>()
             + self.declaration_undo.capacity() * size_of::<DeclarationUndo>();
         for (index, point) in self.savepoints.iter().enumerate() {
             let end =

@@ -6021,7 +6021,7 @@ fn arm_error_leaf_modes() {
     }
 }
 #[test]
-fn arm_error_leaf_batch_checks_each_full_guard_in_one_solver() {
+fn arm_error_leaf_batches_check_each_full_guard_and_release_native_state() {
     let out = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
@@ -6038,14 +6038,21 @@ fn arm_error_leaf_batch_checks_each_full_guard_in_one_solver() {
 #[ignore]
 fn arm_error_leaf_batch_child() {
     crate::smt::configure_tastic(crate::smt::Tactic::Default);
+    crate::config::RegionOptions { arm_error_batch_size: 2.try_into().unwrap(), ..Default::default() }.configure();
     let ctx = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&ctx);
     let loc = info();
     let input = solver.declare_const(smtlib::Ty::Bool, loc);
     let entry = checkpoint(&mut solver);
-    let queries = solver.arm_error_queries(3).unwrap();
-    for (prefix, condition, expected) in
-        [(true, true, SmtResult::Sat), (false, false, SmtResult::Sat), (false, true, SmtResult::Unsat)]
+    let mut queries = solver.arm_error_queries(4).unwrap();
+    for (index, (prefix, condition, expected)) in [
+        (true, true, SmtResult::Sat),
+        (false, false, SmtResult::Sat),
+        (false, true, SmtResult::Unsat),
+        (true, true, SmtResult::Sat),
+    ]
+    .into_iter()
+    .enumerate()
     {
         let polarity = |positive| {
             if positive {
@@ -6058,9 +6065,13 @@ fn arm_error_leaf_batch_child() {
         failed.assert(polarity(prefix));
         let guard = failed.define_const(polarity(condition), loc);
         let failed_at = checkpoint(&mut failed);
-        let checked = solver.check_arm_error(guard, &failed_at, loc, Some(&queries));
+        let checked = solver.check_arm_error(guard, &failed_at, loc, Some(&mut queries));
         assert_eq!(checked, Some(expected));
-        assert!(queries.used_for_last_check(), "独立错误域必须共用本批次的原生查询上下文");
+        if index % 2 == 0 {
+            assert!(queries.used_for_last_check(), "错误叶应在批次求解器中检查");
+        }
+        assert_eq!(checked, solver.check_arm_error(guard, &failed_at, loc, None));
+        assert_eq!(queries.batch_released(), index % 2 == 1, "批满后应立即释放原生求解器");
     }
 }
 

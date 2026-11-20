@@ -216,7 +216,7 @@ impl<B: BV> Solver<'_, B> {
             std::iter::successors(Some(&self.trace), |trace| trace.tail.as_ref().as_ref()).collect();
         let mut index = PrefixIndex::default();
         for trace in segments.drain(..).rev() {
-            for (offset, event) in trace.head.iter().enumerate() {
+            for (offset, event) in trace.head_events().enumerate() {
                 index.push(trace.checkpoints, offset, event);
             }
         }

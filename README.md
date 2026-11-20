@@ -755,6 +755,8 @@ isarch 在执行前检查正常／压缩编码映射。只有当前配置、初�
 
 `[execution_limits.solver] on_unknown = "dead"` 是缺省策略。真实求解返回 Unknown 或超时时，探索丢弃对应路径并继续。根区域出口的整体查询无法归属单臂时，执行器撤销推演，让普通分叉逐路径查询。
 
+独立错误叶使用 `[execution_limits.path_merge.solver]` 下的 `arm_error_batch_size` 控制每个原生求解器认证的叶数，缺省为 64。此值必须为正整数。批满后释放该求解器，下一批从新的求解器开始；每个错误叶仍按完整到达条件认证。
+
 只要丢弃过路径，isarch 收尾时报告首个 Sail 位置和用途，返回 **66**，并在运行摘要和路径缓存 manifest 写入 `valid=false`、`invalid_reasons` 及丢弃记录。judge、`--check-samples` 和 fuzz 拒绝加载该缓存。程序外限、信号和资源失败保留各自状态。使用 `--solver-on-unknown=error` 可让未判定直接终止探索。样本绑定与验收查询失败沿用其错误处理。
 
 ### 求解策略

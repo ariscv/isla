@@ -107,7 +107,7 @@ pub(super) struct PathConditions<'a, B> {
     trace: &'a Trace<B>,
     buffered: &'a [Event<B>],
     guards: &'a [Exp<Sym>],
-    published: OnceCell<Vec<&'a [Event<B>]>>,
+    published: OnceCell<Vec<&'a Trace<B>>>,
 }
 
 impl<'a, B: BV> PathConditions<'a, B> {
@@ -125,21 +125,20 @@ impl<'a, B: BV> PathConditions<'a, B> {
 
     fn event(&self, position: Position) -> &'a Event<B> {
         let Position(segment, offset) = position;
-        let events: &[Event<B>] = if segment == BUFFERED {
-            self.buffered
+        if segment == BUFFERED {
+            &self.buffered[offset]
         } else if segment == self.trace.checkpoints {
-            self.trace.head.as_slice()
+            self.trace.head_event(offset)
         } else {
             self.published.get_or_init(|| {
                 let mut segments: Vec<_> =
                     std::iter::successors(self.trace.tail.as_ref().as_ref(), |trace| trace.tail.as_ref().as_ref())
-                        .map(|trace| trace.head.as_slice())
                         .collect();
                 segments.reverse();
                 segments
             })[segment]
-        };
-        &events[offset]
+                .head_event(offset)
+        }
     }
 
     pub(super) fn definition(&self, sym: Sym) -> Option<&'a Exp<Sym>> {
