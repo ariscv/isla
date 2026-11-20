@@ -1757,11 +1757,13 @@ pub fn subrange_internal<B: BV>(
                 Box::new(Exp::Bvsgt(Box::new(low), Box::new(high))),
             )),
         );
+        let in_bounds = Exp::Not(Box::new(out_of_bounds.clone()));
         if solver.finite_domain_predicate(&out_of_bounds) != Some(false)
-            && !solver.no_smt_safety(&Exp::Not(Box::new(out_of_bounds.clone())), info)
+            && !solver.no_smt_safety(&in_bounds, info)
+            && !solver.range_check_handled(&in_bounds, info)
             && !solver.check_sat_with(&out_of_bounds, info).is_unsat()?
         {
-            if solver.check_sat_with(&Exp::Not(Box::new(out_of_bounds)), info).is_unsat()? {
+            if solver.check_sat_with(&in_bounds, info).is_unsat()? {
                 return Err(ExecError::Type("vector_subrange bounds out of range".to_string(), info));
             }
             return Err(ExecError::SymbolicLength("vector_subrange", info));
@@ -6554,6 +6556,35 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn subrange_defers_symbolic_bounds_in_the_original_path() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let info = SourceLoc::unknown();
+        for safe in [false, true] {
+            let mut solver = Solver::<B64>::new(&ctx);
+            let high = solver.declare_const(Ty::BitVec(128), info);
+            if safe {
+                solver.assert(Exp::Bvsge(Box::new(Exp::Var(high)), Box::new(smt_i128(0))));
+                solver.assert(Exp::Bvslt(Box::new(Exp::Var(high)), Box::new(smt_i128(8))));
+            }
+            let root = solver.start_transaction();
+            solver.with_deferred_region_queries(|solver| {
+                let result =
+                    subrange_internal(Val::Bits(B64::zeros(8)), Val::Symbolic(high), Val::I128(0), solver, info);
+                assert!(matches!(result, Err(ExecError::SymbolicLength("subrange_internal", _))), "{result:?}");
+                assert_eq!(solver.region_definition_footprint()["obligations"], 1);
+                solver.assert_region_exit(Exp::Bool(false));
+                assert_eq!(
+                    solver.check_deferred_assertions(info),
+                    Some(if safe { SmtResult::Unsat } else { SmtResult::Sat })
+                );
+            });
+            solver.rollback_transaction(root);
+            assert_eq!(solver.check_sat(info), SmtResult::Sat);
+        }
     }
 
     #[test]
