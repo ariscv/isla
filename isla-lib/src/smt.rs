@@ -1171,6 +1171,15 @@ thread_local! {
 }
 
 impl<'ctx> Ast<'ctx> {
+    /// 位向量排序的位宽；非位向量返回 None。
+    pub(crate) fn bv_width(&self) -> Option<u32> {
+        unsafe {
+            let sort = Z3_get_sort(self.ctx.z3_ctx, self.z3_ast);
+            (Z3_get_sort_kind(self.ctx.z3_ctx, sort) == SortKind::BV)
+                .then(|| Z3_get_bv_sort_size(self.ctx.z3_ctx, sort))
+        }
+    }
+
     fn simplify(&mut self) {
         #[cfg(test)]
         AST_SIMPLIFY_CALLS.set(AST_SIMPLIFY_CALLS.get() + 1);
@@ -2693,6 +2702,22 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
     }
 
+    /// 翻译两个位向量操作数，位宽不同则在交给 Z3 之前 panic，并报出算子名、
+    /// 两个位宽和被翻译的表达式（Z3 自身的 C 错误只给出排序，且直接结束进程）。
+    fn translate_same_width_pair(&self, op: &str, lhs: &Exp<Sym>, rhs: &Exp<Sym>) -> (Ast<'ctx>, Ast<'ctx>) {
+        let (left, right) = (self.translate_exp(lhs), self.translate_exp(rhs));
+        let (left_width, right_width) = (left.bv_width(), right.bv_width());
+        if left_width != right_width {
+            panic!(
+                "位向量操作数位宽不一致：{op} 的左操作数位宽 {left_width:?}，右操作数位宽 {right_width:?}；\
+                 左 {:.300}；右 {:.300}",
+                format!("{lhs:?}"),
+                format!("{rhs:?}")
+            );
+        }
+        (left, right)
+    }
+
     fn translate_exp(&self, exp: &Exp<Sym>) -> Ast<'ctx> {
         let cost_scope =
             crate::executor::stats::region_cost::Scope::enter(crate::executor::stats::region_cost::Category::Translate);
@@ -2729,35 +2754,110 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             And(lhs, rhs) => Ast::mk_and(&self.translate_exp(lhs), &self.translate_exp(rhs)),
             Or(lhs, rhs) => Ast::mk_or(&self.translate_exp(lhs), &self.translate_exp(rhs)),
             Bvnot(exp) => Ast::mk_bvnot(&self.translate_exp(exp)),
-            Bvand(lhs, rhs) => Ast::mk_bvand(&self.translate_exp(lhs), &self.translate_exp(rhs)),
-            Bvor(lhs, rhs) => Ast::mk_bvor(&self.translate_exp(lhs), &self.translate_exp(rhs)),
-            Bvxor(lhs, rhs) => Ast::mk_bvxor(&self.translate_exp(lhs), &self.translate_exp(rhs)),
-            Bvnand(lhs, rhs) => Ast::mk_bvnand(&self.translate_exp(lhs), &self.translate_exp(rhs)),
-            Bvnor(lhs, rhs) => Ast::mk_bvnor(&self.translate_exp(lhs), &self.translate_exp(rhs)),
-            Bvxnor(lhs, rhs) => Ast::mk_bvxnor(&self.translate_exp(lhs), &self.translate_exp(rhs)),
+            Bvand(lhs, rhs) => {
+                let (lhs, rhs) = self.translate_same_width_pair("bvand", lhs, rhs);
+                Ast::mk_bvand(&lhs, &rhs)
+            }
+            Bvor(lhs, rhs) => {
+                let (lhs, rhs) = self.translate_same_width_pair("bvor", lhs, rhs);
+                Ast::mk_bvor(&lhs, &rhs)
+            }
+            Bvxor(lhs, rhs) => {
+                let (lhs, rhs) = self.translate_same_width_pair("bvxor", lhs, rhs);
+                Ast::mk_bvxor(&lhs, &rhs)
+            }
+            Bvnand(lhs, rhs) => {
+                let (lhs, rhs) = self.translate_same_width_pair("bvnand", lhs, rhs);
+                Ast::mk_bvnand(&lhs, &rhs)
+            }
+            Bvnor(lhs, rhs) => {
+                let (lhs, rhs) = self.translate_same_width_pair("bvnor", lhs, rhs);
+                Ast::mk_bvnor(&lhs, &rhs)
+            }
+            Bvxnor(lhs, rhs) => {
+                let (lhs, rhs) = self.translate_same_width_pair("bvxnor", lhs, rhs);
+                Ast::mk_bvxnor(&lhs, &rhs)
+            }
             Bvneg(exp) => Ast::mk_bvneg(&self.translate_exp(exp)),
-            Bvadd(lhs, rhs) => Ast::mk_bvadd(&self.translate_exp(lhs), &self.translate_exp(rhs)),
-            Bvsub(lhs, rhs) => Ast::mk_bvsub(&self.translate_exp(lhs), &self.translate_exp(rhs)),
-            Bvmul(lhs, rhs) => Ast::mk_bvmul(&self.translate_exp(lhs), &self.translate_exp(rhs)),
-            Bvudiv(lhs, rhs) => Ast::mk_bvudiv(&self.translate_exp(lhs), &self.translate_exp(rhs)),
-            Bvsdiv(lhs, rhs) => Ast::mk_bvsdiv(&self.translate_exp(lhs), &self.translate_exp(rhs)),
-            Bvurem(lhs, rhs) => Ast::mk_bvurem(&self.translate_exp(lhs), &self.translate_exp(rhs)),
-            Bvsrem(lhs, rhs) => Ast::mk_bvsrem(&self.translate_exp(lhs), &self.translate_exp(rhs)),
-            Bvsmod(lhs, rhs) => Ast::mk_bvsmod(&self.translate_exp(lhs), &self.translate_exp(rhs)),
-            Bvult(lhs, rhs) => Ast::mk_bvult(&self.translate_exp(lhs), &self.translate_exp(rhs)),
-            Bvslt(lhs, rhs) => Ast::mk_bvslt(&self.translate_exp(lhs), &self.translate_exp(rhs)),
-            Bvule(lhs, rhs) => Ast::mk_bvule(&self.translate_exp(lhs), &self.translate_exp(rhs)),
-            Bvsle(lhs, rhs) => Ast::mk_bvsle(&self.translate_exp(lhs), &self.translate_exp(rhs)),
-            Bvuge(lhs, rhs) => Ast::mk_bvuge(&self.translate_exp(lhs), &self.translate_exp(rhs)),
-            Bvsge(lhs, rhs) => Ast::mk_bvsge(&self.translate_exp(lhs), &self.translate_exp(rhs)),
-            Bvugt(lhs, rhs) => Ast::mk_bvugt(&self.translate_exp(lhs), &self.translate_exp(rhs)),
-            Bvsgt(lhs, rhs) => Ast::mk_bvsgt(&self.translate_exp(lhs), &self.translate_exp(rhs)),
+            Bvadd(lhs, rhs) => {
+                let (lhs, rhs) = self.translate_same_width_pair("bvadd", lhs, rhs);
+                Ast::mk_bvadd(&lhs, &rhs)
+            }
+            Bvsub(lhs, rhs) => {
+                let (lhs, rhs) = self.translate_same_width_pair("bvsub", lhs, rhs);
+                Ast::mk_bvsub(&lhs, &rhs)
+            }
+            Bvmul(lhs, rhs) => {
+                let (lhs, rhs) = self.translate_same_width_pair("bvmul", lhs, rhs);
+                Ast::mk_bvmul(&lhs, &rhs)
+            }
+            Bvudiv(lhs, rhs) => {
+                let (lhs, rhs) = self.translate_same_width_pair("bvudiv", lhs, rhs);
+                Ast::mk_bvudiv(&lhs, &rhs)
+            }
+            Bvsdiv(lhs, rhs) => {
+                let (lhs, rhs) = self.translate_same_width_pair("bvsdiv", lhs, rhs);
+                Ast::mk_bvsdiv(&lhs, &rhs)
+            }
+            Bvurem(lhs, rhs) => {
+                let (lhs, rhs) = self.translate_same_width_pair("bvurem", lhs, rhs);
+                Ast::mk_bvurem(&lhs, &rhs)
+            }
+            Bvsrem(lhs, rhs) => {
+                let (lhs, rhs) = self.translate_same_width_pair("bvsrem", lhs, rhs);
+                Ast::mk_bvsrem(&lhs, &rhs)
+            }
+            Bvsmod(lhs, rhs) => {
+                let (lhs, rhs) = self.translate_same_width_pair("bvsmod", lhs, rhs);
+                Ast::mk_bvsmod(&lhs, &rhs)
+            }
+            Bvult(lhs, rhs) => {
+                let (lhs, rhs) = self.translate_same_width_pair("bvult", lhs, rhs);
+                Ast::mk_bvult(&lhs, &rhs)
+            }
+            Bvslt(lhs, rhs) => {
+                let (lhs, rhs) = self.translate_same_width_pair("bvslt", lhs, rhs);
+                Ast::mk_bvslt(&lhs, &rhs)
+            }
+            Bvule(lhs, rhs) => {
+                let (lhs, rhs) = self.translate_same_width_pair("bvule", lhs, rhs);
+                Ast::mk_bvule(&lhs, &rhs)
+            }
+            Bvsle(lhs, rhs) => {
+                let (lhs, rhs) = self.translate_same_width_pair("bvsle", lhs, rhs);
+                Ast::mk_bvsle(&lhs, &rhs)
+            }
+            Bvuge(lhs, rhs) => {
+                let (lhs, rhs) = self.translate_same_width_pair("bvuge", lhs, rhs);
+                Ast::mk_bvuge(&lhs, &rhs)
+            }
+            Bvsge(lhs, rhs) => {
+                let (lhs, rhs) = self.translate_same_width_pair("bvsge", lhs, rhs);
+                Ast::mk_bvsge(&lhs, &rhs)
+            }
+            Bvugt(lhs, rhs) => {
+                let (lhs, rhs) = self.translate_same_width_pair("bvugt", lhs, rhs);
+                Ast::mk_bvugt(&lhs, &rhs)
+            }
+            Bvsgt(lhs, rhs) => {
+                let (lhs, rhs) = self.translate_same_width_pair("bvsgt", lhs, rhs);
+                Ast::mk_bvsgt(&lhs, &rhs)
+            }
             Extract(hi, lo, bv) => self.translate_exp(bv).extract(*hi, *lo),
             ZeroExtend(i, bv) => self.translate_exp(bv).zero_extend(*i),
             SignExtend(i, bv) => self.translate_exp(bv).sign_extend(*i),
-            Bvshl(lhs, rhs) => Ast::mk_bvshl(&self.translate_exp(lhs), &self.translate_exp(rhs)),
-            Bvlshr(lhs, rhs) => Ast::mk_bvlshr(&self.translate_exp(lhs), &self.translate_exp(rhs)),
-            Bvashr(lhs, rhs) => Ast::mk_bvashr(&self.translate_exp(lhs), &self.translate_exp(rhs)),
+            Bvshl(lhs, rhs) => {
+                let (lhs, rhs) = self.translate_same_width_pair("bvshl", lhs, rhs);
+                Ast::mk_bvshl(&lhs, &rhs)
+            }
+            Bvlshr(lhs, rhs) => {
+                let (lhs, rhs) = self.translate_same_width_pair("bvlshr", lhs, rhs);
+                Ast::mk_bvlshr(&lhs, &rhs)
+            }
+            Bvashr(lhs, rhs) => {
+                let (lhs, rhs) = self.translate_same_width_pair("bvashr", lhs, rhs);
+                Ast::mk_bvashr(&lhs, &rhs)
+            }
             Concat(lhs, rhs) => Ast::mk_concat(&self.translate_exp(lhs), &self.translate_exp(rhs)),
             Ite(cond, t, f) => self.translate_exp(cond).ite(&self.translate_exp(t), &self.translate_exp(f)),
             App(f, args) => {
@@ -2968,7 +3068,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
     }
 
-    pub fn length(&mut self, v: Sym) -> Option<u32> {
+    pub fn length(&self, v: Sym) -> Option<u32> {
         let sort = self.decls.get(&v)?.sort();
         let ctx = self.ctx.z3_ctx;
         unsafe { (Z3_get_sort_kind(ctx, sort) == SortKind::BV).then(|| Z3_get_bv_sort_size(ctx, sort)) }

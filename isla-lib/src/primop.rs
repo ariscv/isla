@@ -224,6 +224,26 @@ macro_rules! unary_primop_copy {
     };
 }
 
+/// 表达式的位宽；位宽未知（例如非位向量）时返回 None。
+fn exp_bit_width<B: BV>(exp: &Exp<Sym>, solver: &Solver<B>) -> Option<u32> {
+    match exp {
+        Exp::Var(sym) => solver.length(*sym),
+        Exp::Bits(bits) => Some(bits.len() as u32),
+        Exp::Bits64(bits) => Some(bits.len()),
+        _ => None,
+    }
+}
+
+/// 两个操作数位宽已知却不一致时 panic，并带上算子名和 Sail 站点；
+/// 这样不会把排序错误留给 Z3 的 C 错误处理（它只给排序、不给站点，并直接结束进程）。
+fn assert_same_width<B: BV>(op: &str, lhs: &Exp<Sym>, rhs: &Exp<Sym>, solver: &Solver<B>, info: SourceLoc) {
+    if let (Some(left), Some(right)) = (exp_bit_width(lhs, solver), exp_bit_width(rhs, solver)) {
+        if left != right {
+            panic!("{op} 的操作数位宽不一致：左 {left}，右 {right}；左 {lhs:?}，右 {rhs:?}；Sail 站点 {info:?}");
+        }
+    }
+}
+
 macro_rules! binary_primop_copy {
     ($f:ident, $name:expr, $unwrap:path, $wrap:path, $concrete_op:path, $smt_op:path, $to_symbolic:path) => {
         binary_primop_copy!($f, $name, $unwrap, $wrap, $concrete_op, $smt_op, $to_symbolic, define_const);
@@ -232,13 +252,19 @@ macro_rules! binary_primop_copy {
         pub fn $f<B: BV>(x: Val<B>, y: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
             match (replace_mixed_bits(x, solver, info)?, replace_mixed_bits(y, solver, info)?) {
                 (Val::Symbolic(x), Val::Symbolic(y)) => {
-                    solver.$define($smt_op(Box::new(Exp::Var(x)), Box::new(Exp::Var(y))), info).into()
+                    let (lhs, rhs) = (Exp::Var(x), Exp::Var(y));
+                    assert_same_width(&$name, &lhs, &rhs, solver, info);
+                    solver.$define($smt_op(Box::new(lhs), Box::new(rhs)), info).into()
                 }
                 (Val::Symbolic(x), $unwrap(y)) => {
-                    solver.$define($smt_op(Box::new(Exp::Var(x)), Box::new($to_symbolic(y))), info).into()
+                    let (lhs, rhs) = (Exp::Var(x), $to_symbolic(y));
+                    assert_same_width(&$name, &lhs, &rhs, solver, info);
+                    solver.$define($smt_op(Box::new(lhs), Box::new(rhs)), info).into()
                 }
                 ($unwrap(x), Val::Symbolic(y)) => {
-                    solver.$define($smt_op(Box::new($to_symbolic(x)), Box::new(Exp::Var(y))), info).into()
+                    let (lhs, rhs) = ($to_symbolic(x), Exp::Var(y));
+                    assert_same_width(&$name, &lhs, &rhs, solver, info);
+                    solver.$define($smt_op(Box::new(lhs), Box::new(rhs)), info).into()
                 }
                 ($unwrap(x), $unwrap(y)) => Ok($wrap($concrete_op(x, y))),
                 (_, _) => Err(ExecError::Type($name, info)),
@@ -6714,6 +6740,46 @@ mod tests {
 
         let _ =
             expect_concrete_len(Val::Symbolic(value), "expect_concrete_len test", &mut solver, SourceLoc::unknown());
+    }
+
+    // long5 的报错形态：36 位符号值与 27 位全零常量相与（Sv48 的 vpn 对 Sv39 宽度的掩码）。
+    #[test]
+    #[should_panic(expected = "and_bits 的操作数位宽不一致：左 36，右 27")]
+    fn and_bits_panics_on_symbolic_and_constant_width_mismatch() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let vpn = solver.declare_const(Ty::BitVec(36), SourceLoc::unknown());
+        let _ = and_bits(Val::Symbolic(vpn), Val::Bits(B64::zeros(27)), &mut solver, SourceLoc::unknown());
+    }
+
+    #[test]
+    fn and_bits_accepts_matching_widths() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let vpn = solver.declare_const(Ty::BitVec(36), SourceLoc::unknown());
+        let mask = solver.declare_const(Ty::BitVec(36), SourceLoc::unknown());
+        and_bits(Val::Symbolic(vpn), Val::Symbolic(mask), &mut solver, SourceLoc::unknown())?;
+        and_bits(Val::Symbolic(vpn), Val::Bits(B64::zeros(36)), &mut solver, SourceLoc::unknown())?;
+        Ok(())
+    }
+
+    // 翻译入口的兜底检查：绕过原语直接构造不一致的表达式也在交给 Z3 前 panic。
+    #[test]
+    #[should_panic(expected = "位向量操作数位宽不一致：bvand 的左操作数位宽 Some(36)，右操作数位宽 Some(27)")]
+    fn translation_panics_on_bvand_width_mismatch() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let cfg = Config::new();
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let vpn = solver.declare_const(Ty::BitVec(36), SourceLoc::unknown());
+        solver.assert(Exp::Eq(
+            Box::new(Exp::Bvand(Box::new(Exp::Var(vpn)), Box::new(smt_zeros(27)))),
+            Box::new(smt_zeros(36)),
+        ));
     }
 
     #[test]
