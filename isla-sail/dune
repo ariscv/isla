@@ -18,3 +18,8 @@
    (libsail plugins)))
  (package sail_isla_backend)
  (files sail_plugin_isla.cmxs))
+
+(rule
+ (alias runtest)
+ (deps test-mapping-domain.sh mapping-domain.sail)
+ (action (run sh %{dep:test-mapping-domain.sh} %{dep:sail_plugin_isla.cmxs} %{dep:mapping-domain.sail})))
