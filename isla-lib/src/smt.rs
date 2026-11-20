@@ -288,7 +288,13 @@ impl<B: BV> Checkpoint<B> {
         Checkpoint {
             num: 1,
             next_var: self.next_var,
-            trace: Arc::new(Some(Trace { checkpoints: 0, head: events, event_guards, tail: Arc::new(None) })),
+            trace: Arc::new(Some(Trace {
+                checkpoints: 0,
+                head: events,
+                event_guards,
+                head_prefix: None,
+                tail: Arc::new(None),
+            })),
             cycles: 0,
         }
     }
@@ -302,14 +308,14 @@ impl<B: BV> Checkpoint<B> {
         let mut cursor = candidate.trace.clone();
         while !Arc::ptr_eq(&cursor, &base.trace) {
             let segment = cursor.as_ref().as_ref().expect("候选 checkpoint 缺少辅助基点祖先");
-            suffix.push((segment.head.clone(), segment.event_guards.clone()));
+            suffix.push((segment.head.clone(), segment.event_guards.clone(), segment.head_prefix.clone()));
             cursor = segment.tail.clone();
         }
         assert_eq!(suffix.len(), candidate.num - base.num, "候选 checkpoint 链长度不一致");
         let mut trace = self.trace.clone();
         let mut num = self.num;
-        for (head, event_guards) in suffix.into_iter().rev() {
-            trace = Arc::new(Some(Trace { checkpoints: num, head, event_guards, tail: trace }));
+        for (head, event_guards, head_prefix) in suffix.into_iter().rev() {
+            trace = Arc::new(Some(Trace { checkpoints: num, head, event_guards, head_prefix, tail: trace }));
             num += 1;
         }
         Checkpoint { num, next_var: candidate.next_var, trace, cycles: candidate.cycles }
@@ -640,13 +646,38 @@ pub struct Trace<B> {
     head: Vec<Event<B>>,
     // 仅诊断开启时保存，按本段主迹位置排序，随检查点跨线程共享。
     event_guards: Vec<(usize, Exp<Sym>)>,
+    // 同一逻辑段可由根事务共享的已发布事件和本叶事件组成。缓存仍逐段按原顺序写出。
+    head_prefix: Option<Arc<TraceHead<B>>>,
     tail: Arc<Option<Trace<B>>>,
+}
+
+#[derive(Clone, Debug)]
+struct TraceHead<B> {
+    events: Vec<Event<B>>,
+    event_guards: Vec<(usize, Exp<Sym>)>,
+    memory_events_before_arm: usize,
+}
+
+impl<B> Trace<B> {
+    fn head_events(&self) -> impl DoubleEndedIterator<Item = &Event<B>> {
+        self.head_prefix.as_ref().into_iter().flat_map(|prefix| &prefix.events).chain(&self.head)
+    }
+
+    fn head_event(&self, index: usize) -> &Event<B> {
+        if let Some(prefix) = &self.head_prefix {
+            if index < prefix.events.len() {
+                return &prefix.events[index];
+            }
+            return &self.head[index - prefix.events.len()];
+        }
+        &self.head[index]
+    }
 }
 
 impl<B: BV> Trace<B> {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        Trace { checkpoints: 0, head: Vec::new(), event_guards: Vec::new(), tail: Arc::new(None) }
+        Trace { checkpoints: 0, head: Vec::new(), event_guards: Vec::new(), head_prefix: None, tail: Arc::new(None) }
     }
 
     pub fn checkpoint(&mut self, next_var: u32) -> Checkpoint<B> {
@@ -656,6 +687,7 @@ impl<B: BV> Trace<B> {
             checkpoints: self.checkpoints,
             head,
             event_guards: mem::take(&mut self.event_guards),
+            head_prefix: self.head_prefix.take(),
             tail: self.tail.clone(),
         }));
         self.checkpoints += 1;
@@ -665,7 +697,7 @@ impl<B: BV> Trace<B> {
 
     fn events_rev(&self) -> impl Iterator<Item = &Event<B>> {
         std::iter::successors(Some(self), |trace| trace.tail.as_ref().as_ref())
-            .flat_map(|trace| trace.head.iter().rev())
+            .flat_map(|trace| trace.head_events().rev())
     }
 
     fn record_event_guards(&mut self, offset: usize, events: &[(Option<Exp<Sym>>, Event<B>)]) {
@@ -681,9 +713,12 @@ impl<B: BV> Trace<B> {
 
     /// 返回逆时间顺序的主迹及已记录的事件条件。
     pub fn events_with_guards_rev(&self) -> impl Iterator<Item = (&Event<B>, Option<&Exp<Sym>>)> {
-        std::iter::successors(Some(self), |trace| trace.tail.as_ref().as_ref()).flat_map(|trace| {
-            let mut guards = trace.event_guards.iter().rev().peekable();
-            trace.head.iter().enumerate().rev().map(move |(index, event)| {
+        fn guarded_rev<'a, B>(
+            events: &'a [Event<B>],
+            guards: &'a [(usize, Exp<Sym>)],
+        ) -> impl Iterator<Item = (&'a Event<B>, Option<&'a Exp<Sym>>)> {
+            let mut guards = guards.iter().rev().peekable();
+            events.iter().enumerate().rev().map(move |(index, event)| {
                 let guard = if guards.peek().is_some_and(|(position, _)| *position == index) {
                     guards.next().map(|(_, guard)| guard)
                 } else {
@@ -691,6 +726,16 @@ impl<B: BV> Trace<B> {
                 };
                 (event, guard)
             })
+        }
+
+        std::iter::successors(Some(self), |trace| trace.tail.as_ref().as_ref()).flat_map(|trace| {
+            guarded_rev(&trace.head, &trace.event_guards).chain(
+                trace
+                    .head_prefix
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|prefix| guarded_rev(&prefix.events, &prefix.event_guards)),
+            )
         })
     }
 
@@ -1872,7 +1917,7 @@ pub struct Solver<'ctx, B> {
     /// 丢弃自己的"最后模型"，所以必须由本侧缓存；`Def::Assert` 使其失效。
     stashed_model: Option<Z3_model>,
     shadow_witnesses: witness_shadow::Bank<'ctx>,
-    savepoints: Vec<SolverSavepoint<'ctx>>,
+    savepoints: Vec<SolverSavepoint<'ctx, B>>,
     declaration_undo: Vec<DeclarationUndo<'ctx>>,
     transaction_events: Vec<Event<B>>,
     finite_prefix: Option<finite_domain::PrefixIndex>,
@@ -3029,10 +3074,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         if self.is_sail_bitvector(sym) {
             return;
         }
-        let defines_sym = |event: &&mut Event<B>| matches!(event, Event::Smt(Def::DefineConst(v, _) | Def::DeclareConst(v, _), _, _) if *v == sym);
+        let defines_sym = |event: &Event<B>| matches!(event, Event::Smt(Def::DefineConst(v, _) | Def::DeclareConst(v, _), _, _) if *v == sym);
         if let Some(savepoint) = self.savepoints.last_mut() {
             if let Some(Event::Smt(_, attrs, _)) =
-                self.transaction_events[savepoint.events_len..].iter_mut().rev().find(defines_sym)
+                self.transaction_events[savepoint.events_len..].iter_mut().rev().find(|event| defines_sym(event))
             {
                 *attrs = attrs.sail_bitvector();
                 self.tag_bitvector(sym);
@@ -3045,9 +3090,16 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
         let mut trace = &mut self.trace;
         loop {
-            if let Some(Event::Smt(_, attrs, _)) = trace.head.iter_mut().rev().find(defines_sym) {
+            if let Some(Event::Smt(_, attrs, _)) = trace.head.iter_mut().rev().find(|event| defines_sym(event)) {
                 *attrs = attrs.sail_bitvector();
                 break;
+            }
+            if let Some(prefix) = &mut trace.head_prefix {
+                if let Some(index) = prefix.events.iter().rposition(defines_sym) {
+                    let Event::Smt(_, attrs, _) = &mut Arc::make_mut(prefix).events[index] else { unreachable!() };
+                    *attrs = attrs.sail_bitvector();
+                    break;
+                }
             }
             trace = Arc::make_mut(&mut trace.tail).as_mut().expect("已定义符号必须存在于轨迹中");
         }
@@ -3197,20 +3249,20 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         // another trace, so until we need to do that we'll check it's
         // empty:
         assert!(self.trace.checkpoints == 0 && self.trace.head.is_empty());
-        let mut checkpoints: Vec<&[Event<B>]> = Vec::with_capacity(num);
+        let mut checkpoints = Vec::with_capacity(num);
         let mut next = &*trace;
         loop {
             match next {
                 None => break,
                 Some(tr) => {
-                    checkpoints.push(&tr.head);
+                    checkpoints.push(tr);
                     next = &*tr.tail
                 }
             }
         }
         assert!(checkpoints.len() == num);
-        for (segment, events) in checkpoints.into_iter().rev().enumerate() {
-            for (offset, event) in events.iter().enumerate() {
+        for (segment, trace) in checkpoints.into_iter().rev().enumerate() {
+            for (offset, event) in trace.head_events().enumerate() {
                 self.add_event_internal(event);
                 if let Some(prefix) = &mut self.finite_prefix {
                     prefix.push(segment, offset, event);
@@ -5000,11 +5052,11 @@ impl<B> Checkpoint<B> {
     }
 }
 impl<B> Trace<B> {
-    pub(crate) fn path_cache_parts(&self) -> (usize, &[Event<B>], &Arc<Option<Trace<B>>>) {
-        (self.checkpoints, &self.head, &self.tail)
+    pub(crate) fn path_cache_parts(&self) -> (usize, impl Iterator<Item = &Event<B>>, &Arc<Option<Trace<B>>>) {
+        (self.checkpoints, self.head_events(), &self.tail)
     }
     pub(crate) fn from_path_cache_parts(checkpoints: usize, head: Vec<Event<B>>, tail: Arc<Option<Trace<B>>>) -> Self {
-        Self { checkpoints, head, event_guards: Vec::new(), tail }
+        Self { checkpoints, head, event_guards: Vec::new(), head_prefix: None, tail }
     }
 }
 
@@ -5033,6 +5085,19 @@ fn estimated_tail_bytes<B: BV>(tail: &Arc<Option<Trace<B>>>, seen: &mut HashSet<
         };
         bytes += trace.head.capacity() * std::mem::size_of::<Event<B>>()
             + trace.head.iter().map(crate::executor::stats::memory_stats::event_heap_bytes).sum::<usize>();
+        if let Some(prefix) = &trace.head_prefix {
+            if seen.insert(Arc::as_ptr(prefix) as usize) {
+                bytes += std::mem::size_of::<TraceHead<B>>()
+                    + prefix.events.capacity() * std::mem::size_of::<Event<B>>()
+                    + prefix.events.iter().map(crate::executor::stats::memory_stats::event_heap_bytes).sum::<usize>()
+                    + prefix.event_guards.capacity() * std::mem::size_of::<(usize, Exp<Sym>)>()
+                    + prefix
+                        .event_guards
+                        .iter()
+                        .map(|(_, guard)| crate::executor::stats::memory_stats::exp_heap_bytes(guard))
+                        .sum::<usize>();
+            }
+        }
         tail = &trace.tail;
     }
     bytes

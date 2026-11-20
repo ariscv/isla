@@ -153,7 +153,7 @@ impl<B: BV> Solver<'_, B> {
         guard: Sym,
         point: &Checkpoint<B>,
         info: SourceLoc,
-        queries: Option<&ArmErrorQueries<'_>>,
+        queries: Option<&mut ArmErrorQueries<'_>>,
     ) -> Option<SmtResult> {
         if !self.validates_candidates() {
             return None;
@@ -205,6 +205,7 @@ impl<B: BV> Solver<'_, B> {
             checkpoints: state.entry.num,
             head: definitions,
             event_guards: Vec::new(),
+            head_prefix: None,
             tail: state.entry.trace.clone(),
         }));
         let point = Checkpoint { num: state.entry.num + 1, next_var: self.next_var, trace, cycles: 0 };

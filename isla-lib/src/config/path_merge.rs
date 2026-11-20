@@ -57,7 +57,21 @@ pub struct PathMergeDiagnostics {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+pub struct PathMergeSolverConfig {
+    /// 每个求解器最多认证的错误叶数，批满释放 Z3 内部状态。
+    pub arm_error_batch_size: std::num::NonZeroUsize,
+}
+
+impl Default for PathMergeSolverConfig {
+    fn default() -> Self {
+        Self { arm_error_batch_size: std::num::NonZeroUsize::new(16).unwrap() }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct PathMergeConfig {
+    pub solver: PathMergeSolverConfig,
     pub strategy: Option<super::MergeStrategy>,
     /// 两种组织者共用。true 要求访问偏序，缺省 false。
     pub ordered_events: Option<bool>,
@@ -99,6 +113,7 @@ pub struct PathMergeConfig {
 impl Default for PathMergeConfig {
     fn default() -> Self {
         Self {
+            solver: PathMergeSolverConfig::default(),
             strategy: None,
             ordered_events: None,
             enabled: None,

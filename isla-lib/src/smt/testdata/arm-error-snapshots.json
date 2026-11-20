@@ -1,0 +1,208 @@
+{
+  "cache": [
+    [
+      {
+        "num": 2,
+        "next_var": 1,
+        "leaf": 1
+      },
+      {
+        "num": 2,
+        "next_var": 1,
+        "leaf": 2
+      }
+    ],
+    [
+      {
+        "id": 0,
+        "parent": null,
+        "checkpoints": 0,
+        "events": [
+          {
+            "Smt": [
+              {
+                "DeclareConst": [
+                  0,
+                  "Bool"
+                ]
+              },
+              {
+                "bits": 0
+              },
+              {
+                "file": -1,
+                "line1": 0,
+                "char1": 0,
+                "line2": 0,
+                "char2": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 1,
+        "parent": 0,
+        "checkpoints": 1,
+        "events": [
+          {
+            "ReadMem": {
+              "value": {
+                "Bool": true
+              },
+              "read_kind": "Unit",
+              "address": {
+                "Bits": {
+                  "len": 64,
+                  "bits": 64
+                }
+              },
+              "bytes": 1,
+              "tag_value": null,
+              "opts": {
+                "is_exclusive": false,
+                "is_ifetch": false
+              },
+              "region": "prefix"
+            }
+          },
+          "Cycle",
+          "Cycle",
+          {
+            "ReadMem": {
+              "value": {
+                "Bool": true
+              },
+              "read_kind": "Unit",
+              "address": {
+                "Bits": {
+                  "len": 64,
+                  "bits": 64
+                }
+              },
+              "bytes": 1,
+              "tag_value": null,
+              "opts": {
+                "is_exclusive": false,
+                "is_ifetch": false
+              },
+              "region": "left"
+            }
+          },
+          {
+            "Smt": [
+              {
+                "Assert": {
+                  "Var": 0
+                }
+              },
+              {
+                "bits": 0
+              },
+              {
+                "file": -1,
+                "line1": 0,
+                "char1": 0,
+                "line2": 0,
+                "char2": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "parent": 0,
+        "checkpoints": 1,
+        "events": [
+          {
+            "ReadMem": {
+              "value": {
+                "Bool": true
+              },
+              "read_kind": "Unit",
+              "address": {
+                "Bits": {
+                  "len": 64,
+                  "bits": 64
+                }
+              },
+              "bytes": 1,
+              "tag_value": null,
+              "opts": {
+                "is_exclusive": false,
+                "is_ifetch": false
+              },
+              "region": "prefix"
+            }
+          },
+          "Cycle",
+          {
+            "ReadMem": {
+              "value": {
+                "Bool": true
+              },
+              "read_kind": "Unit",
+              "address": {
+                "Bits": {
+                  "len": 64,
+                  "bits": 64
+                }
+              },
+              "bytes": 1,
+              "tag_value": null,
+              "opts": {
+                "is_exclusive": false,
+                "is_ifetch": false
+              },
+              "region": "right"
+            }
+          },
+          {
+            "Smt": [
+              {
+                "Assert": {
+                  "Not": {
+                    "Var": 0
+                  }
+                }
+              },
+              {
+                "bits": 0
+              },
+              {
+                "file": -1,
+                "line1": 0,
+                "char1": 0,
+                "line2": 0,
+                "char2": 0
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  ],
+  "binary_hex": "0200000000000000010000000101000000000000000200000000000000010000000102000000000000000300000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000ffff00000000000000000000000001000000000000000100000000000000000100000000000000050000000000000008000000030000000107000000040000004000000040000000000000000100000000000006000000000000007072656669780d0000000d00000008000000030000000107000000040000004000000040000000000000000100000000000004000000000000006c6566740000000004000000000000000000000000ffff00000000000000000000000002000000000000000100000000000000000100000000000000040000000000000008000000030000000107000000040000004000000040000000000000000100000000000006000000000000007072656669780d00000008000000030000000107000000040000004000000040000000000000000100000000000005000000000000007269676874000000000400000009000000000000000000000000ffff000000000000000000000000",
+  "events": [
+    [
+      "Smt(Assert(Var(Sym { id: 0 })), DefAttrs { attrs: 0 }, SourceLoc { file: -1, line1: 0, char1: 0, line2: 0, char2: 0 }) @ None",
+      "ReadMem { value: Bool(true), read_kind: Unit, address: Bits(B64 { len: 64, bits: 64 }), bytes: 1, tag_value: None, opts: ReadOpts { is_exclusive: false, is_ifetch: false }, region: \"left\" } @ Some(Var(Sym { id: 0 }))",
+      "Cycle @ None",
+      "Cycle @ None",
+      "ReadMem { value: Bool(true), read_kind: Unit, address: Bits(B64 { len: 64, bits: 64 }), bytes: 1, tag_value: None, opts: ReadOpts { is_exclusive: false, is_ifetch: false }, region: \"prefix\" } @ Some(Var(Sym { id: 0 }))",
+      "Smt(DeclareConst(Sym { id: 0 }, Bool), DefAttrs { attrs: 0 }, SourceLoc { file: -1, line1: 0, char1: 0, line2: 0, char2: 0 }) @ None"
+    ],
+    [
+      "Smt(Assert(Not(Var(Sym { id: 0 }))), DefAttrs { attrs: 0 }, SourceLoc { file: -1, line1: 0, char1: 0, line2: 0, char2: 0 }) @ None",
+      "ReadMem { value: Bool(true), read_kind: Unit, address: Bits(B64 { len: 64, bits: 64 }), bytes: 1, tag_value: None, opts: ReadOpts { is_exclusive: false, is_ifetch: false }, region: \"right\" } @ Some(Not(Var(Sym { id: 0 })))",
+      "Cycle @ None",
+      "ReadMem { value: Bool(true), read_kind: Unit, address: Bits(B64 { len: 64, bits: 64 }), bytes: 1, tag_value: None, opts: ReadOpts { is_exclusive: false, is_ifetch: false }, region: \"prefix\" } @ Some(Var(Sym { id: 0 }))",
+      "Smt(DeclareConst(Sym { id: 0 }, Bool), DefAttrs { attrs: 0 }, SourceLoc { file: -1, line1: 0, char1: 0, line2: 0, char2: 0 }) @ None"
+    ]
+  ],
+  "witness": [
+    "Bool(true)",
+    "Bool(false)"
+  ]
+}

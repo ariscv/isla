@@ -79,24 +79,47 @@ pub(super) struct QuerySolver<'ctx> {
     independent: bool,
 }
 
-pub(crate) struct ArmErrorQueries<'ctx>(QuerySolver<'ctx>);
+pub(crate) struct ArmErrorQueries<'ctx> {
+    ctx: &'ctx Context,
+    active: Option<QuerySolver<'ctx>>,
+    batch_size: usize,
+    checked: usize,
+}
 
 impl<'ctx, B: BV> Solver<'ctx, B> {
     pub(crate) fn arm_error_queries(&self, count: usize) -> Option<ArmErrorQueries<'ctx>> {
         let config = SMT_CONFIG.get().unwrap();
-        (count > 1 && self.validates_candidates() && config.tactic == Tactic::Default).then(|| {
-            let ctx = self.ctx;
-            let z3_solver = unsafe { new_z3_solver(ctx.z3_ctx, config.tactic.as_c_str(), None) };
-            ArmErrorQueries(QuerySolver { ctx, z3_solver, independent: false })
+        (count > 1 && self.validates_candidates() && config.tactic == Tactic::Default).then(|| ArmErrorQueries {
+            ctx: self.ctx,
+            active: None,
+            batch_size: crate::config::RegionOptions::current().arm_error_batch_size.get(),
+            checked: 0,
         })
     }
 }
 
 impl ArmErrorQueries<'_> {
+    pub(super) fn check<B: BV>(&mut self, verifier: &Solver<B>, target: &Exp<Sym>, info: SourceLoc) -> SmtResult {
+        let active = self.active.get_or_insert_with(|| {
+            let ctx = self.ctx;
+            let z3_solver = unsafe { new_z3_solver(ctx.z3_ctx, Tactic::Default.as_c_str(), None) };
+            QuerySolver { ctx, z3_solver, independent: false }
+        });
+        let result = active.check_arm_error(verifier, target, info);
+        self.checked += 1;
+        if self.checked == self.batch_size {
+            self.active = None;
+            self.checked = 0;
+        }
+        result
+    }
+}
+
+impl QuerySolver<'_> {
     /// 每个选择器只启用自己冻结的完整公式。其它选择器可以全为假，因此两条错误域无需相容。
-    pub(super) fn check<B: BV>(&self, verifier: &Solver<B>, target: &Exp<Sym>, info: SourceLoc) -> SmtResult {
-        let native = self.0.z3_solver;
-        let ctx = self.0.ctx;
+    fn check_arm_error<B: BV>(&self, verifier: &Solver<B>, target: &Exp<Sym>, info: SourceLoc) -> SmtResult {
+        let native = self.z3_solver;
+        let ctx = self.ctx;
         let _scope = crate::executor::stats::region_progress::QueryScope::fallback("arm_error");
         let goal = verifier.translate_exp(target);
         let selector = unsafe {
@@ -141,7 +164,11 @@ impl ArmErrorQueries<'_> {
 #[cfg(test)]
 impl ArmErrorQueries<'_> {
     pub(crate) fn used_for_last_check(&self) -> bool {
-        z3_timeout::last_solver_query().0 == self.0.z3_solver as usize
+        self.active.as_ref().is_some_and(|batch| z3_timeout::last_solver_query().0 == batch.z3_solver as usize)
+    }
+
+    pub(crate) fn batch_released(&self) -> bool {
+        self.active.is_none()
     }
 }
 

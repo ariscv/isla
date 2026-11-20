@@ -2036,8 +2036,11 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                             &Val::Unit,
                             solver.trace(),
                         );
+                        let point = checkpoint(&mut solver);
+                        // 驻留记录只持有共享检查点和重放所需的路径数据。
+                        drop(solver);
                         let resident = super::resident::ResidentPath {
-                            checkpoint: checkpoint(&mut solver),
+                            checkpoint: point,
                             path: sample_path,
                             records: frame.region_merge_records().clone(),
                             signature: frame.path_signature(),

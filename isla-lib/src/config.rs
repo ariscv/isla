@@ -2522,6 +2522,17 @@ r0 = "0x0000000000000000"
     }
 
     #[test]
+    fn arm_error_batch_size_accepts_only_positive_integers() {
+        let table = "[execution_limits.path_merge.solver]";
+        for size in [1, 8, 16] {
+            assert!(merge_config(&format!("{table}\narm_error_batch_size={size}")).is_ok());
+        }
+        for size in ["0", "-1", "true", "1.5"] {
+            assert!(merge_config(&format!("{table}\narm_error_batch_size={size}")).is_err());
+        }
+    }
+
+    #[test]
     fn merge_concrete_values_defaults_on_and_accepts_explicit_false() {
         use crate::executor::ExecutionLimits;
         let symtab = Symtab::new();
@@ -2841,6 +2852,7 @@ obligation_dump_dir = "obligations"
                 defer_ctor_checks: false,
                 prune_constant_branches: true,
                 arm_error_leaf: false,
+                arm_error_batch_size: PathMergeConfig::default().solver.arm_error_batch_size,
                 skip_branch_checks: true,
                 skip_bool_proofs: true,
                 no_smt: true,

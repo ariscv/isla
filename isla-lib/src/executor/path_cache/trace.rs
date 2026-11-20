@@ -57,7 +57,7 @@ impl<B: BV> TraceWriter<B> {
                 id,
                 parent,
                 checkpoints: checkpoints.try_into().unwrap(),
-                events: head.iter().cloned().map(Into::into).collect(),
+                events: head.cloned().map(Into::into).collect(),
             });
             self.keepalive.push(original);
             assert!(self.nodes.insert(key, id).is_none());

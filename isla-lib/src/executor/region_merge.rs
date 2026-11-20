@@ -877,12 +877,12 @@ fn publish_arm_errors<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     sink: &S,
     shared: &SharedState<'ir, B>,
 ) {
-    let queries = solver.arm_error_queries(errors.len());
+    let mut queries = solver.arm_error_queries(errors.len());
     for mut task in errors {
         let Some((_, Event::Fork(id, guard, _, location))) = &mut task.fork_cond else {
             unreachable!("失败前沿必须有分叉元数据")
         };
-        let checked = solver.check_arm_error(*guard, &task.checkpoint, *location, queries.as_ref());
+        let checked = solver.check_arm_error(*guard, &task.checkpoint, *location, queries.as_mut());
         if matches!(checked, Some(SmtResult::Unsat)) {
             continue;
         }

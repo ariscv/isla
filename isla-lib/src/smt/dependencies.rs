@@ -39,6 +39,7 @@ impl<B: BV> Checkpoint<B> {
                 checkpoints: 0,
                 head: events,
                 event_guards: Vec::new(),
+                head_prefix: None,
                 tail: Arc::new(None),
             })),
             cycles: 0,
