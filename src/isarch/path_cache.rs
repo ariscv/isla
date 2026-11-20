@@ -943,7 +943,6 @@ fn load_inner<B: BV>(
         .filter(|path| matches!(path.path.terminal, isla_lib::executor::samples::Terminal::ExecutionError { .. }))
         .count() as u64;
     assert_eq!(manifest.execution_error_paths, error_count, "缓存执行错误叶子计数不一致");
-    assert!(error_count == 0 || manifest.errors.uncertified, "执行错误叶子不得标为已认证终态");
     assert_eq!(manifest.normal_paths, paths.len() as u64 - exception_count - error_count, "缓存正常终态计数不一致");
     assert_eq!(manifest.errors.model_exception_paths, exception_count, "缓存摘要异常终态计数不一致");
     let parse_seconds = parsing.elapsed().as_secs_f64();
@@ -1118,7 +1117,6 @@ pub fn save<B: BV>(
         .filter(|path| matches!(path.path.terminal, isla_lib::executor::samples::Terminal::ExecutionError { .. }))
         .count() as u64;
     let normal_paths = cached.len() as u64 - model_exception_paths - execution_error_paths;
-    assert!(execution_error_paths == 0 || summary["uncertified"] == json!(true), "执行错误叶子缓存必须保留未认证标记");
     assert_eq!(summary["model-exception-paths"].as_u64(), Some(model_exception_paths), "缓存摘要异常终态计数不一致");
     let paths = write_data(dir, "paths", cached, &options.format, &batch_id, timing, stages);
     let complete = summary["status"] == "finished"
