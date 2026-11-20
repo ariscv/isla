@@ -84,6 +84,15 @@ mod tests {
 
     #[test]
     fn arm_error_leaf_cache_preserves_type_and_excludes_normal_count() {
+        arm_error_cache_roundtrip(true);
+    }
+
+    #[test]
+    fn checked_arm_error_leaf_cache_publishes_and_loads_without_uncertified_flag() {
+        arm_error_cache_roundtrip(false);
+    }
+
+    fn arm_error_cache_roundtrip(uncertified: bool) {
         use super::super::target::RV64;
         use isla_lib::{
             executor::samples::{SamplePath, Terminal},
@@ -109,15 +118,18 @@ mod tests {
             records: Vec::new().into(),
             pure_definitions: vec![],
         }];
-        let directory =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("output/arm-error-cache-{}", std::process::id()));
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "output/arm-error-cache-{}-{}",
+            uncertified,
+            std::process::id()
+        ));
         assert!(!directory.exists());
         let options = Options {
             write: Some(directory.clone()),
             format: vec![Encoding::Json, Encoding::Bin],
             ..Default::default()
         };
-        let summary = super::super::solve_summary::SolveSummary { uncertified: true, ..Default::default() }.json();
+        let summary = super::super::solve_summary::SolveSummary { uncertified, ..Default::default() }.json();
         save(
             &options,
             "generic",
@@ -133,16 +145,16 @@ mod tests {
         let manifest: Value = serde_json::from_reader(File::open(directory.join("manifest.json")).unwrap()).unwrap();
         assert_eq!(manifest["normal_paths"], 0);
         assert_eq!(manifest["execution_error_paths"], 1);
-        assert_eq!(manifest["certification"], "uncertified");
+        assert_eq!(manifest["certification"] == "uncertified", uncertified);
         let restored = load_for_judge::<B64>(
             &directory,
             Encoding::Bin,
-            true,
+            uncertified,
             &shared,
             "generic",
             &Stages::new(None, Instant::now()),
         );
-        assert!(restored.manifest.errors.uncertified);
+        assert_eq!(restored.manifest.errors.uncertified, uncertified);
         assert_eq!(restored.manifest.execution_error_paths, 1);
         let json_paths: Envelope<dto::CachedPath<B64>> =
             serde_json::from_reader(File::open(directory.join("paths.json")).unwrap()).unwrap();
