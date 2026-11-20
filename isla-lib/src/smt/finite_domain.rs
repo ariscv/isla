@@ -178,6 +178,43 @@ impl<'ctx> Ast<'ctx> {
         }
     }
 
+    /// 共享子式只访问一次。量词保守地交给 Z3 代入，包括其模式。
+    fn may_contain(&self, needle: &Self, memo: &mut ahash::AHashMap<Z3_ast, bool>) -> bool {
+        let ctx = self.ctx.z3_ctx;
+        let mut pending = vec![(self.z3_ast, false)];
+        while let Some((node, children_ready)) = pending.pop() {
+            if memo.contains_key(&node) {
+                continue;
+            }
+            if node == needle.z3_ast {
+                memo.insert(node, true);
+                continue;
+            }
+            // 原断言持有根引用，整个遍历期间子式均有效。
+            unsafe {
+                match Z3_get_ast_kind(ctx, node) {
+                    AstKind::App => {
+                        let app = Z3_to_app(ctx, node);
+                        let args = (0..Z3_get_app_num_args(ctx, app)).map(|i| Z3_get_app_arg(ctx, app, i));
+                        if children_ready {
+                            memo.insert(node, args.into_iter().any(|child| memo[&child]));
+                        } else {
+                            pending.push((node, true));
+                            pending.extend(args.filter(|child| !memo.contains_key(child)).map(|child| (child, false)));
+                        }
+                    }
+                    AstKind::Quantifier => {
+                        memo.insert(node, true);
+                    }
+                    _ => {
+                        memo.insert(node, false);
+                    }
+                }
+            }
+        }
+        memo[&self.z3_ast]
+    }
+
     fn finite_bits(&mut self) -> Option<Exp<Sym>> {
         self.simplify();
         let width = unsafe {
@@ -407,6 +444,8 @@ impl<B: BV> Solver<'_, B> {
         let anchor = self.translate_exp(&source_var);
         let target_ast = self.translate_exp(&Exp::Var(target));
         let assertions: Vec<_> = prefix.assertions().map(|exp| self.translate_exp(exp)).collect();
+        let mut anchor_occurrences = ahash::AHashMap::new();
+        let mut independent = vec![None; assertions.len()];
         let mut bool_atoms = Vec::new();
         let mut bool_literals = HashMap::new();
         for sym in prefix.bool_symbols() {
@@ -426,9 +465,28 @@ impl<B: BV> Solver<'_, B> {
             let mut can_reuse_witness = self.has_stashed_model();
             for (index, original) in assertions.iter().chain(&binding).enumerate() {
                 let is_path_fact = index < assertions.len();
-                let mut residual = if is_path_fact { original.substitute(&anchor, &value) } else { original.clone() };
-                let unchanged = residual.z3_ast == original.z3_ast && is_path_fact;
-                match residual.structural_bool() {
+                let mut projected;
+                let (residual, truth, unchanged) =
+                    if is_path_fact && !original.may_contain(&anchor, &mut anchor_occurrences) {
+                        let (residual, truth) = independent[index].get_or_insert_with(|| {
+                            let mut residual = original.clone();
+                            let truth = residual.structural_bool();
+                            (residual, truth)
+                        });
+                        (&*residual, *truth, true)
+                    } else {
+                        projected = if is_path_fact {
+                            #[cfg(test)]
+                            PROJECTION_ASSERTION_SUBSTITUTIONS.set(PROJECTION_ASSERTION_SUBSTITUTIONS.get() + 1);
+                            original.substitute(&anchor, &value)
+                        } else {
+                            original.clone()
+                        };
+                        let unchanged = projected.z3_ast == original.z3_ast && is_path_fact;
+                        let truth = projected.structural_bool();
+                        (&projected, truth, unchanged)
+                    };
+                match truth {
                     Some(false) => continue 'candidate,
                     Some(true) => (),
                     None => {
@@ -489,6 +547,7 @@ impl<B: BV> Solver<'_, B> {
 thread_local! {
     static PREFIX_EVENT_VISITS: Cell<usize> = const { Cell::new(0) };
     static BOUND_SEARCHES: Cell<usize> = const { Cell::new(0) };
+    static PROJECTION_ASSERTION_SUBSTITUTIONS: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(test)]

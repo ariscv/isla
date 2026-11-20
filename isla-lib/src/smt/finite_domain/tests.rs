@@ -17,6 +17,28 @@ fn values(solver: &Solver<'_, B64>, symbol: Sym, expected: &[u64]) {
 }
 
 #[test]
+fn finite_projection_reuses_assertions_without_the_anchor() {
+    configure_tastic(Tactic::Qfaufbv);
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let info = SourceLoc::unknown();
+    let anchor = solver.declare_bitvector(8, info);
+    let independent = solver.declare_bitvector(8, info);
+    let derived = solver.define_bitvector(Exp::Bvadd(Box::new(Exp::Var(anchor)), Box::new(bits64(1, 8))), info);
+    solver.assert(Exp::Or(Box::new(equal(anchor, 1)), Box::new(equal(anchor, 2))));
+    for value in 4..20 {
+        solver.assert(not(equal(independent, value)));
+    }
+    // 这个约束必须继续排除一个候选，独立约束则仍参与认证。
+    solver.assert(not(equal(derived, 3)));
+    PROJECTION_ASSERTION_SUBSTITUTIONS.set(0);
+    let prefix = PathConditions::new(&solver).unwrap();
+    let domain = solver.project_finite_values(&prefix, derived, anchor, vec![bits64(1, 8), bits64(2, 8)]);
+    assert!(matches!(domain, FiniteDomain::Bounded(values) if values == [bits64(2, 8)]));
+    assert!(PROJECTION_ASSERTION_SUBSTITUTIONS.get() <= 4);
+}
+
+#[test]
 fn finite_domain_prefix_shares_fork_candidates_and_does_not_revisit_events() {
     configure_tastic(Tactic::Qfaufbv);
     let context = Context::new(Config::new());
