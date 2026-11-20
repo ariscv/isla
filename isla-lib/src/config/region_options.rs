@@ -9,9 +9,9 @@ pub struct RegionOptions {
     pub bv_rewrite: crate::smt::rewrite::BvRewrite,
     /// 区域推演嵌套上限；缺省或-1不限。
     pub max_merge_depth: Option<i64>,
-    /// 范围证明转为出口待证义务；默认关闭。
+    /// 延后推演时，范围证明转为出口待证义务；默认开启。
     pub defer_range_proofs: bool,
-    /// 构造子解包标签转为出口待证义务；默认关闭。
+    /// 延后推演时，构造子解包标签转为出口待证义务；默认开启。
     pub defer_ctor_checks: bool,
     /// 跳过分支可行性查询，保留完整候选守卫；默认关闭。
     pub skip_branch_checks: bool,

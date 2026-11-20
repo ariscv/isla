@@ -67,9 +67,9 @@ pub struct PathMergeConfig {
     pub max_merge_depth: Option<i64>,
     /// 区域因局部汇合失败可保留的片段上限；缺省或 -1 不限。
     pub max_fragments: Option<i64>,
-    /// 范围证明转为出口待证义务；默认关闭。
+    /// 延后推演时，范围证明转为出口待证义务；默认开启。
     pub defer_range_proofs: bool,
-    /// 构造子解包标签转为出口待证义务；默认关闭。
+    /// 延后推演时，构造子解包标签转为出口待证义务；默认开启。
     pub defer_ctor_checks: bool,
     /// 只消除已证明不可观察的局部未初始化槽位或载荷；默认开启。
     pub merge_poison_slots: bool,
@@ -104,8 +104,8 @@ impl Default for PathMergeConfig {
             enabled: None,
             max_merge_depth: None,
             max_fragments: None,
-            defer_range_proofs: false,
-            defer_ctor_checks: false,
+            defer_range_proofs: true,
+            defer_ctor_checks: true,
             merge_poison_slots: true,
             step_budget: None,
             defer_exit_check: false,

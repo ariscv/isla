@@ -825,7 +825,7 @@ Jump 的条件恒值折叠默认开启，可用 `--prune-constant-branches=false
 
 区域嵌套和片段数均缺省不限，显式 `-1` 与省略等价。有限深度对照可用 `[execution_limits.path_merge] max_merge_depth = 16` 或 `--region-max-merge-depth=16`。`--merge-diagnostics=summary|detail` 输出每次区域尝试的累计深度分布与最大深度。保存点深度不限，调用深度另计。正整数 `max_fragments` 限制每次根区域尝试因局部汇合失败保留的片段，超限计为 `fragment_limit`，后续可走普通分叉。
 
-`defer_range_proofs` / `--region-defer-range-proofs=true` 与 `defer_ctor_checks` / `--region-defer-ctor-checks=true` 均默认关闭，只在 defer 推演中把范围或构造子标签安全条件记录为出口义务；反例检查未获 UNSAT 时整次推演回滚，不能用于跳过必需的模型取值。
+`defer_range_proofs` 和 `defer_ctor_checks` 默认开启。进入延后推演时，仍需证明的范围和构造子标签条件登记为出口义务。比如五位符号值零扩展后减一，取值范围是 `[-1, 30]`，窄化到 i64 无需查询或登记义务。有 SMT 时，出口在原到达域下检查反例，未获 UNSAT 的区域会回滚。无 SMT 时沿用义务登记流程，候选仍未认证。可在 `[execution_limits.path_merge]` 中设为 `false`，也可用 `--region-defer-range-proofs=false` 或 `--region-defer-ctor-checks=false` 覆盖。
 
 局部未初始化槽位和 Poison 载荷的消除默认开启，可用 `--merge-poison-slots=false` 或在 `[execution_limits.path_merge]` 设置 `merge_poison_slots = false` 关闭。普通局部槽的默认初始化结果为 Poison，且静态证明旧内容不会被读取时，才跳过合并。可正常初始化的槽保留带守卫的值。联合载荷须先证明不活动，且后续读取必须受标签检查保护。返回值、地址被引用的槽位、全局状态和其余活跃槽沿用原合并规则。
 ### 无 SMT 候选 DAG 实验

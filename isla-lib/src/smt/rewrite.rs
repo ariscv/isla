@@ -72,7 +72,7 @@ pub fn diagnostics() -> serde_json::Value {
 // 对未解释函数等节点构造无效的 Rust enum；这里只匹配稳定的基础运算编号。
 extern "C" {
     #[link_name = "Z3_get_decl_kind"]
-    fn decl_kind_raw(ctx: Z3_context, decl: Z3_func_decl) -> u32;
+    pub(super) fn decl_kind_raw(ctx: Z3_context, decl: Z3_func_decl) -> u32;
 }
 
 impl<'ctx> Ast<'ctx> {
@@ -99,6 +99,38 @@ impl<'ctx> Ast<'ctx> {
     }
     fn rewrite_width(&self) -> u32 {
         unsafe { Z3_get_bv_sort_size(self.ctx.z3_ctx, Z3_get_sort(self.ctx.z3_ctx, self.z3_ast)) }
+    }
+
+    /// 返回扩展前的值和符号位，也识别 Z3 化简生成的重复位拼接。
+    pub(super) fn sign_extension_parts(&self) -> Option<(Self, Self)> {
+        if self.rewrite_kind(DeclKind::SIGN_EXT) {
+            let base = self.rewrite_args().remove(0);
+            if self.rewrite_width() == base.rewrite_width() {
+                return None;
+            }
+            let top = base.rewrite_width() - 1;
+            let mut sign = base.extract(top, top);
+            sign.simplify();
+            return Some((base, sign));
+        }
+        if !self.rewrite_kind(DeclKind::CONCAT) {
+            return None;
+        }
+        let mut pending = self.rewrite_args();
+        let mut parts = Vec::new();
+        while let Some(part) = pending.pop() {
+            if part.rewrite_kind(DeclKind::CONCAT) {
+                pending.extend(part.rewrite_args());
+            } else {
+                parts.push(part);
+            }
+        }
+        let mut parts = parts.into_iter();
+        let base = parts.next().expect("拼接应有操作数");
+        let top = base.rewrite_width() - 1;
+        let mut sign = base.extract(top, top);
+        sign.simplify();
+        parts.all(|part| part.z3_ast == sign.z3_ast).then_some((base, sign))
     }
 }
 
@@ -147,35 +179,18 @@ pub(super) fn apply(ast: Ast<'_>, rules: BvRewrite) -> Ast<'_> {
         let value = &args[0];
         let constant = &args[1];
         if unsafe { Z3_is_numeral_ast(ast.ctx.z3_ctx, constant.z3_ast) } {
-            let mut parts = Vec::new();
-            let mut pending = vec![value.clone()];
-            while let Some(part) = pending.pop() {
-                if part.rewrite_kind(DeclKind::CONCAT) {
-                    pending.extend(part.rewrite_args().into_iter().rev());
-                } else {
-                    parts.push(part);
-                }
-            }
-            let mut base = parts.last().unwrap().clone();
-            if parts.len() == 1 && value.rewrite_kind(DeclKind::SIGN_EXT) {
-                base = value.rewrite_args().remove(0);
-            }
-            let m = base.rewrite_width();
-            let n = value.rewrite_width();
-            if n > m {
-                let mut sign = base.extract(m - 1, m - 1);
-                sign.simplify();
-                if parts.len() == 1 || parts[..parts.len() - 1].iter().all(|p| p.z3_ast == sign.z3_ast) {
-                    // 用任意精度整数核对常量，不引入额外 SMT 查询。
-                    let c = unsafe { CStr::from_ptr(Z3_get_numeral_string(ast.ctx.z3_ctx, constant.z3_ast)) };
-                    let c = num_bigint::BigUint::parse_bytes(c.to_bytes(), 10).expect("位向量常量应为十进制整数");
-                    let one = num_bigint::BigUint::from(1u8);
-                    let lower = (&one << (m - 1)) - &one;
-                    let top = &one << (n - 1);
-                    if lower <= c && c < top {
-                        hit(2);
-                        return sign.mk_eq(&Ast::mk_bv_u64(ast.ctx, 1, 0));
-                    }
+            if let Some((base, sign)) = value.sign_extension_parts() {
+                let m = base.rewrite_width();
+                let n = value.rewrite_width();
+                // 用任意精度整数核对常量，不引入额外 SMT 查询。
+                let c = unsafe { CStr::from_ptr(Z3_get_numeral_string(ast.ctx.z3_ctx, constant.z3_ast)) };
+                let c = num_bigint::BigUint::parse_bytes(c.to_bytes(), 10).expect("位向量常量应为十进制整数");
+                let one = num_bigint::BigUint::from(1u8);
+                let lower = (&one << (m - 1)) - &one;
+                let top = &one << (n - 1);
+                if lower <= c && c < top {
+                    hit(2);
+                    return sign.mk_eq(&Ast::mk_bv_u64(ast.ctx, 1, 0));
                 }
             }
         }

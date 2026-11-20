@@ -395,6 +395,9 @@ pub(crate) fn integer_conversion_in_range<B: BV>(
     let Some(width) = solver.length(sym) else { return Ok(None) };
     let range = if narrow {
         assert_eq!(width, 128, "整数窄化的输入必须是 128 位");
+        if solver.structural_fits_i64(sym) {
+            return Ok(None);
+        }
         Exp::Eq(
             Box::new(Exp::Var(sym)),
             Box::new(Exp::SignExtend(64, Box::new(Exp::Extract(63, 0, Box::new(Exp::Var(sym)))))),
@@ -434,7 +437,7 @@ fn check_integer_conversion<B: BV>(
     info: SourceLoc,
 ) -> Result<(), ExecError> {
     if let Some(in_range) = integer_conversion_in_range(f, value, solver, info)? {
-        if !solver.no_smt_safety(&in_range, info)
+        if !solver.range_check_handled(&in_range, info)
             && solver.check_sat_with_for_range(&Exp::Not(Box::new(in_range.clone())), info).is_sat()?
         {
             if !solver.check_sat_with_for_range(&in_range, info).is_sat()? {
@@ -2379,7 +2382,7 @@ pub(crate) fn vector_access<B: BV>(
                 } else {
                     Exp::Bvult(Box::new(Exp::Var(*index)), Box::new(smt_u64_width(u64::from(length), width)))
                 };
-                if !solver.no_smt_safety(&in_bounds, info)
+                if !solver.range_check_handled(&in_bounds, info)
                     && solver.check_sat_with_for_range(&Exp::Not(Box::new(in_bounds.clone())), info).is_sat()?
                 {
                     if !solver.check_sat_with_for_range(&in_bounds, info).is_sat()? {
@@ -2469,7 +2472,7 @@ pub(crate) fn vector_access<B: BV>(
             } else {
                 Exp::Bvult(Box::new(Exp::Var(n)), Box::new(smt_u64_width(len, width)))
             };
-            if !solver.no_smt_safety(&in_bounds, info)
+            if !solver.range_check_handled(&in_bounds, info)
                 && solver.check_sat_with_for_range(&Exp::Not(Box::new(in_bounds.clone())), info).is_sat()?
             {
                 if !solver.check_sat_with_for_range(&in_bounds, info).is_sat()? {
@@ -2529,7 +2532,7 @@ fn check_slice_update_bounds<B: BV>(
     };
     assert!(matches!(width, 64 | 128), "更新索引必须是机器整数或整数");
     let in_bounds = Exp::Bvule(Box::new(index), Box::new(smt_u64_width(u64::from(max_index), width)));
-    if !solver.no_smt_safety(&in_bounds, info)
+    if !solver.range_check_handled(&in_bounds, info)
         && solver.check_sat_with_for_range(&Exp::Not(Box::new(in_bounds.clone())), info).is_sat()?
     {
         if !solver.check_sat_with_for_range(&in_bounds, info).is_sat()? {
@@ -2873,7 +2876,7 @@ pub fn vector_update<B: BV>(
                     Box::new(Exp::Var(n)),
                     Box::new(smt_u64_width(u64::try_from(vec.len()).unwrap(), width)),
                 );
-                if !solver.no_smt_safety(&in_bounds, info)
+                if !solver.range_check_handled(&in_bounds, info)
                     && solver.check_sat_with_for_range(&Exp::Not(Box::new(in_bounds.clone())), info).is_sat()?
                 {
                     if !solver.check_sat_with_for_range(&in_bounds, info).is_sat()? {

@@ -2712,6 +2712,12 @@ end_column = 0
 
     #[test]
     fn region_newbase_path_merge_fields_and_defaults() {
+        let defaults = RegionOptions::from_config(&merge_config("[execution_limits.path_merge]").unwrap());
+        assert!(defaults.defer_range_proofs && defaults.defer_ctor_checks);
+        let disabled =
+            merge_config("[execution_limits.path_merge]\ndefer_range_proofs=false\ndefer_ctor_checks=false").unwrap();
+        let disabled = RegionOptions::from_config(&disabled);
+        assert!(!disabled.defer_range_proofs && !disabled.defer_ctor_checks);
         let limits = merge_config("[execution_limits.path_merge]\nmax_merge_depth=32\ndefer_range_proofs=true\ndefer_ctor_checks=true\nstep_budget=-1\n[execution_limits.solver]\nno_smt=true").unwrap();
         let options = RegionOptions::from_config(&limits);
         assert_eq!(options.merge_depth_limit(), Some(32));
@@ -2837,8 +2843,8 @@ obligation_dump_dir = "obligations"
             RegionOptions {
                 bv_rewrite: Default::default(),
                 max_merge_depth: None,
-                defer_range_proofs: false,
-                defer_ctor_checks: false,
+                defer_range_proofs: true,
+                defer_ctor_checks: true,
                 prune_constant_branches: true,
                 arm_error_leaf: false,
                 skip_branch_checks: true,

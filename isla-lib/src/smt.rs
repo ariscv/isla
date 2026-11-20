@@ -3241,16 +3241,21 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.check_sat_with_strategy(exp, info, query::QueryPurpose::General)
     }
 
+    /// 已处理的范围条件无需立即发出反例查询。
+    pub(crate) fn range_check_handled(&mut self, condition: &Exp<Sym>, info: SourceLoc) -> bool {
+        matches!(condition, Exp::Bool(true))
+            || self.defer_safety_check(
+                condition,
+                crate::config::RegionOptions::current().defer_range_proofs,
+                "range_obligation",
+                info,
+            )
+            || self.no_smt_safety(condition, info)
+    }
+
     /// 整数转换及向量边界证明复用完整查询与超时机制；default使用同Config/种子的新solver。
     /// 活动臂条件、已发布断言和缓冲断言全部保留，Sat也仍是原上下文的反例。
     pub(crate) fn check_sat_with_for_range(&mut self, exp: &Exp<Sym>, info: SourceLoc) -> SmtResult {
-        if self.deferred_region_queries && crate::config::RegionOptions::current().defer_range_proofs {
-            // 调用方检查越界反例是否可行。暂按反例为空继续，但不能发布SAT知识；
-            // 原始到达域下的反例必须在出口证明为空，否则整次区域推演回滚。
-            self.note_deferred_mandatory_query("range_obligation", info);
-            self.defer_assertion(Exp::Not(Box::new(exp.clone())), info);
-            return Unsat;
-        }
         self.check_sat_with_strategy(exp, info, query::QueryPurpose::RangeProof)
     }
 

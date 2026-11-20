@@ -64,6 +64,13 @@ impl<B: BV> Solver<'_, B> {
         self.translate_exp(exp).structural_bool().or_else(|| self.finite_domain_bool(exp))
     }
 
+    /// 结构范围只依赖位宽与定义，有无 SMT 都使用同一判定。
+    pub(crate) fn structural_fits_i64(&self, sym: Sym) -> bool {
+        let value = self.translate_exp(&Exp::Var(sym));
+        unsafe { bitvector_range(self.ctx, value.z3_ast) }
+            .is_some_and(|range| i64::try_from(range.min).is_ok() && i64::try_from(range.max).is_ok())
+    }
+
     /// 返回 true 仅表示实验模式已经处理；未证明时明确计数并加入安全前提。
     pub(crate) fn no_smt_safety(&mut self, condition: &Exp<Sym>, info: SourceLoc) -> bool {
         if !self.no_smt() {
@@ -161,7 +168,44 @@ unsafe fn numeral(ctx: &Context, ast: Z3_ast) -> Option<u128> {
     text.parse().ok()
 }
 
-unsafe fn unsigned_upper(ctx: &Context, root: Z3_ast) -> Option<u128> {
+#[derive(Clone, Copy)]
+struct BitvectorRange {
+    min: i128,
+    max: i128,
+    unsigned_upper: u128,
+}
+
+impl BitvectorRange {
+    fn from_upper(upper: u128, mask: u128) -> Self {
+        let signed_max = (mask >> 1) as i128;
+        Self {
+            min: if upper <= signed_max as u128 { 0 } else { !signed_max },
+            max: upper.min(signed_max as u128) as i128,
+            unsigned_upper: upper,
+        }
+    }
+
+    fn intersect_signed(self, min: i128, max: i128, mask: u128) -> Self {
+        let min = self.min.max(min);
+        let max = self.max.min(max);
+        let upper = if min < 0 && max >= 0 { mask } else { (max as u128) & mask };
+        Self { min, max, unsigned_upper: self.unsigned_upper.min(upper) }
+    }
+}
+
+unsafe fn bv_width(z3: Z3_context, ast: Z3_ast) -> Option<u32> {
+    let sort = Z3_get_sort(z3, ast);
+    (Z3_get_sort_kind(z3, sort) == SortKind::BV).then(|| Z3_get_bv_sort_size(z3, sort))
+}
+
+unsafe fn bv_application(z3: Z3_context, ast: Z3_ast) -> Option<(Z3_app, Z3_func_decl)> {
+    (Z3_get_ast_kind(z3, ast) == AstKind::App).then(|| {
+        let app = Z3_to_app(z3, ast);
+        (app, Z3_get_app_decl(z3, app))
+    })
+}
+
+unsafe fn bitvector_range(ctx: &Context, root: Z3_ast) -> Option<BitvectorRange> {
     let z3 = ctx.z3_ctx;
     let mut bounds = HashMap::new();
     let mut pending = vec![(root, false)];
@@ -170,30 +214,64 @@ unsafe fn unsigned_upper(ctx: &Context, root: Z3_ast) -> Option<u128> {
         if bounds.contains_key(&ast) {
             continue;
         }
-        let sort = Z3_get_sort(z3, ast);
-        if Z3_get_sort_kind(z3, sort) != SortKind::BV || Z3_get_bv_sort_size(z3, sort) > 128 {
+        let Some(width) = bv_width(z3, ast).filter(|&width| width <= 128) else {
             bounds.insert(ast, None);
             continue;
-        }
+        };
+        let mask = u128::MAX >> (128 - width);
+        let from_upper = |upper| BitvectorRange::from_upper(upper, mask);
+        let full = from_upper(mask);
+        let with_signed = |(min, max)| full.intersect_signed(min, max, mask);
         if let Some(value) = numeral(ctx, ast) {
-            bounds.insert(ast, Some(value));
+            let signed = ((value << (128 - width)) as i128) >> (128 - width);
+            bounds.insert(ast, Some(with_signed((signed, signed))));
             continue;
         }
-        let width = Z3_get_bv_sort_size(z3, sort);
-        let full = u128::MAX >> (128 - width);
-        if Z3_get_ast_kind(z3, ast) != AstKind::App {
+        let Some((app, decl)) = bv_application(z3, ast) else {
             bounds.insert(ast, Some(full));
             continue;
-        }
-
-        let app = Z3_to_app(z3, ast);
-        let decl = Z3_get_app_decl(z3, app);
-        let kind = Z3_get_decl_kind(z3, decl);
+        };
+        let kind = rewrite::decl_kind_raw(z3, decl);
         let arg = |index| Z3_get_app_arg(z3, app, index);
+        let arity = Z3_get_app_num_args(z3, app);
+        let sign_concat = if kind == DeclKind::CONCAT as u32 && numeral(ctx, arg(0)).is_none() {
+            Z3_inc_ref(z3, ast);
+            let ast = Ast { ctx, z3_ast: ast };
+            ast.sign_extension_parts().map(|(base, _)| base.z3_ast)
+        } else {
+            None
+        };
+        if let Some(base) = sign_concat {
+            // base 是根 AST 的子节点，遍历期间由根引用保活。
+            if !children_ready {
+                pending.push((ast, true));
+                pending.push((base, false));
+            } else {
+                let range: BitvectorRange = bounds[&base].unwrap();
+                bounds.insert(ast, Some(with_signed((range.min, range.max))));
+            }
+            continue;
+        }
+        let negated = if kind == DeclKind::BMUL as u32 && arity == 2 {
+            (0..2).find(|&index| numeral(ctx, arg(1 - index)) == Some(mask))
+        } else {
+            None
+        };
         let args = match kind {
-            DeclKind::ITE => 1..3,
-            DeclKind::ZERO_EXT | DeclKind::EXTRACT => 0..1,
-            DeclKind::BAND | DeclKind::CONCAT | DeclKind::BADD => 0..Z3_get_app_num_args(z3, app),
+            k if k == DeclKind::ITE as u32 => 1..3,
+            k if [DeclKind::ZERO_EXT, DeclKind::SIGN_EXT, DeclKind::EXTRACT, DeclKind::BNEG]
+                .map(|d| d as u32)
+                .contains(&k) =>
+            {
+                0..1
+            }
+            k if [DeclKind::BAND, DeclKind::CONCAT, DeclKind::BADD, DeclKind::BSUB].map(|d| d as u32).contains(&k) => {
+                0..arity
+            }
+            _ if negated.is_some() => {
+                let index = negated.unwrap();
+                index..index + 1
+            }
             _ => {
                 bounds.insert(ast, Some(full));
                 continue;
@@ -205,40 +283,72 @@ unsafe fn unsigned_upper(ctx: &Context, root: Z3_ast) -> Option<u128> {
             continue;
         }
 
-        let upper = |index| bounds[&arg(index)];
-        let bound = (|| {
+        let operand = |index| bounds[&arg(index)];
+        let range = (|| {
+            if negated.is_some() || kind == DeclKind::BNEG as u32 {
+                let value = operand(args.start)?;
+                let (min, max) = (value.max.checked_neg()?, value.min.checked_neg()?);
+                return (min >= full.min && max <= full.max).then(|| with_signed((min, max)));
+            }
             match kind {
-                DeclKind::ITE => Some(upper(1)?.max(upper(2)?)),
-                DeclKind::ZERO_EXT => upper(0),
-                DeclKind::EXTRACT => {
-                    let low = u32::try_from(Z3_get_decl_int_parameter(z3, decl, 1)).ok()?;
-                    Some((upper(0)? >> low).min(full))
+                k if k == DeclKind::SIGN_EXT as u32 => {
+                    let value = operand(args.start)?;
+                    Some(with_signed((value.min, value.max)))
                 }
-                DeclKind::BAND => args.map(upper).try_fold(full, |bound, next| Some(bound.min(next?))),
-                DeclKind::CONCAT => {
-                    let mut bound = 0u128;
+                k if k == DeclKind::ITE as u32 => {
+                    let (a, b) = (operand(1)?, operand(2)?);
+                    Some(from_upper(a.unsigned_upper.max(b.unsigned_upper)).intersect_signed(
+                        a.min.min(b.min),
+                        a.max.max(b.max),
+                        mask,
+                    ))
+                }
+                k if k == DeclKind::ZERO_EXT as u32 => Some(from_upper(operand(0)?.unsigned_upper)),
+                k if k == DeclKind::EXTRACT as u32 => {
+                    let low = u32::try_from(Z3_get_decl_int_parameter(z3, decl, 1)).unwrap();
+                    Some(operand(0).map_or(full, |value| from_upper((value.unsigned_upper >> low).min(mask))))
+                }
+                k if k == DeclKind::BAND as u32 => {
+                    let upper =
+                        args.map(operand).try_fold(mask, |upper, value| Some(upper.min(value?.unsigned_upper)))?;
+                    Some(from_upper(upper))
+                }
+                k if k == DeclKind::CONCAT as u32 => {
+                    let mut upper = 0u128;
                     for index in args {
-                        let part_width = Z3_get_bv_sort_size(z3, Z3_get_sort(z3, arg(index)));
-                        let next = upper(index)?;
-                        // 合法的拼接结果不超过 128 位；128 位参数前没有其他位。
-                        bound = if part_width == 128 { next } else { (bound << part_width) | next };
+                        let width = bv_width(z3, arg(index)).unwrap();
+                        upper = (upper.checked_shl(width).unwrap_or(0)) | operand(index)?.unsigned_upper;
                     }
-                    Some(bound)
+                    Some(from_upper(upper))
                 }
-                DeclKind::BADD => {
-                    let mut bound = 0u128;
-                    for index in args {
-                        let Some(sum) = bound.checked_add(upper(index)?).filter(|sum| *sum <= full) else {
-                            return Some(full);
-                        };
-                        bound = sum;
-                    }
-                    Some(bound)
+                k if k == DeclKind::BADD as u32 => {
+                    let upper = args
+                        .clone()
+                        .map(operand)
+                        .try_fold(0u128, |upper, value| upper.checked_add(value?.unsigned_upper))
+                        .filter(|&upper| upper <= mask)
+                        .unwrap_or(mask);
+                    let unsigned = from_upper(upper);
+                    let signed = args.map(operand).try_fold((0i128, 0i128), |(min, max), value| {
+                        let value = value?;
+                        Some((min.checked_add(value.min)?, max.checked_add(value.max)?))
+                    });
+                    Some(
+                        signed
+                            .filter(|&(min, max)| min >= full.min && max <= full.max)
+                            .map_or(unsigned, |(min, max)| unsigned.intersect_signed(min, max, mask)),
+                    )
                 }
-                _ => unreachable!("上界递推只访问已识别的运算"),
+                k if k == DeclKind::BSUB as u32 => {
+                    let (a, b) = (operand(0)?, operand(1)?);
+                    let (min, max) = (a.min.checked_sub(b.max)?, a.max.checked_sub(b.min)?);
+                    (min >= full.min && max <= full.max).then(|| with_signed((min, max)))
+                }
+                _ => unreachable!("范围递推只访问已识别的运算"),
             }
         })();
-        bounds.insert(ast, bound);
+        // 位向量越过本身的有符号边界时会回绕，未经证明不能沿用数学区间。
+        bounds.insert(ast, Some(range.unwrap_or(full)));
     }
     bounds[&root]
 }
@@ -252,17 +362,17 @@ unsafe fn structural_comparison(ctx: &Context, ast: Z3_ast) -> Option<bool> {
     if Z3_get_app_num_args(ctx.z3_ctx, app) != 2 {
         return None;
     }
-    let kind = Z3_get_decl_kind(ctx.z3_ctx, decl);
-    if !matches!(kind, DeclKind::ULT | DeclKind::ULEQ) {
+    let kind = rewrite::decl_kind_raw(ctx.z3_ctx, decl);
+    if kind != DeclKind::ULT as u32 && kind != DeclKind::ULEQ as u32 {
         return None;
     }
     let left = Z3_get_app_arg(ctx.z3_ctx, app, 0);
     let right = Z3_get_app_arg(ctx.z3_ctx, app, 1);
     let limit = numeral(ctx, right)?;
-    let bound = unsigned_upper(ctx, left)?;
+    let bound = bitvector_range(ctx, left)?.unsigned_upper;
     match kind {
-        DeclKind::ULT if bound < limit => Some(true),
-        DeclKind::ULEQ if bound <= limit => Some(true),
+        k if k == DeclKind::ULT as u32 && bound < limit => Some(true),
+        k if k == DeclKind::ULEQ as u32 && bound <= limit => Some(true),
         _ => None,
     }
 }

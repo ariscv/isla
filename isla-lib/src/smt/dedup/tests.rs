@@ -308,10 +308,48 @@ fn obligation_domain_excludes_even_earlier_normal_exit_and_keeps_outer_guard() {
 }
 
 #[test]
+fn structural_integer_narrowing_needs_no_query_or_obligation() {
+    configure_tastic(Tactic::Qfaufbv);
+    let info = SourceLoc::unknown();
+    for no_smt in [false, true] {
+        let mut cfg = Config::new();
+        cfg.solver_options.no_smt = no_smt;
+        let ctx = Context::new(cfg);
+        let mut s = Solver::<B64>::new(&ctx);
+        let raw = s.declare_const(Ty::BitVec(128), info);
+        let bits = s.declare_const(Ty::BitVec(5), info);
+        let widened = s.define_const(ZeroExtend(123, Box::new(Var(bits))), info);
+        let signed = s.define_const(SignExtend(123, Box::new(Var(bits))), info);
+        let extracted = s.define_const(Extract(63, 0, Box::new(Var(raw))), info);
+        let sign_extended = s.define_const(SignExtend(64, Box::new(Var(extracted))), info);
+        let sub = s.define_const(Bvsub(Box::new(Var(widened)), Box::new(bits64(1, 128))), info);
+        let add = s.define_const(Bvadd(Box::new(Var(sub)), Box::new(Var(signed))), info);
+        let sub_pair = s.define_const(Bvsub(Box::new(Var(signed)), Box::new(Var(sub))), info);
+        let root = s.start_transaction();
+        s.with_deferred_region_queries(|s| {
+            let narrow = crate::primop::unary_primops()["%i->%i64"];
+            reset_path_smt_stats();
+            for (index, value) in [sub, add, sub_pair, sign_extended].into_iter().enumerate() {
+                let ast = s.translate_exp(&Var(value));
+                assert!(
+                    s.structural_fits_i64(value),
+                    "第 {index} 项应可结构证明，表达式 {}",
+                    unsafe { CStr::from_ptr(Z3_ast_to_string(ctx.z3_ctx, ast.z3_ast)) }.to_string_lossy()
+                );
+                assert!(matches!(narrow(Val::Symbolic(value), s, info), Ok(Val::Symbolic(_))));
+            }
+            assert_eq!(path_smt_stats().calls, 0);
+            assert!(s.deferred_assertions.as_ref().unwrap().obligations.is_empty());
+        });
+        s.rollback_transaction(root);
+    }
+}
+
+#[test]
 fn region_util_defer_range_obligation_preserves_error_domain() {
     const CHILD: &str = "REGION_UTIL_RANGE_TEST_CHILD";
     let Ok(mode) = std::env::var(CHILD) else {
-        for mode in ["false", "true"] {
+        for mode in ["disabled", "smt", "no_smt"] {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
@@ -330,33 +368,50 @@ fn region_util_defer_range_obligation_preserves_error_domain() {
         }
         return;
     };
-    let enabled = mode == "true";
-    let mut options = crate::config::RegionOptions::default();
-    options.defer_range_proofs = enabled;
-    options.configure();
+    let enabled = mode != "disabled";
+    let no_smt = mode == "no_smt";
+    if !enabled {
+        crate::config::RegionOptions { defer_range_proofs: false, ..Default::default() }.configure();
+    }
     configure_tastic(Tactic::Qfaufbv);
-    let ctx = Context::new(Config::new());
+    let mut config = Config::new();
+    config.solver_options.no_smt = no_smt;
+    let ctx = Context::new(config);
     let info = SourceLoc::unknown();
     for safe in [false, true] {
         let mut s = Solver::<B64>::new(&ctx);
-        let x = s.declare_const(Ty::Bool, info);
-        if safe {
-            s.assert(Var(x));
-        }
+        let wide = s.declare_const(Ty::BitVec(128), info);
+        let value = if safe { 5 } else { 1 << 63 };
+        s.assert(Eq(Box::new(Var(wide)), Box::new(bits64(value, 128))));
         let root = s.start_transaction();
+        let narrow = crate::primop::unary_primops()["%i->%i64"];
         s.with_deferred_region_queries(|s| {
             reset_path_smt_stats();
-            assert_eq!(s.check_sat_with_for_range(&Not(Box::new(Var(x))), info), if enabled { Unsat } else { Unknown });
-            assert_eq!(path_smt_stats().calls, 0, "出口前不查SMT");
-            s.assert(Bool(false));
+            let result = narrow(Val::Symbolic(wide), s, info);
+            if enabled {
+                assert!(matches!(result, Ok(Val::Symbolic(_))));
+            } else {
+                assert!(matches!(result, Err(ExecError::Z3Unknown)));
+            }
+            assert_eq!(s.deferred_assertions.as_ref().unwrap().obligations.len(), usize::from(enabled));
+            assert_eq!(path_smt_stats().calls, 0, "出口前不查 SMT");
+            s.assert_region_exit(Bool(false));
             assert_eq!(
                 s.check_deferred_assertions(info),
-                Some(if enabled && !safe { Sat } else { Unsat }),
-                "后续假断言不得掩盖不安全输入"
+                if no_smt { None } else { Some(if enabled && !safe { Sat } else { Unsat }) },
+                "正常退出域不得掩盖越界输入"
             );
         });
         s.rollback_transaction(root);
-        assert_eq!(s.check_sat(info), Sat);
+        if !no_smt {
+            assert_eq!(s.check_sat(info), Sat, "回滚应恢复原到达域");
+            let result = narrow(Val::Symbolic(wide), &mut s, info);
+            if safe {
+                assert!(result.is_ok());
+            } else {
+                assert!(matches!(result, Err(ExecError::Overflow)));
+            }
+        }
     }
 }
 

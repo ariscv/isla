@@ -4,8 +4,8 @@ use isla_lib::config::ExecutionLimitsConfig;
 const BOOL_OPTIONS: &[(&str, &str, &str)] = &[
     ("finite_domain_enumeration", "finite-domain-enumeration", "先按可确认的有限域枚举具体值；默认开启"),
     ("merge_poison_slots", "merge-poison-slots", "只消除已证明不可观察的局部未初始化槽位或载荷；默认开启"),
-    ("defer_ctor_checks", "region-defer-ctor-checks", "构造子解包标签转为出口待证义务；默认关闭"),
-    ("defer_range_proofs", "region-defer-range-proofs", "范围证明转为出口待证义务；默认关闭"),
+    ("defer_ctor_checks", "region-defer-ctor-checks", "延后推演时，构造子解包标签转为出口待证义务；默认开启"),
+    ("defer_range_proofs", "region-defer-range-proofs", "延后推演时，范围证明转为出口待证义务；默认开启"),
     ("prune_constant_branches", "prune-constant-branches", "分支入口识别布尔恒值；默认开启"),
     ("arm_error_leaf", "arm-error-leaf", "保留带到达条件的臂内执行错误；默认关闭"),
     ("merge_concrete_values", "merge-concrete-values", "延后拆分区域具体字符串和机器整数；默认开启"),
@@ -189,6 +189,7 @@ mod tests {
         assert_eq!(limits, ExecutionLimitsConfig::default());
         assert!(limits.path_merge.merge_concrete_values);
         assert!(limits.path_merge.defer_call_effect_checks);
+        assert!(limits.path_merge.defer_range_proofs && limits.path_merge.defer_ctor_checks);
         for (field, flag, _) in BOOL_OPTIONS {
             let section = if [
                 "prune_constant_branches",

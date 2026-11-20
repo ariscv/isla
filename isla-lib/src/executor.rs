@@ -792,13 +792,13 @@ fn eval_exp_with_accessor<'state, 'ir, B: BV>(
                     Some(v) => {
                         let matches_tag = smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(tag)), Box::new(ctor_a.to_smt()));
                         if speculative
-                            && solver.region_queries_deferred()
-                            && crate::config::RegionOptions::current().defer_ctor_checks
+                            && solver.defer_safety_check(
+                                &matches_tag,
+                                crate::config::RegionOptions::current().defer_ctor_checks,
+                                "ctor_obligation",
+                                info,
+                            )
                         {
-                            // 解包只借用已有候选载荷；标签在完整到达域下必须获证，
-                            // 不能用后续成功断言把标签不符的输入掩掉。
-                            solver.note_deferred_mandatory_query("ctor_obligation", info);
-                            solver.defer_assertion(matches_tag, info);
                             return Ok(Owned(v));
                         }
                         let mismatch = smtlib::Exp::Not(Box::new(matches_tag.clone()));

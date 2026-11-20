@@ -64,6 +64,22 @@ impl<B: BV> Solver<'_, B> {
         state.first_blocked.get_or_insert(info);
     }
 
+    /// 范围与标签共用原到达域下的出口义务，未验证时不登记求解知识。
+    pub(crate) fn defer_safety_check(
+        &mut self,
+        condition: &Exp<Sym>,
+        enabled: bool,
+        purpose: &'static str,
+        info: SourceLoc,
+    ) -> bool {
+        if !self.deferred_region_queries || !enabled {
+            return false;
+        }
+        self.note_deferred_mandatory_query(purpose, info);
+        self.defer_assertion(condition.clone(), info);
+        true
+    }
+
     pub(crate) fn defer_assertion(&mut self, condition: Exp<Sym>, info: SourceLoc) {
         assert!(self.deferred_region_queries && !self.savepoints.is_empty(), "义务必须在延迟区域事务中记录");
         let guard = self

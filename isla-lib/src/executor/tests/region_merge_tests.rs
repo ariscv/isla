@@ -5226,6 +5226,99 @@ fn deferred_assert_obligation_keeps_safe_and_rejects_failing_arms() {
     assert!(shared.execution_stats.merge_json()["failure_reasons"]["symbolic_assertion"].as_u64().unwrap() > 0);
 }
 
+#[test]
+fn deferred_narrowing_merges_safe_arms_and_reexecutes_overflow() {
+    if !run_in_diagnostics_process(concat!(
+        module_path!(),
+        "::deferred_narrowing_merges_safe_arms_and_reexecutes_overflow"
+    )) {
+        return;
+    }
+    crate::config::RegionOptions { defer_exit_check: true, ..Default::default() }.configure();
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    for no_smt in [false, true] {
+        let mut config = Config::new();
+        config.solver_options.no_smt = no_smt;
+        let context = Context::new(config);
+        for strategy in [crate::config::MergeStrategy::Recursive, crate::config::MergeStrategy::Flat] {
+            for (structural, overflow) in [(true, false), (false, false), (false, true)] {
+                if no_smt && overflow {
+                    continue;
+                }
+                let slot = test_name(1840);
+                let program = vec![
+                    Instr::Jump(input(0), 3, info()),
+                    Instr::Copy(Loc::Id(RETURN), Exp::I64(0), info()),
+                    Instr::Goto(4),
+                    Instr::PrimopUnary(Loc::Id(RETURN), primop::unary_primops()["%i->%i64"], Exp::Id(slot), info()),
+                    Instr::End,
+                ];
+                let mut frame = make_frame(program);
+                let mut solver = Solver::new(&context);
+                let guard = solver.declare_const(smtlib::Ty::Bool, info());
+                let wide = if structural {
+                    let bits = solver.declare_bitvector(5, info());
+                    let zext = solver.define_const(Formula::ZeroExtend(123, Box::new(Formula::Var(bits))), info());
+                    solver.define_const(
+                        Formula::Bvsub(Box::new(Formula::Var(zext)), Box::new(smtlib::bits64(1, 128))),
+                        info(),
+                    )
+                } else {
+                    let raw = solver.declare_bitvector(128, info());
+                    let value = if overflow { 1 << 63 } else { 5 };
+                    solver.assert(Formula::Eq(Box::new(Formula::Var(raw)), Box::new(smtlib::bits64(value, 128))));
+                    raw
+                };
+                frame.vars_mut().insert(test_name(900), UVal::Init(Val::Symbolic(guard)));
+                frame.vars_mut().insert(slot, UVal::Init(Val::Symbolic(wide)));
+                let mut limits = ExecutionLimits::default().with_path_merging(true);
+                limits.merge_strategy = strategy;
+                let state = TaskState::new().with_execution_limits(limits);
+                let shared = empty_shared_state();
+                let queue = Worker::new_lifo();
+                let sink = SingleForkSink { queue: &queue };
+                queue.push(frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver)));
+                let before = crate::smt::test_query_count();
+                let mut merged = 0;
+                let mut normal = 0;
+                let mut errors = 0;
+                while let Some(mut task) = queue.pop() {
+                    let mut solver = Solver::from_checkpoint(&context, task.checkpoint);
+                    if let Some((def, event)) = task.fork_cond {
+                        solver.add_event(event);
+                        solver.add(def);
+                    }
+                    let mut frame = unfreeze_frame(&task.frame);
+                    match run_loop(
+                        0,
+                        task.id,
+                        &mut task.fraction,
+                        PathTimeout::unlimited(),
+                        None,
+                        &sink,
+                        &mut frame,
+                        &state,
+                        &shared,
+                        &mut solver,
+                    ) {
+                        Ok(Run::Finished(_)) => {
+                            normal += 1;
+                            merged += usize::from(!frame.region_merge_records().is_empty());
+                        }
+                        Err(ExecError::Overflow) => errors += 1,
+                        Ok(_) => panic!("区域窄化应运行到终态"),
+                        Err(error) => panic!("区域窄化产生意外错误：{error:?}"),
+                    }
+                }
+                assert_eq!((normal, merged, errors), (1, usize::from(!overflow), usize::from(overflow)));
+                if no_smt {
+                    assert_eq!(crate::smt::test_query_count(), before);
+                }
+            }
+        }
+    }
+}
+
 // 区域配置按进程冻结；每项回归独立子进程，不污染并行区域套件。
 fn dead_arm_candidate_child(test: &str) -> bool {
     const CHILD: &str = "ISLA_DEAD_ARM_TEST_CHILD";
