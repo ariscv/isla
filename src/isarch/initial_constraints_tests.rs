@@ -298,7 +298,7 @@ stride = "16"
             !has_vstart && has_vector == vector
         })
         .collect();
-    regs.apply_constraints(&selected, &shared, &mut configured, SourceLoc::unknown()).unwrap();
+    regs.apply_constraints(&selected, &lets, &shared, &mut configured, SourceLoc::unknown()).unwrap();
     let new = configured
         .trace()
         .to_vec()
@@ -328,4 +328,119 @@ fn configured_domain_equivalent_to_legacy_rules() {
 #[test]
 fn configured_rvv_equivalent_to_legacy_rules() {
     prove_equivalence(true);
+}
+
+#[test]
+fn pmp_initial_domain_preserves_only_supported_address_modes() {
+    use isla_lib::executor::{execute_ir_function_with_checkpoint_and_limits, ExecutionLimits, TaskState};
+    use isla_lib::ir::{ExitCause, Exp, Instr, Loc, RETURN};
+    use isla_lib::smt::checkpoint;
+
+    isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+    let mut symtab = Symtab::new();
+    let function = symtab.intern("zmatch_address_mode");
+    let selected = symtab.intern("zselected");
+    let grain_ok = symtab.intern("zgrain_ok");
+    let grain_name = symtab.intern("zsys_pmp_grain");
+    let register = symtab.intern("zpmpcfg_n");
+    let entry = symtab.intern("zPmpcfg_ent");
+    let bits = symtab.intern("zbits");
+    let info = SourceLoc::unknown();
+    let defs = vec![
+        Def::Struct(entry, vec![(bits, Ty::Bits(8))]),
+        Def::Register(register, Ty::FixedVector(64, Box::new(Ty::Struct(entry))), vec![]),
+        Def::Val(function, vec![Ty::Bool, Ty::Bool], Ty::Bool),
+        Def::Fn(
+            function,
+            vec![selected, grain_ok],
+            vec![
+                Instr::Jump(Exp::Id(selected), 3, info),
+                Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info),
+                Instr::Goto(7),
+                Instr::Jump(Exp::Id(grain_ok), 5, info),
+                Instr::Exit(ExitCause::AssertionFailure, info),
+                Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info),
+                Instr::Goto(7),
+                Instr::End,
+            ],
+        ),
+    ];
+    let shared = SharedState::new(
+        symtab,
+        &defs,
+        IRTypeInfo::new(&defs),
+        HashSet::new(),
+        HashSet::new(),
+        HashSet::new(),
+        vec![],
+        vec![],
+        vec![],
+    );
+    let config: toml::Value = include_str!("../../configs/riscv64_xiangshan_fullsym.toml").parse().unwrap();
+    let constraints: Vec<_> = config["constraints"]["initial"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|rule| rule.as_str().unwrap())
+        .filter(|rule| rule.contains("pmpcfg_n"))
+        .map(|rule| isla_lib::smt_parser::ExpParser::new().parse(rule).unwrap())
+        .collect();
+
+    for grain in [0, 10] {
+        let mut lets = Bindings::default();
+        lets.insert(grain_name, UVal::Init(Val::I64(grain)));
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let mut regs = RegisterBindings::new();
+        regs.insert(register, false, UVal::Uninit(&shared.registers[&register]));
+        regs.apply_constraints(&constraints, &lets, &shared, &mut solver, info).unwrap();
+        let Val::Vector(entries) = regs.get(register, &shared, &mut solver, info).unwrap().unwrap() else { panic!() };
+        let fields = entries
+            .iter()
+            .map(|entry| {
+                let Val::Struct(fields) = entry else { panic!() };
+                let value = smt_value(&fields[&bits], info).unwrap();
+                smtlib::Exp::Extract(4, 3, Box::new(value))
+            })
+            .collect::<Vec<_>>();
+        let mode_is =
+            |index: usize, mode| smtlib::Exp::Eq(Box::new(fields[index].clone()), Box::new(smtlib::bits64(mode, 2)));
+        // 用同一组符号模拟匹配编码后的 NA4 分支，保留断言失败的正常观察入口。
+        let selected = solver.define_const(mode_is(0, 2), info);
+        let initial = checkpoint(&mut solver);
+        let results = std::cell::RefCell::new(Vec::new());
+        execute_ir_function_with_checkpoint_and_limits(
+            "zmatch_address_mode",
+            &[Val::Symbolic(selected), Val::Bool(grain == 0)],
+            &shared,
+            &regs,
+            &lets,
+            &results,
+            &|_, _, outcome, _, _, results| {
+                use isla_lib::executor::Run;
+                match outcome {
+                    Ok((Run::Finished(Val::Bool(value)), _)) => results.borrow_mut().push(Ok(value)),
+                    Err((error, _)) => results.borrow_mut().push(Err(error)),
+                    Ok((Run::Dead, _)) => (),
+                    _ => panic!("出现意外终态"),
+                }
+            },
+            initial,
+            None,
+            TaskState::new().with_execution_limits(ExecutionLimits::default()).with_region_observations(false, true),
+        );
+        let mut results = results.into_inner().into_iter().collect::<Result<Vec<_>, _>>().unwrap();
+        results.sort_unstable();
+        assert_eq!(results, if grain == 0 { vec![false, true] } else { vec![false] }, "G={grain}");
+
+        for index in 0..fields.len() {
+            for mode in 0..4 {
+                assert_eq!(
+                    solver.check_sat_with(&mode_is(index, mode), info),
+                    if grain >= 1 && mode == 2 { SmtResult::Unsat } else { SmtResult::Sat },
+                    "G={grain}，PMP 项 {index}，A={mode}"
+                );
+            }
+        }
+    }
 }

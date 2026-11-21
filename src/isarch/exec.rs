@@ -1864,6 +1864,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     // 所有初态注入共用执行寄存器中的符号；先施加配置约束，再做首次可满足性检查和编码预检。
     symbolic_regs.apply_constraints(
         &shared_state.initial_constraints,
+        lets,
         shared_state,
         &mut solver,
         SourceLoc::unknown(),

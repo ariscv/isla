@@ -1386,7 +1386,8 @@ mod tests {
         let config: toml::Value = include_str!("../../configs/riscv64_difftest.toml").parse().unwrap();
         let text = config["constraints"]["initial"][3].as_str().unwrap().replace("vtype.bits", "vtype");
         let constraint = isla_lib::smt_parser::ExpParser::new().parse(&text).unwrap();
-        regs.apply_constraints(&[constraint], &shared_state, &mut solver, SourceLoc::unknown()).unwrap();
+        regs.apply_constraints(&[constraint], &Bindings::default(), &shared_state, &mut solver, SourceLoc::unknown())
+            .unwrap();
 
         let vtype = match target.pre_state().get(&vtype_name).unwrap() {
             Val::Symbolic(sym) => *sym,
