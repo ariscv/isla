@@ -200,20 +200,21 @@ pub enum Loc<A> {
     Id(A),
     Field(Box<Loc<A>>, A),
     Addr(Box<Loc<A>>),
+    Index(Box<Loc<A>>, u32),
 }
 
 impl<A: Clone> Loc<A> {
     pub fn id(&self) -> A {
         match self {
             Loc::Id(id) => id.clone(),
-            Loc::Field(loc, _) | Loc::Addr(loc) => loc.id(),
+            Loc::Field(loc, _) | Loc::Addr(loc) | Loc::Index(loc, _) => loc.id(),
         }
     }
 
     pub fn id_mut(&mut self) -> &mut A {
         match self {
             Loc::Id(id) => id,
-            Loc::Field(loc, _) | Loc::Addr(loc) => loc.id_mut(),
+            Loc::Field(loc, _) | Loc::Addr(loc) | Loc::Index(loc, _) => loc.id_mut(),
         }
     }
 }
@@ -224,6 +225,7 @@ impl fmt::Display for Loc<String> {
             Loc::Id(a) => write!(f, "{}", zencode::decode(a)),
             Loc::Field(loc, a) => write!(f, "{}.{}", loc, a),
             Loc::Addr(a) => write!(f, "{}*", a),
+            Loc::Index(loc, index) => write!(f, "{}[{}]", loc, index),
         }
     }
 }
@@ -1077,6 +1079,7 @@ impl<'ir> Symtab<'ir> {
             Id(v) => Id(self.get(v)?),
             Field(loc, field) => Field(Box::new(self.get_loc(loc)?), self.get(field)?),
             Addr(loc) => Addr(Box::new(self.get_loc(loc)?)),
+            Index(loc, index) => Index(Box::new(self.get_loc(loc)?), *index),
         })
     }
 
@@ -1097,6 +1100,7 @@ pub fn loc_string(loc: &Loc<Name>, symtab: &Symtab) -> String {
         Loc::Id(a) => zencode::decode(symtab.to_str(*a)),
         Loc::Field(loc, a) => format!("{}.{}", loc_string(loc, symtab), zencode::decode(symtab.to_str(*a))),
         Loc::Addr(a) => format!("{}*", loc_string(a, symtab)),
+        Loc::Index(loc, index) => format!("{}[{}]", loc_string(loc, symtab), index),
     }
 }
 

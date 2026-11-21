@@ -1386,6 +1386,10 @@ impl WriteVar for Loc<String> {
                             l = loc
                         }
                         Loc::Addr(loc) => l = loc,
+                        Loc::Index(loc, index) => {
+                            write!(buf, "(_ index {}) ", index)?;
+                            l = loc;
+                        }
                     }
                 }
                 write!(buf, "))")

@@ -202,6 +202,7 @@ impl From<&Loc<Name>> for BlockLoc {
                 BlockLoc::Field(Box::new(Self::from(loc.as_ref())), base_name, SSAName::new(*field))
             }
             Loc::Addr(loc) => BlockLoc::Addr(Box::new(Self::from(loc.as_ref()))),
+            Loc::Index(..) => panic!("配置表达式的向量下标不能出现在 IR 赋值位置"),
         }
     }
 }

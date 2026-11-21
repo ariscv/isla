@@ -260,6 +260,17 @@ fn get_loc_and_initialize<'ir, B: BV>(
                 panic!("Struct expression did not evaluate to a struct")
             }
         }
+        Loc::Index(loc, index) => {
+            // 配置表达式读取向量元素时，寄存器事件记录整个寄存器。
+            let vector =
+                get_loc_and_initialize(loc, local_state, shared_state, solver, &mut Vec::new(), info, for_write)?;
+            match vector {
+                Val::Vector(values) => {
+                    values.into_iter().nth(*index as usize).ok_or(ExecError::OutOfBounds("约束的向量下标"))?
+                }
+                _ => return Err(ExecError::Type("约束的下标引用需要向量".to_string(), info)),
+            }
+        }
         _ => panic!("Cannot get_loc_and_initialize"),
     })
 }
@@ -978,6 +989,7 @@ fn assign_with_accessor<'ir, B: BV>(
                 panic!("Cannot get address of non-reference {:?}", loc)
             }
         }
+        Loc::Index(..) => panic!("配置表达式的向量下标不能出现在 IR 赋值位置"),
     };
     Ok(())
 }

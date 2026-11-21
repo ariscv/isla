@@ -468,10 +468,11 @@ impl<'ir, B: BV> RegisterBindings<'ir, B> {
         Ok(())
     }
 
-    /// 复用 SMT 配置表达式的寄存器与字段引用，在当前寄存器符号上施加约束。
+    /// 在当前寄存器符号上施加 SMT 配置约束，允许引用具体的顶层 let。
     pub fn apply_constraints(
         &mut self,
         constraints: &[crate::smt::smtlib::Exp<Loc<String>>],
+        lets: &Bindings<'ir, B>,
         shared_state: &SharedState<'ir, B>,
         solver: &mut Solver<B>,
         info: SourceLoc,
@@ -482,21 +483,39 @@ impl<'ir, B: BV> RegisterBindings<'ir, B> {
                     .symtab
                     .get_loc(reference)
                     .ok_or_else(|| ExecError::Unreachable(format!("初态约束引用不存在的位置 {reference}")))?;
-                let mut fields = Vec::new();
+                let mut projections = Vec::new();
                 let mut root = &loc;
-                while let Loc::Field(parent, field) = root {
-                    fields.push(*field);
-                    root = parent;
+                let name = loop {
+                    match root {
+                        Loc::Id(name) => break *name,
+                        Loc::Field(parent, _) | Loc::Index(parent, _) => {
+                            projections.push(root);
+                            root = parent;
+                        }
+                        Loc::Addr(_) => panic!("初态约束不能读取地址位置"),
+                    }
+                };
+                let (mut value, is_let) = match self.get(name, shared_state, solver, info)? {
+                    Some(value) => (value, false),
+                    None => match lets.get(&name) {
+                        Some(UVal::Init(value)) => (value, true),
+                        _ => {
+                            return Err(ExecError::Unreachable(format!(
+                                "初态约束需要寄存器或已初始化的顶层 let：{reference}"
+                            )))
+                        }
+                    },
+                };
+                for projection in projections.into_iter().rev() {
+                    value = match (projection, value) {
+                        (Loc::Field(_, field), Val::Struct(members)) => members.get(field),
+                        (Loc::Index(_, index), Val::Vector(values)) => values.get(*index as usize),
+                        _ => None,
+                    }
+                    .ok_or_else(|| ExecError::Type(format!("初态约束引用无效字段或向量元素：{reference}"), info))?;
                 }
-                let Loc::Id(name) = root else { panic!("初态约束不能读取地址位置") };
-                let mut value = self
-                    .get(*name, shared_state, solver, info)?
-                    .ok_or_else(|| ExecError::Unreachable(format!("初态约束引用非寄存器位置 {reference}")))?;
-                for field in fields.into_iter().rev() {
-                    let Val::Struct(members) = value else {
-                        panic!("初态约束的字段引用必须指向结构体")
-                    };
-                    value = members.get(&field).expect("初态约束引用的结构字段不存在");
+                if is_let && value.is_symbolic() {
+                    return Err(ExecError::Type(format!("初态约束需要具体的顶层 let：{reference}"), info));
                 }
                 crate::primop_util::smt_value(value, info)
             })?;

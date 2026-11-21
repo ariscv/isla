@@ -54,6 +54,7 @@ Ident: String = <id:r"[A-Za-z_][A-Za-z0-9_'#]*"> => zencode::encode(id);
 Loc: Loc<String> = {
     <id:Ident> => Loc::Id(id),
     <loc:Loc> "." <id:Ident> => Loc::Field(Box::new(loc), id),
+    <loc:Loc> "[" <index:Num> "]" => Loc::Index(Box::new(loc), index),
 }
 
 Num: u32 = <n:r"[0-9]+"> =>? Ok(u32::from_str(n).map_err(|e| e.to_string())?);
