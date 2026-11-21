@@ -103,7 +103,7 @@ fn merge_diagnostics_snapshot_child() {
     if enabled() {
         record_depth(23, 7, 44);
         record_depth(23, 9, 48);
-        record_deferred_query("range_proof", SourceLoc::unknown());
+        record_deferred_query("range_proof", SourceLoc::unknown(), true);
     }
     if std::env::var_os("MERGE_DIAG_SIGNAL_CHILD").is_some() {
         println!("ready");
@@ -225,4 +225,42 @@ fn merge_diagnostics_root_preserves_nested_rejection() {
     assert_eq!(ended["outcome"], "rejected");
     assert_eq!(ended["failure"]["origin"]["pc"], 20);
     assert_eq!(ended["failure"]["reason"], "state_effect");
+}
+
+#[test]
+fn merge_diagnostics_root_records_first_unknown_query() {
+    use crate::error::ExecError;
+    use crate::executor::SpeculativeRejectReason;
+
+    let args = ["merge_diagnostics_root_records_first_unknown_query", "--nocapture", "--test-threads=1"];
+    if std::env::args().skip(1).eq(args.map(str::to_owned)) {
+        configure("detail").unwrap();
+        let mut symtab = Symtab::new();
+        let function = symtab.intern("zcaller");
+        let info = SourceLoc::unknown();
+        let rejection = ExecError::SpeculativeReject {
+            reason: SpeculativeRejectReason::SolverUnknown,
+            function,
+            pc: 20,
+            location: info,
+        };
+        let mut root = AttemptGuard::start(1, function, 10, &symtab, info, &[]);
+        record_current_site(function, 17, &symtab);
+        record_deferred_query("general", info, true);
+        root.finish_rejected(FailurePhase::ArmExecution, &rejection, &rejection, &symtab);
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap()).args(args).output().unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stderr).unwrap();
+    let ended = text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|row| row["kind"] == "merge_root_end")
+        .expect(&text);
+    assert_eq!(ended["first_unknown"]["purpose"], "general");
+    assert_eq!(ended["first_unknown"]["function"], "caller");
+    assert_eq!(ended["first_unknown"]["pc"], 17);
+    assert_eq!(ended["first_unknown"]["depth"], 1);
+    assert!(ended["first_unknown"]["location"].is_object());
 }

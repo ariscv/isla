@@ -3463,6 +3463,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                         _ => "general",
                     },
                     info,
+                    true,
                 );
             }
             return Unknown;
@@ -3628,7 +3629,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             return Error(self.no_smt_cannot_continue("model_or_general_query", info));
         }
         if self.deferred_region_queries {
-            self.note_deferred_mandatory_query("model_or_general", info);
+            self.note_deferred_mandatory_query("model_or_general", info, true);
             return Unknown;
         }
         let query_scope = crate::executor::stats::region_progress::QueryScope::fallback("arm_close_or_general");
@@ -3764,7 +3765,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             return Error(self.no_smt_cannot_continue("model_query_deadline", info));
         }
         if self.deferred_region_queries {
-            self.note_deferred_mandatory_query("model_or_general", info);
+            self.note_deferred_mandatory_query("model_or_general", info, true);
             return Unknown;
         }
         let started = Instant::now();

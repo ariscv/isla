@@ -2258,6 +2258,9 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             return Ok(Run::Suspended);
         }
         if frame.pc < frame.instrs.len() {
+            if stats::merge_diagnostics::enabled() && frame.region_execution.is_some() {
+                stats::merge_diagnostics::record_current_site(frame.function_name, frame.pc, &shared_state.symtab);
+            }
             stats::region_progress::step(frame, &shared_state.symtab, solver);
             region_merge::preflight(frame, task_state, shared_state)?;
         }

@@ -92,6 +92,8 @@ struct TraceState {
 thread_local! {
     static TRACE: RefCell<Option<TraceState>> = const { RefCell::new(None) };
     static ATTEMPTS: RefCell<Vec<Attempt>> = const { RefCell::new(Vec::new()) };
+    // 延后查询只持有 Sail 位置；解释器在每条 IR 指令前补入当前函数和 pc。
+    static CURRENT_SITE: RefCell<Option<Value>> = const { RefCell::new(None) };
     // 测试在当前线程开启递归观察，避免修改进程开关影响并行用例。
     static TEST_TRACE: Cell<bool> = const { Cell::new(false) };
 }
@@ -505,10 +507,12 @@ struct Attempt {
     task: usize,
     origin: Value,
     root: Option<usize>,
+    root_started: Option<Instant>,
     trace_start: Option<(Instant, SourceLoc)>,
     outcome: &'static str,
     failure: Option<Value>,
     nested_failure: Option<Value>,
+    first_unknown: Option<Value>,
     phase_at: Option<(super::SpeculativeRejectReason, Name, usize, FailurePhase)>,
 }
 
@@ -530,6 +534,7 @@ impl AttemptGuard {
         ATTEMPTS.with(|stack| {
             let mut stack = stack.borrow_mut();
             let parent = stack.last().map(|attempt| attempt.id);
+            let root_started = (parent.is_none() && enabled()).then(Instant::now);
             let trace_start = (parent.is_none() && MODE.load(Ordering::Relaxed) == 2).then(|| (Instant::now(), info));
             if trace_start.is_some() {
                 let callers: Vec<_> =
@@ -546,10 +551,12 @@ impl AttemptGuard {
                 task,
                 origin,
                 root: None,
+                root_started,
                 trace_start,
                 outcome: "unfinished",
                 failure: None,
                 nested_failure: None,
+                first_unknown: None,
                 phase_at: None,
             });
         });
@@ -639,13 +646,25 @@ impl Drop for AttemptGuard {
                 if attempt.failure.is_some() {
                     parent.nested_failure = attempt.failure;
                 }
-            } else if let Some((started, location)) = attempt.trace_start {
+                return;
+            }
+            let solver_unknown = attempt.outcome == "rejected"
+                && attempt.failure.as_ref().is_some_and(|failure| failure["reason"] == "solver_unknown");
+            let first_unknown = solver_unknown.then(|| attempt.first_unknown.clone()).flatten();
+            if let Some((started, location)) = attempt.trace_start {
                 eprintln!(
                     "{}",
                     json!({"schema":1,"kind":"merge_root_end",
                     "attempt":attempt.id,"task":attempt.task,"origin":attempt.origin,"location":location,
                     "outcome":attempt.outcome,"elapsed_seconds":started.elapsed().as_secs_f64(),
-                    "failure":attempt.failure})
+                    "failure":attempt.failure,"first_unknown":first_unknown})
+                );
+            }
+            if let (Some(first_unknown), Some(started)) = (first_unknown, attempt.root_started) {
+                COUNTS.get().unwrap().lock().unwrap().record_first_unknown_root(
+                    &attempt.origin,
+                    &first_unknown,
+                    started.elapsed().as_secs_f64(),
                 );
             }
         });
@@ -719,9 +738,37 @@ pub(in crate::executor) fn filtered_path<B: BV>(
     eprintln!("{record}");
 }
 
-pub(crate) fn record_deferred_query(purpose: &str, info: crate::source_loc::SourceLoc) {
+/// 仅在诊断打开时记录解释器刚执行到的 IR 位置，避免正常执行的额外 TLS 操作。
+pub(crate) fn record_current_site(function: Name, pc: usize, symtab: &Symtab) {
     if !enabled() {
         return;
+    }
+    CURRENT_SITE.with(|site| *site.borrow_mut() = Some(json!({"function":name_string(function, symtab),"pc":pc})));
+}
+
+pub(crate) fn root_attempt() -> Option<usize> {
+    if !enabled() {
+        return None;
+    }
+    ATTEMPTS.with(|stack| stack.borrow().first().map(|attempt| attempt.id))
+}
+
+pub(crate) fn record_deferred_query(purpose: &str, info: crate::source_loc::SourceLoc, returns_unknown: bool) {
+    if !enabled() {
+        return;
+    }
+    if returns_unknown {
+        let site =
+            CURRENT_SITE.with(|site| site.borrow().clone()).unwrap_or_else(|| json!({"function":null,"pc":null}));
+        ATTEMPTS.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            let depth = stack.len();
+            if let Some(root) = stack.first_mut() {
+                root.first_unknown.get_or_insert_with(|| {
+                    json!({"purpose":purpose,"location":info,"function":site["function"],"pc":site["pc"],"depth":depth})
+                });
+            }
+        });
     }
     let mut counts = COUNTS.get().unwrap().lock().unwrap();
     let key = json!({"purpose":purpose,"location":info}).to_string();
@@ -777,6 +824,7 @@ pub(crate) fn execute_arm_error(function: Name, pc: usize, error: &ExecError, sy
 
 pub(super) struct DiagnosticCounts {
     blocked_queries: BTreeMap<String, u64>,
+    first_unknown_roots: BTreeMap<String, (u64, f64)>,
     depths: BTreeMap<usize, u64>,
     max_call_depth: usize,
     max_transaction_depth: usize,
@@ -794,6 +842,7 @@ impl DiagnosticCounts {
     pub fn new(mode: Mode) -> Self {
         Self {
             blocked_queries: BTreeMap::new(),
+            first_unknown_roots: BTreeMap::new(),
             depths: BTreeMap::new(),
             max_call_depth: 0,
             max_transaction_depth: 0,
@@ -807,6 +856,12 @@ impl DiagnosticCounts {
             propagated: 0,
             oversized: 0,
         }
+    }
+    fn record_first_unknown_root(&mut self, root: &Value, first_unknown: &Value, elapsed_seconds: f64) {
+        let key = json!({"root":root,"first_unknown":{"purpose":first_unknown["purpose"],"location":first_unknown["location"]}}).to_string();
+        let entry = self.first_unknown_roots.entry(key).or_default();
+        entry.0 += 1;
+        entry.1 += elapsed_seconds;
     }
     pub fn record(&mut self, record: &Value) -> Option<String> {
         if self.mode == Mode::Off {
@@ -900,6 +955,14 @@ fn print_with_trigger(trigger: &str, stats: &super::ExecutionStats) {
         json!({"kind":"region_deferred_query_summary","snapshot":snapshot,
         "queries":counts.blocked_queries.iter().map(|(key,count)|
             json!({"key":serde_json::from_str::<Value>(key).unwrap(),"count":count})).collect::<Vec<_>>()})
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "{}",
+        json!({"kind":"region_first_unknown_summary","snapshot":snapshot,
+        "roots":counts.first_unknown_roots.iter().map(|(key,(count,root_wall_seconds))|
+            json!({"key":serde_json::from_str::<Value>(key).unwrap(),"count":count,"root_wall_seconds":root_wall_seconds})).collect::<Vec<_>>()})
     )
     .unwrap();
     if crate::config::RegionOptions::current().progress {

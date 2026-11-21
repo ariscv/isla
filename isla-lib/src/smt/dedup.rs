@@ -55,7 +55,7 @@ impl<B: BV> Solver<'_, B> {
         // 这里只回答可行性，不承诺交付模型。普通查询与最终取值仍用原接口。
         if skip_query {
             if self.deferred_region_queries {
-                self.note_deferred_mandatory_query("branch_feasibility", info);
+                self.note_deferred_mandatory_query("branch_feasibility", info, false);
             }
             return None;
         }

@@ -47,7 +47,8 @@ impl<B: BV> Solver<'_, B> {
                     serde_json::json!({"kind":"region_deferred_exit",
                     "obligations":state.obligations.len(),"blocked_queries":state.blocked,
                     "first_blocked_source":state.first_blocked,"verification_seconds":state.verification_seconds,
-                    "verification_result":state.verification_result})
+                    "verification_result":state.verification_result,
+                    "attempt":crate::executor::stats::merge_diagnostics::root_attempt()})
                 );
             }
         }
@@ -57,8 +58,13 @@ impl<B: BV> Solver<'_, B> {
         }
     }
 
-    pub(crate) fn note_deferred_mandatory_query(&mut self, purpose: &'static str, info: SourceLoc) {
-        crate::executor::stats::merge_diagnostics::record_deferred_query(purpose, info);
+    pub(crate) fn note_deferred_mandatory_query(
+        &mut self,
+        purpose: &'static str,
+        info: SourceLoc,
+        returns_unknown: bool,
+    ) {
+        crate::executor::stats::merge_diagnostics::record_deferred_query(purpose, info, returns_unknown);
         let state = self.deferred_assertions.as_mut().expect("延迟查询必须属于活动区域");
         *state.blocked.entry(purpose).or_default() += 1;
         state.first_blocked.get_or_insert(info);
@@ -75,7 +81,7 @@ impl<B: BV> Solver<'_, B> {
         if !self.deferred_region_queries || !enabled {
             return false;
         }
-        self.note_deferred_mandatory_query(purpose, info);
+        self.note_deferred_mandatory_query(purpose, info, false);
         self.defer_assertion(condition.clone(), info);
         true
     }
