@@ -957,7 +957,7 @@ fn arm_error_snapshots_share_published_events() {
 
 #[test]
 fn arm_error_snapshots_preserve_trace_cache_and_witness_bytes() {
-    use crate::executor::path_cache::{TraceReader, TraceWriter};
+    use crate::executor::path_cache::{HeadPrefix, TracePlan, TraceReader, TraceWriter};
 
     let (left, right, flag) = arm_error_snapshot_fixture();
     let ctx = Context::new(Config::new());
@@ -978,7 +978,14 @@ fn arm_error_snapshots_preserve_trace_cache_and_witness_bytes() {
             .map(|(event, guard)| format!("{event:?} @ {guard:?}"))
             .collect::<Vec<_>>()
     });
+    let mut plan = TracePlan::default();
+    assert_eq!([plan.capture(&left), plan.capture(&right)], points);
+    let linked = plan.segments().collect::<Vec<_>>();
+    assert!(matches!(&linked[1].head_prefix, Some(HeadPrefix::Define(events)) if events.len() == 2));
+    assert_eq!(linked[2].head_prefix, Some(HeadPrefix::Reference(1)));
+    let linked = TraceReader::from_linked(&linked);
     let values = [witness(left), witness(right)];
+    assert_eq!(values, [witness(linked.restore(&points[0])), witness(linked.restore(&points[1]))]);
     assert_eq!(values, [witness(reader.restore(&points[0])), witness(reader.restore(&points[1]))]);
     let dto = (&points, &writer.segments);
     let cache_json = serde_json::to_value(dto).unwrap();

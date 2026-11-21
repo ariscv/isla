@@ -646,14 +646,14 @@ pub struct Trace<B> {
     head: Vec<Event<B>>,
     // 仅诊断开启时保存，按本段主迹位置排序，随检查点跨线程共享。
     event_guards: Vec<(usize, Exp<Sym>)>,
-    // 同一逻辑段可由根事务共享的已发布事件和本叶事件组成。缓存仍逐段按原顺序写出。
+    // 同一逻辑段可由根事务共享的已发布事件和本叶事件组成。
     head_prefix: Option<Arc<TraceHead<B>>>,
     tail: Arc<Option<Trace<B>>>,
 }
 
 #[derive(Clone, Debug)]
-struct TraceHead<B> {
-    events: Vec<Event<B>>,
+pub(crate) struct TraceHead<B> {
+    pub(crate) events: Vec<Event<B>>,
     event_guards: Vec<(usize, Exp<Sym>)>,
     memory_events_before_arm: usize,
 }
@@ -5160,8 +5160,19 @@ impl<B> Trace<B> {
     pub(crate) fn path_cache_parts(&self) -> (usize, impl Iterator<Item = &Event<B>>, &Arc<Option<Trace<B>>>) {
         (self.checkpoints, self.head_events(), &self.tail)
     }
-    pub(crate) fn from_path_cache_parts(checkpoints: usize, head: Vec<Event<B>>, tail: Arc<Option<Trace<B>>>) -> Self {
-        Self { checkpoints, head, event_guards: Vec::new(), head_prefix: None, tail }
+    pub(crate) fn path_cache_head(&self) -> (&[Event<B>], Option<&Arc<TraceHead<B>>>) {
+        (&self.head, self.head_prefix.as_ref())
+    }
+    pub(crate) fn path_cache_prefix(events: Vec<Event<B>>) -> Arc<TraceHead<B>> {
+        Arc::new(TraceHead { events, event_guards: Vec::new(), memory_events_before_arm: 0 })
+    }
+    pub(crate) fn from_path_cache_parts(
+        checkpoints: usize,
+        head: Vec<Event<B>>,
+        head_prefix: Option<Arc<TraceHead<B>>>,
+        tail: Arc<Option<Trace<B>>>,
+    ) -> Self {
+        Self { checkpoints, head, event_guards: Vec::new(), head_prefix, tail }
     }
 }
 

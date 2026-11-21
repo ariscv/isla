@@ -21,8 +21,8 @@ fn intern_region(name: String) -> &'static str {
 }
 
 mod trace;
-pub use trace::{CheckpointData, Segment, TraceReader, TraceWriter};
+pub use trace::{CheckpointData, HeadPrefix, LinkedSegment, Segment, TracePlan, TraceReader, TraceWriter};
 mod path;
 pub use path::{Arm, CachedPath, Facts, GuardedRead, PathData, Record};
 mod validate;
-pub use validate::validate_paths;
+pub use validate::PathValidator;

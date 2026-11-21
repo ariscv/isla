@@ -79,7 +79,7 @@ fn guarded_memory_write_roundtrips_in_both_cache_encodings_and_judge() {
     for encoding in [Encoding::Json, Encoding::Bin] {
         let restored = load_for_judge::<B64>(&directory, encoding, true, &shared, "generic", &stages);
         let [resident] = restored.paths.as_slice() else { panic!("应还原一条路径") };
-        assert_eq!(restored.manifest.schema_version, 6);
+        assert_eq!(restored.manifest.schema_version, CACHE_SCHEMA_VERSION);
         assert_eq!(resident.path.memory_guards, paths[0].path.memory_guards);
         assert!(resident.records[0].memory_reads[0].2.is_memory_write());
         let mut solver = Solver::from_checkpoint(&context, resident.checkpoint.clone());
