@@ -149,15 +149,26 @@ impl<'a, B: BV> PathConditions<'a, B> {
     }
 
     pub(super) fn assertions(&self) -> impl Iterator<Item = &'a Exp<Sym>> + '_ {
-        self.index
-            .assertions
-            .iter()
-            .rev()
-            .map(|position| match self.event(*position) {
-                Event::Smt(Def::Assert(exp), ..) => exp,
-                _ => unreachable!("断言索引必须指向断言"),
-            })
-            .chain(self.guards)
+        self.index.assertions.iter().rev().map(|position| self.assertion(*position)).chain(self.guards)
+    }
+
+    fn assertion(&self, position: Position) -> &'a Exp<Sym> {
+        match self.event(position) {
+            Event::Smt(Def::Assert(exp), ..) => exp,
+            _ => unreachable!("断言索引必须指向断言"),
+        }
+    }
+
+    /// 活动臂条件及已发布的路径断言。缓冲内可能包含尚待认证的出口约束。
+    pub(super) fn path_guards(&self) -> impl Iterator<Item = &'a Exp<Sym>> + '_ {
+        self.guards.iter().rev().chain(
+            self.index
+                .assertions
+                .iter()
+                .rev()
+                .skip_while(|position| position.0 == BUFFERED)
+                .map(|position| self.assertion(*position)),
+        )
     }
 
     pub(super) fn bool_symbols(&self) -> impl Iterator<Item = Sym> + '_ {

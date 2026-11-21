@@ -43,6 +43,32 @@ fn resolve<'a, B: BV>(mut exp: &'a Exp<Sym>, prefix: &'a PathConditions<'_, B>) 
     exp
 }
 
+fn implies_equality<B: BV>(
+    guard: &Exp<Sym>,
+    lhs: &Exp<Sym>,
+    rhs: &Exp<Sym>,
+    prefix: &PathConditions<'_, B>,
+    mut negated: bool,
+    visited: &mut HashSet<(*const Exp<Sym>, bool)>,
+) -> bool {
+    let mut guard = resolve(guard, prefix);
+    while let Exp::Not(inner) = guard {
+        negated = !negated;
+        guard = resolve(inner, prefix);
+    }
+    match guard {
+        Exp::Eq(a, b) | Exp::Neq(a, b) if matches!(guard, Exp::Neq(..)) == negated => {
+            (&**a == lhs && &**b == rhs) || (&**b == lhs && &**a == rhs)
+        }
+        Exp::And(a, b) | Exp::Or(a, b) if matches!(guard, Exp::Or(..)) == negated => {
+            visited.insert((guard, negated))
+                && (implies_equality(a, lhs, rhs, prefix, negated, visited)
+                    || implies_equality(b, lhs, rhs, prefix, negated, visited))
+        }
+        _ => false,
+    }
+}
+
 fn constant(exp: &Exp<Sym>) -> Option<Exp<Sym>> {
     match exp {
         Exp::Bits(bits) if bits.len() <= 64 => {
@@ -206,6 +232,20 @@ impl<'ctx> Ast<'ctx> {
 impl<B: BV> Solver<'_, B> {
     pub(crate) fn finite_domain_enabled(&self) -> bool {
         self.finite_prefix.is_some()
+    }
+
+    /// 一条路径可以复用其自身的标签约束。仅证明蕴含，路径可满足性另行判定。
+    pub(crate) fn path_implies_tag(&self, tag: Sym, ctor: Name) -> bool {
+        if self.transaction_invalid() {
+            return false;
+        }
+        let Some(prefix) = PathConditions::new(self) else { return false };
+        let lhs = Exp::Var(tag);
+        let rhs = ctor.to_smt();
+        let mut visited = HashSet::new();
+        let implied =
+            prefix.path_guards().any(|guard| implies_equality(guard, &lhs, &rhs, &prefix, false, &mut visited));
+        implied
     }
 
     /// 指令级重试也能利用已有的穷尽约束。默认不维护全路径索引时，

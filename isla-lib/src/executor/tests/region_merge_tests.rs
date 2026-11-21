@@ -3989,6 +3989,79 @@ fn region_merge_f4_union_success_domain_unwrap() {
 }
 
 #[test]
+fn matched_constructor_reuses_guard_and_preserves_path_validation() {
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    let mut shared = empty_shared_state();
+    let some = shared.symtab.intern("zSome");
+    let none = shared.symtab.intern("zNone");
+    let value = shared.symtab.intern("zresult");
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let tag = solver.declare_const(Name::smt_ty(), info());
+    let mut frame = make_frame(vec![Instr::End]);
+    frame.vars_mut().insert(
+        value,
+        UVal::Init(Val::SymbolicCtor(tag, [(some, Val::Bool(true)), (none, Val::Unit)].into_iter().collect())),
+    );
+    let mismatch = Exp::Kind(some, Box::new(Exp::Id(value)));
+    let Val::Symbolic(mismatch) =
+        eval_exp(&mismatch, Arc::make_mut(&mut frame.local_state), &shared, &mut solver, info()).unwrap().into_owned()
+    else {
+        panic!("标签测试必须为符号值");
+    };
+    let point = crate::smt::checkpoint(&mut solver);
+    let unwrap = Exp::Unwrap(some, Box::new(Exp::Id(value)));
+    let guard = Formula::Not(Box::new(Formula::Var(mismatch)));
+    let tx = solver.start_transaction_with_guard(Some(guard.clone()));
+    assert_eq!(solver.check_sat(info()), SmtResult::Sat);
+    let checks = crate::smt::thread_smt_check_count();
+    let result = eval_exp(&unwrap, Arc::make_mut(&mut frame.local_state), &shared, &mut solver, info()).unwrap();
+    assert_eq!(result.into_owned(), Val::Bool(true));
+    assert_eq!(crate::smt::thread_smt_check_count() - checks, 0, "活动臂标签已知，解包无需查询");
+    solver.rollback_transaction(tx);
+    assert!(!solver.path_implies_tag(tag, some), "回滚后不能继续复用标签");
+    // 模拟下一条 IR 指令，清掉前一条指令的操作数缓存。
+    Arc::make_mut(&mut frame.local_state).expression_values.clear();
+    assert!(matches!(
+        eval_exp(&unwrap, Arc::make_mut(&mut frame.local_state), &shared, &mut solver, info()),
+        Err(ExecError::RetryCondition(..))
+    ));
+    let mut resumed = Solver::from_checkpoint(&context, point.clone());
+    let other = resumed.declare_const(smtlib::Ty::Bool, info());
+    let joined =
+        resumed.start_transaction_with_guard(Some(Formula::Or(Box::new(guard.clone()), Box::new(Formula::Var(other)))));
+    assert!(!resumed.path_implies_tag(tag, some), "汇合守卫只在一个来路成立时不能用于解包");
+    resumed.rollback_transaction(joined);
+    resumed.assert(guard.clone());
+    assert_eq!(resumed.check_sat(info()), SmtResult::Sat);
+    let checks = crate::smt::thread_smt_check_count();
+    let result = eval_exp(&unwrap, Arc::make_mut(&mut frame.local_state), &shared, &mut resumed, info()).unwrap();
+    assert_eq!(result.into_owned(), Val::Bool(true));
+    assert_eq!(crate::smt::thread_smt_check_count() - checks, 0, "任务恢复后应从断言复用标签");
+    resumed.assert(Formula::Bool(false));
+    Arc::make_mut(&mut frame.local_state).expression_values.clear();
+    assert!(matches!(
+        eval_exp(&unwrap, Arc::make_mut(&mut frame.local_state), &shared, &mut resumed, info()),
+        Err(ExecError::Type(..))
+    ));
+
+    let mut config = Config::new();
+    config.solver_options.no_smt = true;
+    let context = Context::new(config);
+    let mut deferred = Solver::from_checkpoint(&context, point);
+    deferred.with_deferred_region_queries(|deferred| {
+        let tx = deferred.start_transaction_with_guard(Some(guard));
+        let checks = crate::smt::thread_smt_check_count();
+        let result = eval_exp(&unwrap, Arc::make_mut(&mut frame.local_state), &shared, deferred, info()).unwrap();
+        assert_eq!(result.into_owned(), Val::Bool(true));
+        assert_eq!(crate::smt::thread_smt_check_count() - checks, 0);
+        assert_eq!(deferred.region_definition_footprint()["assertion_expression_nodes"], 0);
+        assert!(deferred.check_sat_for_arm(info()).is_none(), "无 SMT 的守卫蕴含不认证路径");
+        deferred.rollback_transaction(tx);
+    });
+}
+
+#[test]
 fn region_merge_f4_unreachable_unknown_extern() {
     let mut shared = empty_shared_state();
     let unknown = shared.symtab.intern("zf4unknown");
