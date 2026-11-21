@@ -753,11 +753,11 @@ isarch 在执行前检查正常／压缩编码映射。只有当前配置、初�
 
 线程中断构建下，isarch 和 `make solve-*` 缺省不设单次 Z3 调用限时。需要时显式传 `--smt-timeout`，Make 对应 `SMT_TIMEOUT`。
 
-`[execution_limits.solver] on_unknown = "dead"` 是缺省策略。真实求解返回 Unknown 或超时时，探索丢弃对应路径并继续。根区域出口的整体查询无法归属单臂时，执行器撤销推演，让普通分叉逐路径查询。
+探索路径的真实 Z3 Unknown 或求解超时缺省立即 panic，isarch 返回非零。诊断列出 IR 函数、PC、Sail 位置、查询用途、耗时、限额和路径深度。可以用 `[execution_limits.solver] on_unknown = "dead"` 或 `--solver-on-unknown=dead` 显式丢弃受影响的路径并继续。`error` 已删除，原配置请改用 `panic`。
 
-独立错误叶使用 `[execution_limits.path_merge.solver]` 下的 `arm_error_batch_size` 控制每个原生求解器认证的叶数，缺省为 64。此值必须为正整数。批满后释放该求解器，下一批从新的求解器开始；每个错误叶仍按完整到达条件认证。
+逐路径 `--timeout` 缺省也在最终路径到限时 panic。需要保留旧的到限记录并继续探索时，设置 `[execution_limits] on_path_timeout = "dead"` 或 `--on-path-timeout=dead`。区域尝试到限或整体查询无法判定时，执行器撤销推演，让普通分叉重新判定。延后或省略查询时产生的内部 Unknown 仍按区域规则处理。
 
-只要丢弃过路径，isarch 收尾时报告首个 Sail 位置和用途，返回 **66**，并在运行摘要和路径缓存 manifest 写入 `valid=false`、`invalid_reasons` 及丢弃记录。judge、`--check-samples` 和 fuzz 拒绝加载该缓存。程序外限、信号和资源失败保留各自状态。使用 `--solver-on-unknown=error` 可让未判定直接终止探索。样本绑定与验收查询失败沿用其错误处理。
+显式丢弃真实求解失败的路径时，isarch 收尾报告首个 Sail 位置和用途，返回 **66**，在运行摘要和路径缓存 manifest 写入 `valid=false`、`invalid_reasons` 及丢弃记录。judge、`--check-samples` 和 fuzz 拒绝加载该缓存。程序外限、信号、资源失败及样本验收查询沿用各自处理。
 
 ### 求解策略
 

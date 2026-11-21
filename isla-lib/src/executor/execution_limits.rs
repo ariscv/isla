@@ -87,6 +87,7 @@ struct MergePolicy {
 
 #[derive(Clone, Debug)]
 pub struct ExecutionLimits {
+    pub on_path_timeout: crate::config::PathFailureAction,
     /// 当前路径内，**单个分支点**允许的 fork 次数上限。
     ///
     /// 计数是"路径 × 分支点(`ControlFlowScope`)"局部的：一条路径第一次到达某分支点时
@@ -149,6 +150,7 @@ impl Default for ExecutionLimits {
     fn default() -> Self {
         let merge = crate::config::PathMergeConfig::default();
         ExecutionLimits {
+            on_path_timeout: Default::default(),
             max_forks_per_branch: None,
             max_forks_per_path: None,
             max_backjumps_per_loop: None,
@@ -278,8 +280,10 @@ impl ExecutionLimits {
 
     /// 将配置 DTO 覆盖到运行时策略，并在这里一次性解析配置中的源码 region。
     pub fn with_config(mut self, config: &ExecutionLimitsConfig, symtab: &Symtab) -> Self {
+        self.on_path_timeout = config.on_path_timeout;
         if config.enabled == Some(false) {
             return ExecutionLimits {
+                on_path_timeout: self.on_path_timeout,
                 filter_match_failures: config.filter_match_failures,
                 ..ExecutionLimits::default()
             };

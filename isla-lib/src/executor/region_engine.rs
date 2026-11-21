@@ -151,8 +151,12 @@ pub(super) fn close_arm<B: BV>(
                 }
                 Some(SmtResult::Error(error)) => {
                     let error = ExecError::Smt(error);
-                    if stats::solver_failures::discard_solver_path(solver.exploration_on_unknown(), &error, arm, shared)
-                    {
+                    if stats::solver_failures::handle_solver_path_failure(
+                        solver.exploration_on_unknown(),
+                        &error,
+                        arm,
+                        shared,
+                    ) {
                         solver.commit_dead_transaction();
                         Ok(false)
                     } else {

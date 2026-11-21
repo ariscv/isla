@@ -1267,6 +1267,16 @@ fn run<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     } else {
         frame.path_timing.pause_active();
     }
+    if matches!(&result, Err(ExecError::Timeout)) {
+        enforce_path_timeout(
+            task_state.on_path_timeout,
+            timeout.limit().expect("路径到限必须有预算"),
+            frame.path_time_snapshot().active_wall,
+            "path_execution",
+            &frame,
+            shared_state,
+        );
+    }
     // collector 可能用完成帧继续执行，必须连同最后一次 fork 之后的 SMT 调用一起保留。
     frame.capture_path_smt_stats();
     #[cfg(feature = "tracetool")]
@@ -1404,7 +1414,9 @@ impl<'ir, 'task, 'collector, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'
         'collector: 'scope,
     {
         let memory_task = stats::memory_stats::enabled().then(|| stats::memory_stats::begin_task(task.id.as_usize()));
-        let ctx = Context::new(Config::new());
+        let mut cfg = Config::new();
+        cfg.validation = task.state.validation;
+        let ctx = Context::new(cfg);
         let mut solver = Solver::from_checkpoint(&ctx, task.checkpoint);
         if let Some((def, event)) = task.fork_cond {
             solver.add_event(event);
@@ -1924,6 +1936,29 @@ fn emit_path_account<B: BV>(
     );
 }
 
+/// 区域推演的拒绝由区域引擎处理，只有最终路径到限才调用此入口。
+pub fn enforce_path_timeout<B: BV>(
+    policy: crate::config::PathFailureAction,
+    limit: Duration,
+    elapsed: Duration,
+    purpose: &'static str,
+    frame: &LocalFrame<'_, B>,
+    shared: &SharedState<'_, B>,
+) {
+    if policy == crate::config::PathFailureAction::Panic {
+        stats::solver_failures::PathFailureDiagnostic::new(
+            frame,
+            shared,
+            SourceLoc::unknown(),
+            purpose,
+            "path_timeout",
+            elapsed,
+            Some(limit),
+        )
+        .panic();
+    }
+}
+
 /// 路径撞上 `--timeout` 预算时，输出这条路径的 SMT 用时构成与超时原因判定。
 ///
 /// 关键区分是"确实需要更多时间"还是"少数 SMT 操作打满单次上限把预算吃掉了"：前者放宽
@@ -2115,7 +2150,12 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             Err(error) => error,
         };
         if matches!(error, ExecError::SolverDroppedPath)
-            || stats::solver_failures::discard_solver_path(solver.exploration_on_unknown(), &error, frame, shared_state)
+            || stats::solver_failures::handle_solver_path_failure(
+                solver.exploration_on_unknown(),
+                &error,
+                frame,
+                shared_state,
+            )
         {
             return Ok(Run::Dead);
         }
@@ -2162,7 +2202,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             Ok(true) => (),
             Ok(false) | Err(ExecError::SolverDroppedPath) => return Ok(Run::Dead),
             Err(error)
-                if stats::solver_failures::discard_solver_path(
+                if stats::solver_failures::handle_solver_path_failure(
                     solver.exploration_on_unknown(),
                     &error,
                     frame,
@@ -2195,11 +2235,6 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     'main_loop: loop {
         if !frame.region_arrivals.is_empty() {
             return Ok(Run::Suspended);
-        }
-        if solver.exploration_on_unknown() == Some(crate::config::SolverOnUnknown::Error)
-            && shared_state.execution_stats.solver_failed()
-        {
-            return Ok(Run::Dead);
         }
         stats::memory_stats::poll(frame, solver);
         let region_step = region_merge::step(frame);
@@ -13295,6 +13330,8 @@ fn zcaller(za, zb) {
         results
     }
 
+    mod path_failure_policy_tests;
+
     #[test]
     fn solver_unknown_jump_drops_only_the_indeterminate_side() {
         let mut shared = empty_shared_state();
@@ -13320,15 +13357,17 @@ fn zcaller(za, zb) {
                 )
             })
         };
-        let paths = run(vec![Some(z3_sys::Z3_L_UNDEF)]);
-        assert!(matches!(paths.as_slice(), [Ok(Run::Finished(Val::Bool(false)))]));
-        let drops = shared.execution_stats.solver_path_drops_since(0);
-        assert_eq!(drops.count, 1);
-        assert_eq!(drops.first_locations[0].sail_location, "branch.sail:7");
-        assert_eq!(drops.first_locations[0].purpose, "branch_feasibility");
-        let paths = run(vec![Some(z3_sys::Z3_L_UNDEF), Some(z3_sys::Z3_L_UNDEF)]);
-        assert!(matches!(paths.as_slice(), [Ok(Run::Dead)]));
-        assert_eq!(shared.execution_stats.solver_path_drops_since(1).count, 2);
+        path_failure_policy_tests::with_solver_dead(|| {
+            let paths = run(vec![Some(z3_sys::Z3_L_UNDEF)]);
+            assert!(matches!(paths.as_slice(), [Ok(Run::Finished(Val::Bool(false)))]));
+            let drops = shared.execution_stats.solver_path_drops_since(0);
+            assert_eq!(drops.count, 1);
+            assert_eq!(drops.first_locations[0].sail_location, "branch.sail:7");
+            assert_eq!(drops.first_locations[0].purpose, "branch_feasibility");
+            let paths = run(vec![Some(z3_sys::Z3_L_UNDEF), Some(z3_sys::Z3_L_UNDEF)]);
+            assert!(matches!(paths.as_slice(), [Ok(Run::Dead)]));
+            assert_eq!(shared.execution_stats.solver_path_drops_since(1).count, 2);
+        });
     }
 
     #[test]
@@ -13346,14 +13385,16 @@ fn zcaller(za, zb) {
             ),
             Instr::End,
         ];
-        let paths = crate::smt::test_queries::with_results([Some(z3_sys::Z3_L_UNDEF)], || {
-            run_all_with_shared_bindings(
-                program,
-                ExecutionLimits::default(),
-                &shared,
-                RegisterBindings::new(),
-                Bindings::default(),
-            )
+        let paths = path_failure_policy_tests::with_solver_dead(|| {
+            crate::smt::test_queries::with_results([Some(z3_sys::Z3_L_UNDEF)], || {
+                run_all_with_shared_bindings(
+                    program,
+                    ExecutionLimits::default(),
+                    &shared,
+                    RegisterBindings::new(),
+                    Bindings::default(),
+                )
+            })
         });
         assert!(matches!(paths.as_slice(), [Ok(Run::Dead)]));
         let drops = shared.execution_stats.solver_path_drops_since(0);
@@ -13379,48 +13420,16 @@ fn zcaller(za, zb) {
             results.into_inner().as_slice(),
             [Err(ExecError::Smt(crate::error::SmtError::Unknown { .. }))]
         ));
-        assert!(!shared.execution_stats.solver_failed());
         assert_eq!(shared.execution_stats.solver_path_drop_count(), 0);
-    }
-
-    #[test]
-    fn solver_unknown_error_mode_stops_exploration() {
-        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
-        let shared = empty_shared_state();
-        let mut config = Config::new();
-        config.solver_options.on_unknown = crate::config::SolverOnUnknown::Error;
-        let context = Context::new(config);
-        let mut solver = Solver::new(&context);
-        let flag = test_name(100);
-        let mut frame =
-            make_frame(vec![Instr::Decl(flag, Ty::Bool, info()), Instr::Jump(Exp::Id(flag), 2, info()), Instr::End]);
-        let state = TaskState::new();
-        let queue = Worker::new_lifo();
-        let result = crate::smt::test_queries::with_results([Some(z3_sys::Z3_L_UNDEF)], || {
-            run_loop(
-                0,
-                TaskId::fresh(),
-                &mut Fraction::one(),
-                PathTimeout::unlimited(),
-                None,
-                &SingleForkSink { queue: &queue },
-                &mut frame,
-                &state,
-                &shared,
-                &mut solver,
-            )
-        });
-        assert!(matches!(result, Err(ExecError::Smt(crate::error::SmtError::Unknown { .. }))));
-        assert!(shared.execution_stats.solver_failed());
-        assert_eq!(shared.execution_stats.solver_path_drop_count(), 0);
-        assert!(queue.is_empty());
     }
 
     #[test]
     fn solver_unknown_length_candidate_retains_the_remainder() {
         crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let shared = empty_shared_state();
-        let context = Context::new(Config::new());
+        let mut config = Config::new();
+        config.solver_options.on_unknown = crate::config::PathFailureAction::Dead;
+        let context = Context::new(config);
         let mut solver = Solver::new(&context);
         let symbol = solver.declare_const(smtlib::Ty::BitVec(1), info());
         assert!(solver.check_sat(info()).is_sat().unwrap());
@@ -15147,7 +15156,14 @@ fn zsteptest(zu) {
 }
 "#;
         let (shared_state, regs, lets) = shared_state_and_bindings_from_ir(STEPT_IR);
-        let task_state = TaskState::new();
+        let limits = ExecutionLimits::default().with_config(
+            &crate::config::ExecutionLimitsConfig {
+                on_path_timeout: crate::config::PathFailureAction::Dead,
+                ..Default::default()
+            },
+            &shared_state.symtab,
+        );
+        let task_state = TaskState::new().with_execution_limits(limits);
         let collected: Arc<std::sync::Mutex<u32>> = Arc::new(std::sync::Mutex::new(0));
 
         execute_ir_function_with_checkpoint_multi_thread(
@@ -15394,7 +15410,14 @@ fn zmemreadfork(zu) {
     fn start_single_timeout_none_is_unlimited() {
         crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let shared_state = empty_shared_state();
-        let task_state = TaskState::new();
+        let limits = ExecutionLimits::default().with_config(
+            &crate::config::ExecutionLimitsConfig {
+                on_path_timeout: crate::config::PathFailureAction::Dead,
+                ..Default::default()
+            },
+            &shared_state.symtab,
+        );
+        let task_state = TaskState::new().with_execution_limits(limits);
         let timeout_hits = std::sync::Mutex::new(0);
         let finished_hits = std::sync::Mutex::new(0);
 

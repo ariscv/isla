@@ -10,18 +10,36 @@ use super::{
 };
 use crate::source_loc::SourceRegionSpec;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SolverOnUnknown {
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PathFailureAction {
     #[default]
+    Panic,
     Dead,
-    Error,
+}
+
+impl std::str::FromStr for PathFailureAction {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "panic" => Ok(Self::Panic),
+            "dead" => Ok(Self::Dead),
+            "error" => Err("error 已删除，请改用 panic".into()),
+            _ => Err("必须为 panic 或 dead".into()),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PathFailureAction {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer)?.parse().map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SolverConfig {
-    pub on_unknown: SolverOnUnknown,
+    pub on_unknown: PathFailureAction,
     /// 通用等价改写。缺省启用全部规则，可显式关闭或指定规则。
     pub bv_rewrite: crate::smt::rewrite::BvRewrite,
     /// 跳过分支可行性查询，保留完整候选守卫；默认关闭。

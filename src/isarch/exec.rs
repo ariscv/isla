@@ -11,7 +11,7 @@ use isla_lib::bitvector::BV;
 use isla_lib::config::ExecutionLimitsConfig;
 use isla_lib::error::IslaError;
 use isla_lib::error::{ExecError, SmtError};
-use isla_lib::executor::stats::solver_failures::is_solver_failure;
+use isla_lib::executor::stats::solver_failures::{handle_solver_path_failure, is_solver_failure};
 use isla_lib::executor::{backtrace_string, execute_ir_function_with_limits, LocalFrame, Run, ScopedCollector};
 use isla_lib::executor::{ExecutionLimits, TaskId, TaskState};
 use isla_lib::fmtval::FmtVal;
@@ -960,6 +960,7 @@ struct ErrorRecorder<'a> {
     collected: &'a Mutex<SolveCollectorState>,
     reporter: &'a TimeoutReporter,
     clause: &'a str,
+    on_unknown: Option<isla_lib::config::PathFailureAction>,
 }
 
 impl ErrorRecorder<'_> {
@@ -972,7 +973,6 @@ impl ErrorRecorder<'_> {
         match result.is_sat() {
             Ok(sat) => sat,
             Err(error) => {
-                // 超时或 Unknown 只拒绝当前路径；沿用错误摘要与迹诊断，不能签成完整结果。
                 let diagnostics = self.record_error_diagnostic(&error, frame, shared_state);
                 eprintln!(
                     "[TERMINAL_QUERY_REJECT] {}",
@@ -990,6 +990,7 @@ impl ErrorRecorder<'_> {
         frame: &LocalFrame<'ir, B>,
         shared_state: &SharedState<'ir, B>,
     ) -> Vec<(isla_lib::timeout::TimeoutDiagnostic, bool)> {
+        handle_solver_path_failure(self.on_unknown, error, frame, shared_state);
         frame.configure_timeout_smt_dump(error, shared_state);
         if let ExecError::Smt(SmtError::NoSmt { reason, source_loc }) = error {
             eprintln!(
@@ -1662,15 +1663,8 @@ pub fn solve_state_main<'ir, B: BV>(
                 json.skip.insert("encdec-guard-reject".to_string(), merged_encdec_guard_rejects);
             }
             json.to_json(Some(format!("output/{}_{}.json", target.arch_pretty_name(), clause)));
-            if shared_state.execution_stats.solver_failed() {
-                success = false;
-                break;
-            }
         }
 
-        if shared_state.execution_stats.solver_failed() {
-            break;
-        }
         #[cfg(feature = "tracetool")]
         if trace_path.is_some() {
             shared_state.trace.dump();
@@ -2105,10 +2099,12 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                     std::mem::take(diagnostics),
                 );
             };
-            let error_recorder = ErrorRecorder { collected, reporter: timeout_reporter, clause: instruction_name };
-            if exec_result.is_ok() && shared_state.execution_stats.solver_failed() {
-                return;
-            }
+            let error_recorder = ErrorRecorder {
+                collected,
+                reporter: timeout_reporter,
+                clause: instruction_name,
+                on_unknown: solver.exploration_on_unknown(),
+            };
             if let Err((error, _)) = &exec_result {
                 error.assert_normal_execution();
             }
@@ -2135,9 +2131,11 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                     }
                     Run::Finished(ret_val) => {
                         let path_budget = timeout.map(|seconds| {
-                            let remaining =
-                                Duration::from_secs(seconds).saturating_sub(frame.path_time_snapshot().active_wall);
-                            (remaining, std::time::Instant::now())
+                            (
+                                Duration::from_secs(seconds),
+                                frame.path_time_snapshot().active_wall,
+                                std::time::Instant::now(),
+                            )
                         });
                         // 检查原路径约束：必须早于有限域代表值钉选和 encdec/输出过滤。
                         // 样本功能独立于旧 JSON 是否被消费方过滤，每条可行完成路径均参与。
@@ -2510,11 +2508,27 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                             let smt_result = if solver.has_stashed_model() {
                                 isla_lib::smt::SmtResult::Sat
                             } else {
-                                let path_remaining =
-                                    path_budget.map(|(remaining, started)| remaining.saturating_sub(started.elapsed()));
+                                let path_remaining = path_budget.map(|(limit, active_wall, started)| {
+                                    let elapsed = active_wall + started.elapsed();
+                                    (limit.saturating_sub(elapsed), limit, elapsed)
+                                });
                                 let info = SourceLoc::unknown();
-                                match path_remaining.into_iter().chain(model_timeout).min() {
+                                match path_remaining
+                                    .map(|(remaining, _, _)| remaining)
+                                    .into_iter()
+                                    .chain(model_timeout)
+                                    .min()
+                                {
                                     Some(deadline) if deadline.is_zero() => {
+                                        let (_, limit, elapsed) = path_remaining.expect("终值专用时限必须为正数");
+                                        isla_lib::executor::enforce_path_timeout(
+                                            execution_limits.on_path_timeout,
+                                            limit,
+                                            elapsed,
+                                            "terminal_model",
+                                            frame,
+                                            shared_state,
+                                        );
                                         collected.lock().unwrap().record_model_query_timeout();
                                         trace_diagnostics = error_recorder.record_error_diagnostic(
                                             &ExecError::Timeout,
@@ -3015,7 +3029,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     loop {
         isla_lib::executor::start_multi(num_threads, timeout, tasks, shared_state, result.clone(), collector);
         let next = std::mem::take(&mut *continuations.lock().expect("ExecuteAs 续执行队列 mutex poisoned"));
-        if next.is_empty() || shared_state.execution_stats.solver_failed() {
+        if next.is_empty() {
             break;
         }
         tasks = next
@@ -3081,7 +3095,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     state.summary.model_query_timeouts = state.model_query_timeouts;
     state.summary.encoding_filtered_paths = state.encdec_guard_rejects;
     state.summary.solver_path_drops = shared_state.execution_stats.solver_path_drops_since(drop_start);
-    let invalid_exploration = state.summary.solver_path_drops.count > 0 || shared_state.execution_stats.solver_failed();
+    let invalid_exploration = state.summary.solver_path_drops.count > 0;
     state.summary.print_model_exception_filter();
     cache.summary = state.summary.json();
     if let Some(session) = samples.fuzz.as_ref().filter(|_| !invalid_exploration) {
@@ -3095,7 +3109,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             cache,
             execution_limits,
         );
-    } else if samples.path_cache.write.is_some() && !shared_state.execution_stats.solver_failed() {
+    } else if samples.path_cache.write.is_some() {
         let mut paths = resident_paths.into_inner().unwrap();
         paths.sort_by_key(|p| p.signature);
         let mut timing = super::path_cache::Timing::default();
@@ -3689,7 +3703,7 @@ mod tests {
             directory: PathBuf::new(),
         });
 
-        let recorder = ErrorRecorder { collected: &collected, reporter: &reporter, clause: "zTEST" };
+        let recorder = ErrorRecorder { collected: &collected, reporter: &reporter, clause: "zTEST", on_unknown: None };
         let diagnostics = recorder.record_error_diagnostic(&error, &frame, &shared_state);
 
         let state = collected.into_inner().unwrap();
@@ -3702,7 +3716,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_query_solver_failures_record_errors_without_invalidating_exploration() {
+    fn terminal_query_solver_failures_follow_path_policy() {
         let function_text = zencode::encode("test_function");
         let mut symtab = Symtab::new();
         let function_name = symtab.intern(&function_text);
@@ -3732,12 +3746,29 @@ mod tests {
                 output: TimeoutSmtOutput::new(false, true, false),
                 directory: PathBuf::new(),
             });
-            let recorder = ErrorRecorder { collected: &collected, reporter: &reporter, clause: "zTEST" };
+            use isla_lib::config::PathFailureAction;
+            let recorder = ErrorRecorder {
+                collected: &collected,
+                reporter: &reporter,
+                clause: "zTEST",
+                on_unknown: Some(PathFailureAction::Panic),
+            };
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                recorder.terminal_path_is_sat(isla_lib::smt::SmtResult::Error(error.clone()), &frame, &shared_state);
+            }))
+            .unwrap_err();
+            let message = panic.downcast_ref::<String>().unwrap();
+            assert!(message.contains("function=test_function"), "{message}");
+            assert!(
+                message.contains(if is_timeout { "reason=timeout" } else { "purpose=terminal_value" }),
+                "{message}"
+            );
+            let drop_start = shared_state.execution_stats.solver_path_drop_count();
+            let recorder = ErrorRecorder { on_unknown: Some(PathFailureAction::Dead), ..recorder };
             assert!(!recorder.terminal_path_is_sat(isla_lib::smt::SmtResult::Error(error), &frame, &shared_state));
             let mut state = collected.into_inner().unwrap();
-            let drops = shared_state.execution_stats.solver_path_drops_since(0);
-            assert_eq!(drops.count, 0);
-            assert!(!shared_state.execution_stats.solver_failed());
+            let drops = shared_state.execution_stats.solver_path_drops_since(drop_start);
+            assert_eq!(drops.count, 1);
             state.summary.solver_path_drops = drops;
             assert!(state.cases.is_empty());
             assert_eq!(state.summary.errors, 1);
@@ -3745,8 +3776,8 @@ mod tests {
             assert!(matches!(state.first_error, Some(ExecError::Smt(_))));
             assert_eq!(state.summary.status(), "partial");
             assert_eq!(state.diagnostics.len(), 1);
-            assert!(state.summary.json().get("valid").is_none());
-            assert_eq!(exploration_exit_code(1, &shared_state), 1);
+            assert_eq!(state.summary.json()["valid"], false);
+            assert_eq!(exploration_exit_code(1, &shared_state), 66);
         }
     }
 
@@ -3762,7 +3793,7 @@ mod tests {
             output: TimeoutSmtOutput::new(false, true, false),
             directory: PathBuf::new(),
         });
-        let recorder = ErrorRecorder { collected: &collected, reporter: &reporter, clause: "zTEST" };
+        let recorder = ErrorRecorder { collected: &collected, reporter: &reporter, clause: "zTEST", on_unknown: None };
         assert!(recorder.terminal_path_is_sat(isla_lib::smt::SmtResult::Sat, &frame, &shared_state));
         assert!(!recorder.terminal_path_is_sat(isla_lib::smt::SmtResult::Unsat, &frame, &shared_state));
         let state = collected.into_inner().unwrap();

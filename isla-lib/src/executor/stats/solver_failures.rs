@@ -1,6 +1,6 @@
 //! 路径丢弃与判定失败共享执行统计，验收调用不经过此入口。
 use super::*;
-use crate::config::SolverOnUnknown;
+use crate::config::PathFailureAction;
 use crate::error::{ExecError, SmtError};
 use crate::executor::LocalFrame;
 use crate::ir::SharedState;
@@ -50,19 +50,15 @@ impl ExecutionStats {
     pub fn solver_path_drop_count(&self) -> usize {
         self.solver_path_drops.lock().unwrap().len()
     }
-
-    pub fn solver_failed(&self) -> bool {
-        self.solver_failed.load(std::sync::atomic::Ordering::Relaxed)
-    }
 }
 
 pub fn is_solver_failure(error: &ExecError) -> bool {
     matches!(error, ExecError::Smt(SmtError::Timeout(_) | SmtError::Unknown { .. }))
 }
 
-/// 只在探索决定丢弃时调用。返回 true 表示应走当前候选的死路径出口。
-pub fn discard_solver_path<B: BV>(
-    policy: Option<SolverOnUnknown>,
+/// 仅在失败已归属到单条探索路径时调用。返回 true 表示该路径按显式 dead 策略作废。
+pub fn handle_solver_path_failure<B: BV>(
+    policy: Option<PathFailureAction>,
     error: &ExecError,
     frame: &LocalFrame<'_, B>,
     shared: &SharedState<'_, B>,
@@ -81,29 +77,18 @@ pub fn discard_solver_path<B: BV>(
         }
         _ => return false,
     };
-    let stats = &shared.execution_stats;
-    if policy == SolverOnUnknown::Error {
-        stats.solver_failed.store(true, std::sync::atomic::Ordering::Relaxed);
-        return false;
+    let failure = PathFailureDiagnostic::new(frame, shared, source, purpose, reason, wall, limit);
+    if policy == PathFailureAction::Panic {
+        failure.panic();
     }
-    let source = if source.is_unknown() {
-        frame.instrs[..(frame.pc() + 1).min(frame.instrs.len())]
-            .iter()
-            .rev()
-            .find_map(instr_source_loc)
-            .unwrap_or(source)
-    } else {
-        source
-    };
-    let sail_location = source.file_line(shared.symtab.files()).unwrap_or_else(|| "未知 Sail 位置".into());
-    let mut drops = stats.solver_path_drops.lock().unwrap();
+    let mut drops = shared.execution_stats.solver_path_drops.lock().unwrap();
     let drop = SolverPathDrop {
         path_count: drops.len() + 1,
-        function: crate::zencode::decode(shared.symtab.to_str(frame.function_name())),
+        function: failure.function,
         pc: frame.pc(),
         path_signature: frame.path_signature(),
-        sail_location,
-        source_loc: source,
+        sail_location: failure.sail_location,
+        source_loc: failure.source_loc,
         purpose: purpose.into(),
         reason: reason.into(),
         seconds: wall.as_secs_f64(),
@@ -114,4 +99,61 @@ pub fn discard_solver_path<B: BV>(
     }
     drops.push(drop);
     true
+}
+
+pub const PATH_LIMIT_PANIC_PREFIX: &str = "[PATH_LIMIT_PANIC]";
+
+pub(crate) struct PathFailureDiagnostic {
+    function: String,
+    pc: usize,
+    sail_location: String,
+    source_loc: SourceLoc,
+    purpose: &'static str,
+    reason: &'static str,
+    wall: std::time::Duration,
+    limit: Option<std::time::Duration>,
+    path_depth: u64,
+}
+
+impl PathFailureDiagnostic {
+    pub(crate) fn new<B: BV>(
+        frame: &LocalFrame<'_, B>,
+        shared: &SharedState<'_, B>,
+        source_loc: SourceLoc,
+        purpose: &'static str,
+        reason: &'static str,
+        wall: std::time::Duration,
+        limit: Option<std::time::Duration>,
+    ) -> Self {
+        let source_loc = if source_loc.is_unknown() {
+            frame.instrs[..frame.pc().saturating_add(1).min(frame.instrs.len())]
+                .iter()
+                .rev()
+                .filter_map(instr_source_loc)
+                .find(|loc| !loc.is_unknown())
+                .unwrap_or(source_loc)
+        } else {
+            source_loc
+        };
+        Self {
+            function: crate::zencode::decode(shared.symtab.to_str(frame.function_name())),
+            pc: frame.pc(),
+            sail_location: source_loc.file_line(shared.symtab.files()).unwrap_or_else(|| "未知 Sail 位置".into()),
+            source_loc,
+            purpose,
+            reason,
+            wall,
+            limit,
+            path_depth: frame.execution_limit_state.control_flow_steps(),
+        }
+    }
+
+    #[cold]
+    pub(crate) fn panic(&self) -> ! {
+        let limit = self.limit.map_or_else(|| "unlimited".to_string(), |limit| format!("{limit:?}"));
+        panic!(
+            "{PATH_LIMIT_PANIC_PREFIX} reason={} function={} pc={} sail={} purpose={} elapsed={:?} limit={} path_depth={}",
+            self.reason, self.function, self.pc, self.sail_location, self.purpose, self.wall, limit, self.path_depth,
+        );
+    }
 }

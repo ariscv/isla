@@ -92,6 +92,16 @@ fn parse_subcommand(matches: &getopts::Matches) -> Result<Subcommand, String> {
 }
 
 fn main() {
+    // 调试构建的 worker 会展开栈。路径策略要求整个命令立即失败，不能等待其他 worker。
+    let print_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic| {
+        print_panic(panic);
+        if panic.payload().downcast_ref::<String>().is_some_and(|message| {
+            message.starts_with(isla_lib::executor::stats::solver_failures::PATH_LIMIT_PANIC_PREFIX)
+        }) {
+            exit(101);
+        }
+    }));
     let code = isla_main();
     unsafe { isla_lib::smt::finalize_solver() };
     exit(code)

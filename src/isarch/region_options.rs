@@ -39,7 +39,8 @@ pub fn add_cli(opts: &mut getopts::Options) {
     for (_, flag, help) in BOOL_OPTIONS {
         opts.optopt("", flag, help, "true|false");
     }
-    opts.optopt("", "solver-on-unknown", "求解未判定时丢弃路径或立即报错，缺省 dead", "dead|error");
+    opts.optopt("", "solver-on-unknown", "路径求解未判定或超时的处置，缺省 panic", "panic|dead");
+    opts.optopt("", "on-path-timeout", "逐路径 --timeout 到限的处置，缺省 panic", "panic|dead");
     opts.optopt("", "region-max-merge-depth", "区域嵌套上限，默认不限；-1不限", "正整数|-1");
     opts.optopt("", "region-bool-proof-rlimit", "可选布尔证明资源上限，0 不限；默认 0", "u32");
     opts.optopt("", "query-dump-sites", "查询导出位置；逗号分隔，空串清空", "sites");
@@ -51,12 +52,10 @@ pub fn add_cli(opts: &mut getopts::Options) {
 pub fn apply_cli(matches: &getopts::Matches, limits: &mut ExecutionLimitsConfig) -> Result<(), String> {
     let mut updated = limits.clone();
     if let Some(value) = matches.opt_str("solver-on-unknown") {
-        use isla_lib::config::SolverOnUnknown;
-        updated.solver.on_unknown = match value.as_str() {
-            "dead" => SolverOnUnknown::Dead,
-            "error" => SolverOnUnknown::Error,
-            _ => return Err("--solver-on-unknown 必须是 dead 或 error".into()),
-        };
+        updated.solver.on_unknown = value.parse().map_err(|error| format!("--solver-on-unknown {error}"))?;
+    }
+    if let Some(value) = matches.opt_str("on-path-timeout") {
+        updated.on_path_timeout = value.parse().map_err(|error| format!("--on-path-timeout {error}"))?;
     }
     if matches.opt_present("bv-rewrite") {
         updated.solver.bv_rewrite =
@@ -327,17 +326,30 @@ mod no_smt_port_tests {
 
     #[test]
     fn solver_unknown_policy_uses_only_solver_table_and_cli() {
-        use isla_lib::config::SolverOnUnknown;
-        assert_eq!(ExecutionLimitsConfig::default().solver.on_unknown, SolverOnUnknown::Dead);
-        let mut limits: ExecutionLimitsConfig =
-            "[solver]\non_unknown='error'".parse::<toml::Value>().unwrap().try_into().unwrap();
-        apply_cli(&parse(&[]), &mut limits).unwrap();
-        assert_eq!(limits.solver.on_unknown, SolverOnUnknown::Error);
+        use isla_lib::config::PathFailureAction;
+        let mut limits = ExecutionLimitsConfig::default();
+        assert_eq!(limits.solver.on_unknown, PathFailureAction::Panic);
+        let legacy = toml::from_str::<ExecutionLimitsConfig>("[solver]\non_unknown='error'").unwrap_err();
+        assert!(legacy.to_string().contains("panic"), "{legacy}");
+        let legacy_cli = apply_cli(&parse(&["--solver-on-unknown=error"]), &mut limits).unwrap_err();
+        assert!(legacy_cli.contains("panic"), "{legacy_cli}");
         assert!(apply_cli(&parse(&["--solver-on-unknown=ignore"]), &mut limits).is_err());
         apply_cli(&parse(&["--solver-on-unknown=dead"]), &mut limits).unwrap();
-        assert_eq!(limits.solver.on_unknown, SolverOnUnknown::Dead);
+        assert_eq!(limits.solver.on_unknown, PathFailureAction::Dead);
         assert!(toml::from_str::<ExecutionLimitsConfig>("[path_merge]\non_unknown='error'").is_err());
         assert!(toml::from_str::<ExecutionLimitsConfig>("[solver]\non_unknown='ignore'").is_err());
+    }
+
+    #[test]
+    fn path_timeout_policy_uses_execution_limits_and_cli_override() {
+        use isla_lib::config::PathFailureAction;
+        assert_eq!(ExecutionLimitsConfig::default().on_path_timeout, PathFailureAction::Panic);
+        let mut limits = toml::from_str::<ExecutionLimitsConfig>("on_path_timeout='dead'").unwrap();
+        assert_eq!(limits.on_path_timeout, PathFailureAction::Dead);
+        apply_cli(&parse(&["--on-path-timeout=panic"]), &mut limits).unwrap();
+        assert_eq!(limits.on_path_timeout, PathFailureAction::Panic);
+        assert_eq!(limits.solver.on_unknown, PathFailureAction::Panic);
+        assert!(apply_cli(&parse(&["--on-path-timeout=ignore"]), &mut limits).is_err());
     }
 
     #[test]

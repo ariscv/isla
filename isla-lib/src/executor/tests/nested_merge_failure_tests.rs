@@ -472,8 +472,10 @@ fn solver_unknown_nested_arm_keeps_root_and_survivor() {
             copy_return(Exp::Bool(true)),
             Instr::End,
         ];
-        let paths = crate::smt::test_queries::with_results([None, None, Some(z3_sys::Z3_L_UNDEF)], || {
-            paths_with_state(program, &shared, 2, strategy.limits(), crate::memory::Memory::new(), |_| ())
+        let paths = super::path_failure_policy_tests::with_solver_dead(|| {
+            crate::smt::test_queries::with_results([None, None, Some(z3_sys::Z3_L_UNDEF)], || {
+                paths_with_state(program, &shared, 2, strategy.limits(), crate::memory::Memory::new(), |_| ())
+            })
         });
         assert_eq!(paths.len(), 1);
         assert!(matches!(paths[0].value, Val::Bool(false)));
@@ -481,6 +483,31 @@ fn solver_unknown_nested_arm_keeps_root_and_survivor() {
         let diagnostics = shared.execution_stats.merge_json();
         assert_eq!(diagnostics["solver_timeout_dropped_paths"], 1);
         assert_eq!(diagnostics["failures"], 0);
+    }
+}
+
+#[test]
+fn solver_unknown_nested_arm_panics_in_both_organizers() {
+    for strategy in strategies() {
+        let mut shared = empty_shared_state();
+        shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+        let program = vec![
+            Instr::Jump(input(0), 3, info()),
+            copy_return(Exp::Bool(false)),
+            Instr::Goto(7),
+            Instr::Jump(input(1), 6, info()),
+            copy_return(Exp::Bool(false)),
+            Instr::Goto(7),
+            copy_return(Exp::Bool(true)),
+            Instr::End,
+        ];
+        let message = super::path_failure_policy_tests::panic_message(|| {
+            crate::smt::test_queries::with_results([None, None, Some(z3_sys::Z3_L_UNDEF)], || {
+                paths_with_state(program, &shared, 2, strategy.limits(), crate::memory::Memory::new(), |_| ())
+            });
+        });
+        assert!(message.contains("branch_feasibility"), "{message}");
+        assert_eq!(shared.execution_stats.solver_path_drop_count(), 0);
     }
 }
 
@@ -513,10 +540,19 @@ fn solver_unknown_exit_obligation_replays_and_drops_per_path() {
             )
         };
         let program = vec![Instr::Jump(input(0), 3, info()), check(), Instr::Goto(4), check(), Instr::End];
-        let paths =
+        let mut replay = empty_shared_state();
+        replay.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+        let paths = crate::smt::test_queries::with_unknown_purposes(&["exit_obligations"], || {
+            paths_with_state(program.clone(), &replay, 2, strategy.limits(), crate::memory::Memory::new(), |_| ())
+        });
+        assert_eq!(paths.len(), 2, "区域出口 Unknown 须回放两条路径");
+        assert_eq!(replay.execution_stats.solver_path_drop_count(), 0);
+        assert_eq!(replay.execution_stats.merge_json()["failure_reasons"]["solver_unknown"], 1);
+        let paths = super::path_failure_policy_tests::with_solver_dead(|| {
             crate::smt::test_queries::with_unknown_purposes(&["exit_obligations", "assertion", "assertion"], || {
                 paths_with_state(program, &shared, 2, strategy.limits(), crate::memory::Memory::new(), |_| ())
-            });
+            })
+        });
         assert!(paths.is_empty());
         let diagnostics = shared.execution_stats.merge_json();
         assert_eq!(diagnostics["solver_timeout_dropped_paths"], 2);

@@ -25,7 +25,7 @@ isarch [全局选项] <子命令> [子命令参数]
 | `--verbose` | 详细输出 |
 | `--init-isa-with-config` | 使用配置默认值初始化 ISA |
 | `-g/--graphviz` | Graphviz 输出格式（tree 命令） |
-| `--timeout <n>` | 超时时间（秒） |
+| `--timeout <n>` | 逐路径活动墙钟限时，缺省单位秒，支持 s/m/h 后缀 |
 
 isarch 使用实际 IR 检查区域规则。旧 TOML 的 `ir_sha256` 仍可解析，IR 来源可查生成清单或求解摘要。
 
@@ -535,6 +535,14 @@ progress = true
 全局无 SMT 模式只支持 `solve-state --path-cache-only --path-cache-write <新目录>`，不能同时认证样本或读回缓存。产物标 `uncertified`，探索保持 partial；候选计数不能作为已认证覆盖。`--memory-stats` 输出 `no_smt_summary`；全关应为零真实 check，第三种仍会运行可选布尔恒值证明。旧 `[execution_limits.path_merge]`（包括其中的 `no_smt`）报错；四个开关也不能放在 `path_merge` 或其 `diagnostics` 表中。
 
 
+### 探索路径的限时与求解失败
+
+`[execution_limits.solver] on_unknown = "panic"` 是缺省。探索路径遇到真实 Z3 Unknown 或线程中断超时时，isarch 立即 panic 并以非零状态退出。`--solver-on-unknown=panic|dead` 覆盖 TOML，旧值 `error` 报配置错误，请迁移到 `panic`。显式选择 `dead` 时继续探索，并记录受影响的路径。收尾返回 66，路径缓存标作废。
+
+`[execution_limits] on_path_timeout = "panic"` 是逐路径 `--timeout` 的缺省处置。`--on-path-timeout=panic|dead` 覆盖 TOML。显式选择 `dead` 时使用原来的逐路径到限记录并继续探索。两类 panic 都报告 IR 函数、PC、Sail 位置、用途、耗时、限额和路径深度。scheduler 将这类退出记为 `error`，诊断行保存在结果 JSON 的 `errors` 中。
+
+区域尝试超时、整体出口查询无法判定和延后查询的内部 Unknown 仍由区域推演处理，自动合并撤销尝试并在普通分叉上执行。路径策略只在结果可归属单条探索路径或执行最终到限时生效。样本绑定和验收的错误继续交给各自调用方。
+
 使用线程中断功能构建时，`--smt-timeout` 设置单次 Z3 调用的软中断限时，省略时不限。终态查询的专用限时独立生效。直接调用构建没有这两种单次限时。
 
 递归与平铺合并都在实际到达指令时检查普通被调函数的传递 `StateEffect`。普通被调函数的寄存器写入沿用调用者区域的访问记录，各汇合组发布自己的最终写入。区域准入仍检查直接不可撤销效应，到达未实现的 extern 时仍拒绝推演。
@@ -542,7 +550,7 @@ progress = true
 ### 臂内执行错误叶子
 
 `[execution_limits.path_merge].arm_error_leaf` 默认关闭。使用 `--arm-error-leaf=true` 或在该表显式设置 `arm_error_leaf = true` 启用。
-即时与延后区域共用失败点的执行迹和完整守卫。正常组继续执行，已证可达的执行错误单独交付。无 SMT 或求解结果未知时，错误叶标记为未认证。只有已证不可达的错误叶会被筛除。judge 在 `execution_errors` 记录具体输入命中的错误叶及源码位置，并继续核对正常路径。
+即时与延后区域共用失败点的执行迹和完整守卫。正常组继续执行，已证可达的执行错误单独交付。无 SMT 时，错误叶标记为未认证。已证不可达的错误叶会被筛除，认证时遇到真实求解失败则应用探索路径的求解策略。judge 在 `execution_errors` 记录具体输入命中的错误叶及源码位置，并继续核对正常路径。
 
 ### 区域合并具体值
 

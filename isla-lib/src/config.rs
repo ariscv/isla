@@ -1556,7 +1556,8 @@ fn get_default_sizeof(config: &Value) -> Result<u32, String> {
 pub mod region_options;
 pub use region_options::RegionOptions;
 pub mod path_merge;
-pub use path_merge::{PathMergeConfig, PathMergeDiagnostics, PathMergeRegionConfig, SolverConfig, SolverOnUnknown};
+pub use path_merge::PathFailureAction as SolverOnUnknown;
+pub use path_merge::{PathFailureAction, PathMergeConfig, PathMergeDiagnostics, PathMergeRegionConfig, SolverConfig};
 
 /// 路径合并执行策略；递归是兼容默认值。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -1580,6 +1581,7 @@ impl std::str::FromStr for MergeStrategy {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ExecutionLimitsConfig {
+    pub on_path_timeout: PathFailureAction,
     pub solver: SolverConfig,
     pub path_merge: PathMergeConfig,
     /// resident judge 同时恢复的路径上限，默认使用线程数。

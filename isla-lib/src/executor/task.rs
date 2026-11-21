@@ -102,6 +102,7 @@ pub struct TaskState<B> {
     // IR program counter in the frame.
     pub(super) pc_limit: Option<(Name, usize)>,
     pub(super) execution_limits: Option<ExecutionLimits>,
+    pub(super) on_path_timeout: crate::config::PathFailureAction,
     // Exit if we ever announce an instruction with all bits set to zero
     pub(super) zero_announce_exit: bool,
     pub(super) interrupts: Vec<TaskInterrupt<B>>,
@@ -141,6 +142,7 @@ impl<B> TaskState<B> {
             reset_registers: HashMap::new(),
             pc_limit: None,
             execution_limits: None,
+            on_path_timeout: Default::default(),
             zero_announce_exit: false,
             interrupts: Vec::new(),
         }
@@ -165,8 +167,9 @@ impl<B> TaskState<B> {
     }
 
     pub fn with_execution_limits(self, limits: ExecutionLimits) -> Self {
+        let on_path_timeout = limits.on_path_timeout;
         let execution_limits = limits.is_active().then_some(limits);
-        TaskState { execution_limits, ..self }
+        TaskState { execution_limits, on_path_timeout, ..self }
     }
 
     pub fn with_zero_announce_exit(self, b: bool) -> Self {

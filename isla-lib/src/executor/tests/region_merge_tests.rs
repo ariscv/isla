@@ -4969,6 +4969,7 @@ fn default_complex_feasibility_keeps_three_results_and_rollback() {
     for limited in [false, true] {
         let mut config = Config::new();
         if limited {
+            config.solver_options.on_unknown = crate::config::PathFailureAction::Dead;
             config.set_param_value("rlimit", "1");
         }
         let context = Context::new(config);

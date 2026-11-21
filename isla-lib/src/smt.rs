@@ -754,7 +754,7 @@ pub fn enable_trace_event_guards() {
 /// 求解选项；有限域识别和枚举沿用路径合并配置的缺省值。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SolverOptions {
-    pub on_unknown: crate::config::SolverOnUnknown,
+    pub on_unknown: crate::config::PathFailureAction,
     pub skip_branch_checks: bool,
     pub skip_bool_proofs: bool,
     pub no_smt: bool,
@@ -793,13 +793,10 @@ pub struct Config {
 
 impl Config {
     pub fn new() -> Self {
-        unsafe {
-            Config {
-                z3_cfg: Z3_mk_config(),
-                solver_options: SOLVER_OPTIONS.get().copied().unwrap_or_default(),
-                validation: false,
-            }
-        }
+        let solver_options = SOLVER_OPTIONS.get().copied().unwrap_or_default();
+        #[cfg(test)]
+        let solver_options = test_queries::solver_options().unwrap_or(solver_options);
+        unsafe { Config { z3_cfg: Z3_mk_config(), solver_options, validation: false } }
     }
 }
 
@@ -2461,12 +2458,29 @@ fn unknown_result(info: SourceLoc, wall: Duration, deadline: Option<Duration>) -
 
 #[cfg(test)]
 pub(crate) mod test_queries {
-    use std::cell::RefCell;
+    use super::SolverOptions;
+    use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
 
     thread_local! {
+        static OPTIONS: Cell<Option<SolverOptions>> = const { Cell::new(None) };
         static RESULTS: RefCell<VecDeque<Option<z3_sys::Z3_lbool>>> = const { RefCell::new(VecDeque::new()) };
         static PURPOSES: RefCell<VecDeque<&'static str>> = const { RefCell::new(VecDeque::new()) };
+    }
+
+    pub(super) fn solver_options() -> Option<SolverOptions> {
+        OPTIONS.get()
+    }
+
+    pub(crate) fn with_solver_options<T>(options: SolverOptions, run: impl FnOnce() -> T) -> T {
+        struct Reset(Option<SolverOptions>);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                OPTIONS.set(self.0);
+            }
+        }
+        let _reset = Reset(OPTIONS.replace(Some(options)));
+        run()
     }
 
     pub(crate) fn with_results<T>(
@@ -3385,7 +3399,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         solver
     }
 
-    pub(crate) fn exploration_on_unknown(&self) -> Option<crate::config::SolverOnUnknown> {
+    pub fn exploration_on_unknown(&self) -> Option<crate::config::PathFailureAction> {
         (!self.ctx.validation).then_some(self.ctx.solver_options.on_unknown)
     }
 

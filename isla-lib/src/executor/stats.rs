@@ -122,7 +122,6 @@ impl FilterCounts {
 
 pub struct ExecutionStats {
     solver_path_drops: Mutex<Vec<solver_failures::SolverPathDrop>>,
-    solver_failed: std::sync::atomic::AtomicBool,
     enabled: bool,
     filtered_model_exceptions: FilterCounts,
     filtered_match_failures: FilterCounts,
@@ -140,7 +139,6 @@ impl ExecutionStats {
     pub fn new(enabled: bool) -> Self {
         Self {
             solver_path_drops: Mutex::default(),
-            solver_failed: std::sync::atomic::AtomicBool::default(),
             enabled,
             filtered_model_exceptions: FilterCounts::default(),
             filtered_match_failures: FilterCounts::default(),

@@ -199,7 +199,7 @@ pub(super) fn path_is_feasible<B: BV>(
 ) -> Result<bool, ExecError> {
     match result.is_sat() {
         Err(error)
-            if super::stats::solver_failures::discard_solver_path(
+            if super::stats::solver_failures::handle_solver_path_failure(
                 solver.exploration_on_unknown(),
                 &error,
                 frame,
@@ -685,7 +685,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                                 return Err(reject(frame, SpeculativeRejectReason::SolverUnknown))
                             }
                             Some(SmtResult::Error(crate::error::SmtError::Unknown { .. }))
-                                if solver.exploration_on_unknown() == Some(crate::config::SolverOnUnknown::Dead) =>
+                                if solver.exploration_on_unknown().is_some() =>
                             {
                                 return Err(reject(frame, SpeculativeRejectReason::SolverUnknown));
                             }
@@ -716,7 +716,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                                 Err(reject(frame, SpeculativeRejectReason::SolverUnknown))
                             }
                             Some(SmtResult::Error(crate::error::SmtError::Unknown { .. }))
-                                if solver.exploration_on_unknown() == Some(crate::config::SolverOnUnknown::Dead) =>
+                                if solver.exploration_on_unknown().is_some() =>
                             {
                                 Err(reject(frame, SpeculativeRejectReason::SolverUnknown))
                             }
@@ -848,9 +848,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
             state.speculation_stats.record_reject(reason);
             shared.execution_stats.rule_finished(rule, Some(reason));
             shared.execution_stats.merge_finished(false);
-            if solver.exploration_on_unknown() != Some(crate::config::SolverOnUnknown::Dead)
-                && stats::solver_failures::is_solver_failure(&error)
-            {
+            if solver.exploration_on_unknown().is_none() && stats::solver_failures::is_solver_failure(&error) {
                 return Err(error);
             }
             if mode == MergeMode::Force {
@@ -890,10 +888,15 @@ fn publish_arm_errors<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         if matches!(checked, Some(SmtResult::Unsat)) {
             continue;
         }
-        if let Some(SmtResult::Error(error @ crate::error::SmtError::Timeout(_))) = &checked {
+        if let Some(SmtResult::Error(error)) = &checked {
             let error = ExecError::Smt(error.clone());
             let failed = unfreeze_frame(&task.frame);
-            if stats::solver_failures::discard_solver_path(solver.exploration_on_unknown(), &error, &failed, shared) {
+            if stats::solver_failures::handle_solver_path_failure(
+                solver.exploration_on_unknown(),
+                &error,
+                &failed,
+                shared,
+            ) {
                 continue;
             }
         }
