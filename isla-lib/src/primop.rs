@@ -431,6 +431,18 @@ pub(crate) fn integer_conversion_in_range<B: BV>(
     let value = replace_mixed_bits(value.clone(), solver, info)?;
     let Val::Symbolic(sym) = value else { return Ok(None) };
     let Some(width) = solver.length(sym) else { return Ok(None) };
+    if narrow
+        && matches!(solver.finite_domain(sym), crate::smt::FiniteDomain::Known(values) if values.iter().all(|value| match value {
+            Exp::Bits64(_) => true,
+            Exp::Bits(bits) => i128_from_model_bits(bits).is_some_and(|value| i64::try_from(value).is_ok()),
+            _ => unreachable!("精确有限域必须只包含位向量常量"),
+        }))
+    {
+        // `%i` 到 `%i64` 的窄化前先检查可表示性。精确有限域的每个值都能放入 i64 时，
+        // 该检查已由结构化枚举证明，不能在延后区域退回到通用求解器。
+        solver.note_finite_domain_use("finite_domain_i128_to_i64", info);
+        return Ok(None);
+    }
     let range = if narrow {
         assert_eq!(width, 128, "整数窄化的输入必须是 128 位");
         if solver.structural_fits_i64(sym) {
@@ -6958,6 +6970,59 @@ mod tests {
             let count = isla_count_ones(Val::Symbolic(input), &mut solver, SourceLoc::unknown())?;
             i128_to_i64(count, &mut solver, SourceLoc::unknown())?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn i128_to_i64_uses_known_arithmetic_domain_without_a_solver_check() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let mut config = Config::new();
+        config.solver_options.finite_domain_enumeration = true;
+        let context = Context::new(config);
+        let mut solver = Solver::<B64>::new(&context);
+        let info = SourceLoc::unknown();
+        let level = solver.declare_bitvector(64, info);
+        let sv_width = solver.declare_bitvector(64, info);
+        for (symbol, values) in [(level, &[0, 1, 2, 3][..]), (sv_width, &[32, 39, 48, 57][..])] {
+            solver.assert(
+                values
+                    .iter()
+                    .map(|value| Exp::Eq(Box::new(Exp::Var(symbol)), Box::new(smtlib::bits64(*value, 64))))
+                    .reduce(|left, right| Exp::Or(Box::new(left), Box::new(right)))
+                    .unwrap(),
+            );
+        }
+        let level = solver.define_const(Exp::SignExtend(64, Box::new(Exp::Var(level))), info);
+        let width = solver.define_const(Exp::SignExtend(64, Box::new(Exp::Var(sv_width))), info);
+        let vpn_i_size = solver.define_const(
+            Exp::Ite(
+                Box::new(Exp::Eq(Box::new(Exp::Var(width)), Box::new(smt_i128(32)))),
+                Box::new(smt_i128(9)),
+                Box::new(smt_i128(10)),
+            ),
+            info,
+        );
+        let next_level = solver.define_const(Exp::Bvadd(Box::new(Exp::Var(level)), Box::new(smt_i128(1))), info);
+        let previous_level = solver.define_const(Exp::Bvsub(Box::new(Exp::Var(level)), Box::new(smt_i128(1))), info);
+        let high = solver.define_const(
+            Exp::Bvsub(
+                Box::new(Exp::Bvmul(Box::new(Exp::Var(next_level)), Box::new(Exp::Var(vpn_i_size)))),
+                Box::new(smt_i128(1)),
+            ),
+            info,
+        );
+        assert!(matches!(solver.finite_domain(previous_level), crate::smt::FiniteDomain::Known(_)));
+        assert!(matches!(solver.finite_domain(high), crate::smt::FiniteDomain::Known(_)));
+        let before = crate::smt::test_query_count();
+        let Val::Symbolic(narrow) = i128_to_i64(Val::Symbolic(high), &mut solver, info)? else {
+            panic!("符号 %i 窄化必须保持符号表示")
+        };
+        assert_eq!(crate::smt::test_query_count() - before, 0);
+        assert!(matches!(solver.finite_domain(narrow), crate::smt::FiniteDomain::Known(_)));
+        let Val::Symbolic(roundtrip) = i64_to_i128(Val::Symbolic(narrow), &mut solver, info)? else {
+            panic!("符号 %i64 扩展必须保持符号表示")
+        };
+        assert!(matches!(solver.finite_domain(roundtrip), crate::smt::FiniteDomain::Known(_)));
         Ok(())
     }
 
