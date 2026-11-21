@@ -1562,6 +1562,10 @@ impl<'ctx> Ast<'ctx> {
         z3_unary_op!(Z3_mk_fpa_is_infinite, self)
     }
 
+    fn mk_fpa_is_nan_raw(&self) -> Self {
+        z3_unary_op!(Z3_mk_fpa_is_nan, self)
+    }
+
     fn mk_fpa_is_nan(&self) -> Self {
         unsafe {
             let ctx = self.ctx.z3_ctx;
@@ -1594,8 +1598,8 @@ impl<'ctx> Ast<'ctx> {
                         {
                             // 对所有精度和舍入模式，NaN仅来自NaN输入、0/0或无穷/无穷。
                             // 数值结果仍使用原除法；分类查询无需构造其数值除法器。
-                            let left_nan = z3_unary_op!(Z3_mk_fpa_is_nan, left);
-                            let right_nan = z3_unary_op!(Z3_mk_fpa_is_nan, right);
+                            let left_nan = left.mk_fpa_is_nan_raw();
+                            let right_nan = right.mk_fpa_is_nan_raw();
                             let both_zero = left.mk_fpa_is_zero().mk_and(&right.mk_fpa_is_zero());
                             let both_infinite = left.mk_fpa_is_infinite().mk_and(&right.mk_fpa_is_infinite());
                             return left_nan.mk_or(&right_nan).mk_or(&both_zero).mk_or(&both_infinite);
@@ -1604,7 +1608,7 @@ impl<'ctx> Ast<'ctx> {
                 }
             }
         }
-        z3_unary_op!(Z3_mk_fpa_is_nan, self)
+        self.mk_fpa_is_nan_raw()
     }
 
     fn mk_fpa_is_negative(&self) -> Self {
@@ -4109,7 +4113,7 @@ mod tests {
                 Z3_inc_ref(ctx, application);
                 let value = Ast { z3_ast: application, ctx: &context };
                 Z3_dec_ref(ctx, declaration_ast);
-                let expected = z3_unary_op!(Z3_mk_fpa_is_nan, value);
+                let expected = value.mk_fpa_is_nan_raw();
                 assert!(
                     Z3_is_eq_ast(ctx, value.mk_fpa_is_nan().z3_ast, expected.z3_ast),
                     "同名同签名的未解释函数必须保持原有NaN判定"

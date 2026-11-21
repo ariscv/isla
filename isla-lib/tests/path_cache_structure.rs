@@ -1,4 +1,6 @@
 //! 合成 IR 的完整快照与损坏检查；不含处理器专用名字。
+mod path_cache_common;
+
 use isla_lib::{
     bitvector::{b64::B64, BV},
     executor::{
@@ -13,6 +15,7 @@ use isla_lib::{
     },
     source_loc::SourceLoc,
 };
+use path_cache_common::validate_cache;
 use std::collections::BTreeMap;
 
 fn fixture() -> (Vec<Segment<B64>>, Vec<CachedPath<B64>>, SharedState<'static, B64>) {
@@ -134,7 +137,7 @@ fn fixture() -> (Vec<Segment<B64>>, Vec<CachedPath<B64>>, SharedState<'static, B
 fn 合成_ir_所有事件_枚举_构造子_函数应用及_dag_往返() {
     let (segments, paths, shared) = fixture();
     let names = NameEnvironment::capture(&shared.symtab, &shared.type_info);
-    validate_paths(&segments, &paths, &names, &[], &[]);
+    validate_cache(&segments, &paths, &names, &[]);
     let json = serde_json::to_vec(&(segments.clone(), paths.clone())).unwrap();
     let bin = bincode::serialize(&(segments.clone(), paths.clone())).unwrap();
     let a: (Vec<Segment<B64>>, Vec<CachedPath<B64>>) = serde_json::from_slice(&json).unwrap();
@@ -158,7 +161,7 @@ fn 损坏的符号空间_记录和访存索引逐项拒绝() {
     let (segments, paths, shared) = fixture();
     let names = NameEnvironment::capture(&shared.symtab, &shared.type_info);
     let reject = |segments: &[Segment<B64>], paths: &[CachedPath<B64>]| {
-        assert!(std::panic::catch_unwind(|| validate_paths(segments, paths, &names, &[], &[])).is_err())
+        assert!(std::panic::catch_unwind(|| validate_cache(segments, paths, &names, &[])).is_err())
     };
     let mut changed = paths.clone();
     changed[0].checkpoint.next_var = 0;
@@ -196,6 +199,7 @@ fn 损坏的符号空间_记录和访存索引逐项拒绝() {
     changed[0].path.result =
         cache::value::Val::Enum(cache::expr::Member { enum_id: shared.symtab.lookup("kind"), member: 2 });
     reject(&segments, &changed);
-    assert!(std::panic::catch_unwind(|| validate_paths(&segments, &paths, &names, &[], &[("size".into(), u32::MAX)]))
-        .is_err());
+    assert!(
+        std::panic::catch_unwind(|| validate_cache(&segments, &paths, &names, &[("size".into(), u32::MAX)])).is_err()
+    );
 }

@@ -1,7 +1,10 @@
 //! 缓存名字环境的契约测试；不依赖任何处理器名字。
+mod path_cache_common;
+
 use isla_lib::bitvector::b64::B64;
 use isla_lib::executor::path_cache::NameEnvironment;
 use isla_lib::ir::{Name, SharedState, Symtab};
+use path_cache_common::validate_cache;
 
 fn environment() -> SharedState<'static, B64> {
     let mut symtab = Symtab::new();
@@ -168,7 +171,6 @@ fn 定义中的悬空引用必须拒绝() {
     use isla_lib::executor::path_cache::{
         event::{DefAttrs, Event},
         expr::{Def, Exp},
-        validate_paths,
         value::Val,
         CachedPath, Facts, PathData, Segment,
     };
@@ -199,7 +201,7 @@ fn 定义中的悬空引用必须拒绝() {
         records: vec![],
         facts: Facts { guard_unique: true, post_unique: true, simple_pre: true },
     }];
-    validate_paths(&segments, &paths, &names, &[], &[]);
+    validate_cache(&segments, &paths, &names, &[]);
 }
 
 #[test]

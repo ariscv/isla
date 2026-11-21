@@ -1,4 +1,6 @@
 //! 固定输入与人工核对的预期文件互为独立对照，不读取真实 IR。
+mod path_cache_common;
+
 use isla_lib::{
     bitvector::{b64::B64, BV},
     executor::{
@@ -14,6 +16,7 @@ use isla_lib::{
     },
     source_loc::SourceLoc,
 };
+use path_cache_common::validate_cache;
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, HashSet},
@@ -254,13 +257,8 @@ fn json_file(value: &impl Serialize) -> Vec<u8> {
 fn 正向序列化逐字节符合预期文件() {
     let (shared, paths) = fixture();
     let (segments, paths) = capture(&paths);
-    cache::validate_paths(
-        &segments,
-        &paths,
-        &cache::NameEnvironment::capture(&shared.symtab, &shared.type_info),
-        &[],
-        &[],
-    );
+    let names = cache::NameEnvironment::capture(&shared.symtab, &shared.type_info);
+    validate_cache(&segments, &paths, &names, &[]);
     assert_eq!(json_file(&segments), include_bytes!("path_cache_golden/segments.json"));
     assert_eq!(json_file(&paths), include_bytes!("path_cache_golden/paths.json"));
 }
@@ -346,13 +344,8 @@ fn 反向预期文件重建核心字段及_dag_一致() {
         bincode::deserialize(&bincode::serialize(&(segments.clone(), paths.clone())).unwrap()).unwrap()
     );
     let (shared, originals) = fixture();
-    cache::validate_paths(
-        &segments,
-        &paths,
-        &cache::NameEnvironment::capture(&shared.symtab, &shared.type_info),
-        &[],
-        &[],
-    );
+    let names = cache::NameEnvironment::capture(&shared.symtab, &shared.type_info);
+    validate_cache(&segments, &paths, &names, &[]);
     assert_eq!(originals.len(), paths.len());
     let reader = TraceReader::new(&segments);
     let restored = paths
