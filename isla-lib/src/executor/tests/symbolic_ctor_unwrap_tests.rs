@@ -130,7 +130,8 @@ fn region_util_defer_ctor_obligation_checks_original_guard() {
             .map(Cow::into_owned);
             if enabled {
                 assert_eq!(result.unwrap(), Val::Bits(B64::new(11, 8)));
-                assert_eq!(solver.region_definition_footprint()["obligations"], 1);
+                // 当前路径已固定正确标签时，可直接交付载荷；错误标签仍必须由出口查出。
+                assert_eq!(solver.region_definition_footprint()["obligations"], usize::from(!safe));
                 assert_eq!(crate::smt::test_query_count(), before);
                 solver.assert_region_exit(smtlib::Exp::Bool(false));
                 assert_eq!(

@@ -791,7 +791,10 @@ fn eval_exp_with_accessor<'state, 'ir, B: BV>(
                 Val::Ctor(ctor_b, v) if *ctor_a == ctor_b => Owned(*v),
                 Val::SymbolicCtor(tag, mut possibilities) => match possibilities.remove(ctor_a) {
                     Some(v) => {
-                        if solver.path_implies_tag(tag, *ctor_a) {
+                        let defer_ctor_checks = crate::config::RegionOptions::current().defer_ctor_checks;
+                        if (defer_ctor_checks || !speculative || !solver.region_queries_deferred())
+                            && solver.path_implies_tag(tag, *ctor_a)
+                        {
                             // 标签来自当前到达域；延迟模式继续由原出口认证整条路径。
                             if let Some(result) = solver.check_sat_for_arm(info) {
                                 if result.is_unsat()? {
@@ -801,16 +804,14 @@ fn eval_exp_with_accessor<'state, 'ir, B: BV>(
                                     ));
                                 }
                             }
+                            crate::smt::probe_query_event(
+                                || serde_json::json!({"type":"ctor_guard_reuse", "source":info}),
+                            );
                             return Ok(Owned(v));
                         }
                         let matches_tag = smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(tag)), Box::new(ctor_a.to_smt()));
                         if speculative
-                            && solver.defer_safety_check(
-                                &matches_tag,
-                                crate::config::RegionOptions::current().defer_ctor_checks,
-                                "ctor_obligation",
-                                info,
-                            )
+                            && solver.defer_safety_check(&matches_tag, defer_ctor_checks, "ctor_obligation", info)
                         {
                             return Ok(Owned(v));
                         }
