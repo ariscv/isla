@@ -419,6 +419,10 @@ impl<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized> ForkSink<'ir, 'task
         self.inner.submit(task);
     }
 
+    fn reserve_arm_thread(&self) -> Option<super::region_arm::ThreadSlot<'_>> {
+        self.inner.reserve_arm_thread()
+    }
+
     fn submit_consumer_error(&self, task: Task<'ir, 'task, B>) {
         self.inner.submit_consumer_error(task);
     }

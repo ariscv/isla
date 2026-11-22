@@ -56,6 +56,68 @@ fn smt_savepoint_commit_rollback_combinations() {
 }
 
 #[test]
+fn 根事务可导入重命名后的远端臂后缀() {
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let entry = crate::executor::region_arm::capture_arm_entry_checkpoint(&mut solver);
+    solver.start_transaction();
+    let arm_a = solver.new_logical_arm(None);
+    let arm_b = solver.new_logical_arm(None);
+    solver.with_logical_arm(arm_a, |solver| {
+        let local = solver.declare_bitvector(64, SourceLoc::unknown());
+        solver.assert(Exp::Eq(Box::new(Exp::Var(local)), Box::new(Exp::Bits64(B64::from_u64(1)))));
+    });
+
+    let mut remote_solver = Solver::<B64>::from_checkpoint(&ctx, entry);
+    remote_solver.start_transaction();
+    let remote = remote_solver.declare_bitvector(64, SourceLoc::unknown());
+    let remote_arm = remote_solver.new_logical_arm(None);
+    remote_solver.with_logical_arm(remote_arm, |solver| {
+        solver.assert(Exp::Eq(Box::new(Exp::Var(remote)), Box::new(Exp::Bits64(B64::from_u64(2)))));
+    });
+    let suffix = remote_solver.export_arm_suffix(remote_arm);
+
+    let imported = Sym::from_u32(20);
+    let remap = SymRemap::from_pairs([(remote, imported)]);
+    let suffix = suffix
+        .iter()
+        .map(|item| ArmSuffixEvent {
+            guard: item.guard.as_ref().map(|guard| remap.exp(guard)),
+            event: remap.event(&item.event),
+            register_read_occurrence: item.register_read_occurrence,
+            cycle: item.cycle,
+        })
+        .collect::<Vec<_>>();
+
+    solver.import_arm_suffix(arm_b, &suffix);
+    assert_eq!(solver.fresh(), Sym::from_u32(21), "导入后不得复用远端已定义的编号");
+    assert!(matches!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat));
+    solver.commit_transaction();
+    assert!(solver.committed_transaction_events().iter().any(|(_, event)| event.defines() == Some(imported)));
+}
+
+#[test]
+fn 远端臂导入保留寄存器读取投影序号() {
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut remote = Solver::<B64>::new(&ctx);
+    remote.start_transaction();
+    let remote_arm = remote.new_logical_arm(None);
+    remote.with_logical_arm(remote_arm, |solver| {
+        solver.add_region_register_read(Event::ReadReg(Name::from_u32(800), Vec::new(), Val::Bits(B64::zeros(64))), 7);
+    });
+    let suffix = remote.export_arm_suffix(remote_arm);
+    assert_eq!(suffix[0].register_read_occurrence, Some(7));
+
+    let mut target = Solver::<B64>::new(&ctx);
+    target.start_transaction();
+    let target_arm = target.new_logical_arm(None);
+    target.import_arm_suffix(target_arm, &suffix);
+    assert_eq!(target.export_arm_suffix(target_arm)[0].register_read_occurrence, Some(7));
+}
+
+#[test]
 fn smt_savepoint_three_levels_publish_events_in_order() {
     let ctx = Context::new(Config::new());
     for middle_commit in [false, true] {
@@ -995,4 +1057,71 @@ fn arm_error_snapshots_preserve_trace_cache_and_witness_bytes() {
         serde_json::to_string_pretty(&actual).unwrap() + "\n",
         include_str!("testdata/arm-error-snapshots.json")
     );
+}
+
+#[test]
+fn region_arm_deferred_input_fact_and_exit_marker() {
+    configure_tastic(Tactic::Qfaufbv);
+    let info = SourceLoc::unknown();
+    let ctx = Context::new(Config::new());
+    let mut a = Solver::<B64>::new(&ctx);
+    let flag = a.declare_const(Ty::Bool, info);
+    let entry = a.arm_entry_checkpoint();
+    let execute_b = |b: &mut Solver<B64>| {
+        let arm = b.new_logical_arm(None);
+        b.start_transaction_with_guard(Some(Not(Box::new(Var(flag)))));
+        b.with_logical_arm(arm, |b| {
+            let value = b.declare_const(Ty::Bool, info);
+            b.defer_assertion(Var(value), info);
+            // 类型域事实在认证时全局有效，但仅在 B 的守卫内成立。
+            b.assert_region_input_fact(Var(value));
+            b.assert_region_exit(Bool(false));
+            b.commit_transaction();
+        });
+        arm
+    };
+    let certify = |solver: &mut Solver<B64>| {
+        assert_eq!(solver.check_deferred_assertions(info), Some(Unsat), "类型域证明 B 的义务");
+        solver.defer_assertion(Var(flag), info);
+        assert_eq!(solver.check_deferred_assertions(info), Some(Sat), "B 的正常出口不能裁掉根的反例");
+        solver.take_arm_assertions().unwrap()
+    };
+    let mut serial = Solver::from_checkpoint(&ctx, entry.clone());
+    let serial_root = serial.start_transaction();
+    let baseline = serial.with_deferred_region_queries(|serial| {
+        serial.assert_region_exit(Bool(false));
+        execute_b(serial);
+        certify(serial)
+    });
+    serial.rollback_transaction(serial_root);
+    let remote_ctx = Context::new(Config::new());
+    let mut b = Solver::from_checkpoint(&remote_ctx, entry);
+    let root = a.start_transaction();
+    let imported = a.with_deferred_region_queries(|a| {
+        a.assert_region_exit(Bool(false));
+        let local_start = a.next_join_symbol();
+        let remote_start = b.next_join_symbol();
+        let root_b = b.start_transaction();
+        let (mut suffix, mut deferred) = b.with_deferred_region_queries(|b| {
+            let arm = execute_b(b);
+            (b.export_arm_suffix(arm), b.take_arm_assertions().unwrap())
+        });
+        let remap = SymRemap::from_pairs(
+            (remote_start..b.next_join_symbol())
+                .enumerate()
+                .map(|(i, sym)| (Sym::from_u32(sym), Sym::from_u32(local_start + i as u32))),
+        );
+        b.rollback_transaction(root_b);
+        for item in &mut suffix {
+            item.event = remap.event(&item.event);
+            item.guard = item.guard.as_ref().map(|g| remap.exp(g));
+        }
+        deferred.remap_symbols(&remap);
+        let arm = a.new_logical_arm(None);
+        a.import_arm_assertions(Some(deferred), &mut suffix);
+        a.import_arm_suffix(arm, &suffix);
+        certify(a)
+    });
+    a.rollback_transaction(root);
+    assert_eq!(baseline, imported, "逐项核对前序符号、错误条件符号、输入事实和出口标记");
 }

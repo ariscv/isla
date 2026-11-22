@@ -231,6 +231,23 @@ impl IslaError for ExecError {
 }
 
 impl ExecError {
+    /// 远端区域臂到达汇合者前，重写错误载荷中的符号。
+    pub(crate) fn remap_symbols(&self, remap: &crate::smt::SymRemap) -> Self {
+        match self {
+            Self::IntegerConversion(exp, location) => Self::IntegerConversion(remap.exp(exp), *location),
+            Self::RetryCondition(exp, location) => Self::RetryCondition(remap.exp(exp), *location),
+            Self::ConcreteChoice(symbol, location) => Self::ConcreteChoice(remap.get(*symbol), *location),
+            Self::SymbolicNatural { symbol, minimum, maximum, operation, location } => Self::SymbolicNatural {
+                symbol: remap.get(*symbol),
+                minimum: *minimum,
+                maximum: *maximum,
+                operation,
+                location: *location,
+            },
+            _ => self.clone(),
+        }
+    }
+
     /// 普通调度和路径收尾不能接收推演控制信号；必须在任何日志、求模或收集之前调用。
     pub fn assert_normal_execution(&self) {
         if let Self::SpeculativeReject { .. } = self {

@@ -58,6 +58,43 @@ pub struct RegionMergeRecord<B> {
 }
 
 impl<B> RegionMergeRecord<B> {
+    pub(crate) fn remap_symbols(&self, remap: &crate::smt::SymRemap) -> Self
+    where
+        B: BV,
+    {
+        Self {
+            record_id: self.record_id,
+            parent_record: self.parent_record,
+            arm: self.arm,
+            function: self.function,
+            branch_pc: self.branch_pc,
+            join: self.join,
+            condition: remap.get(self.condition),
+            source_loc: self.source_loc,
+            depth: self.depth,
+            dead: self.dead,
+            value_symbols: Arc::new(self.value_symbols.iter().map(|symbol| remap.get(*symbol)).collect()),
+            input_symbols: Arc::new(self.input_symbols.iter().map(|symbol| remap.get(*symbol)).collect()),
+            single_arm_reads: Arc::from(
+                self.single_arm_reads
+                    .iter()
+                    .map(|read| GuardedRegisterRead {
+                        register: read.register,
+                        accessor: read.accessor.clone(),
+                        value: read.value.remap_symbols(remap),
+                        guard: remap.exp(&read.guard),
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            memory_reads: Arc::from(
+                self.memory_reads
+                    .iter()
+                    .map(|(index, guard, event)| (*index, remap.exp(guard), remap.event(event)))
+                    .collect::<Vec<_>>(),
+            ),
+        }
+    }
+
     /// 更新位置元数据后，复用仍完全相同的历史前缀；载荷身份只用于共享判定。
     pub(super) fn same_occurrence(&self, other: &Self) -> bool {
         self.record_id == other.record_id

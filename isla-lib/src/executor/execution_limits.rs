@@ -122,6 +122,8 @@ pub struct ExecutionLimits {
     /// 受限分支具体化时使用的可复现抽样 seed。
     pub branch_sampling_seed: u64,
     pub path_merging: bool,
+    /// 仅供最外层两臂区域任务化使用；默认关闭，不改变原有串行路径。
+    pub arms_as_tasks: bool,
     pub merge_strategy: crate::config::MergeStrategy,
     pub ordered_events: bool,
     pub max_region_fragments: Option<usize>,
@@ -163,6 +165,7 @@ impl Default for ExecutionLimits {
             call_context_depth: None,
             branch_sampling_seed: 0x4953_4c41_5f4c_494d,
             path_merging: false,
+            arms_as_tasks: merge.arms_as_tasks,
             merge_strategy: Default::default(),
             ordered_events: false,
             max_region_fragments: None,
@@ -292,6 +295,7 @@ impl ExecutionLimits {
         self.filter_model_exceptions = config.filter_model_exceptions.clone().into();
         self.filter_match_failures = config.filter_match_failures;
         self.merge_concrete_values = config.path_merge.merge_concrete_values;
+        self.arms_as_tasks = config.path_merge.arms_as_tasks;
         self.defer_call_effect_checks = config.path_merge.defer_call_effect_checks;
         if let Some(value) = config.max_forks_per_branch {
             self = self.with_max_forks_per_branch(value);

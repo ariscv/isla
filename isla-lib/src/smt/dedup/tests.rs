@@ -258,10 +258,10 @@ fn obligation_domain_predecessor_proves_later_but_keeps_first_error() {
     s.with_deferred_region_queries(|s| {
         s.defer_assertion(Var(x), info);
         s.defer_assertion(Var(x), info);
-        let all = s.deferred_assertions.as_ref().unwrap().obligations.clone();
-        s.deferred_assertions.as_mut().unwrap().obligations = vec![all[1].clone()];
+        let all = s.deferred_assertions.as_ref().unwrap().arm.obligations.clone();
+        s.deferred_assertions.as_mut().unwrap().arm.obligations = vec![all[1].clone()];
         assert_eq!(s.check_deferred_assertions(info), Some(Unsat), "前序断言成立后同一断言不可失败");
-        s.deferred_assertions.as_mut().unwrap().obligations = all;
+        s.deferred_assertions.as_mut().unwrap().arm.obligations = all;
         assert_eq!(s.check_deferred_assertions(info), Some(Sat), "第一条可行错误不能被后序假设抹掉");
         s.assert(Bool(false));
         assert_eq!(s.check_deferred_assertions(info), Some(Sat), "后续约束/退出域不能裁掉前面的错误");
@@ -339,7 +339,7 @@ fn structural_integer_narrowing_needs_no_query_or_obligation() {
                 assert!(matches!(narrow(Val::Symbolic(value), s, info), Ok(Val::Symbolic(_))));
             }
             assert_eq!(path_smt_stats().calls, 0);
-            assert!(s.deferred_assertions.as_ref().unwrap().obligations.is_empty());
+            assert!(s.deferred_assertions.as_ref().unwrap().arm.obligations.is_empty());
         });
         s.rollback_transaction(root);
     }
@@ -393,7 +393,7 @@ fn region_util_defer_range_obligation_preserves_error_domain() {
             } else {
                 assert!(matches!(result, Err(ExecError::Z3Unknown)));
             }
-            assert_eq!(s.deferred_assertions.as_ref().unwrap().obligations.len(), usize::from(enabled));
+            assert_eq!(s.deferred_assertions.as_ref().unwrap().arm.obligations.len(), usize::from(enabled));
             assert_eq!(path_smt_stats().calls, 0, "出口前不查 SMT");
             s.assert_region_exit(Bool(false));
             assert_eq!(
@@ -532,7 +532,7 @@ fn unify_characterization_assertions_and_mandatory_queries() {
                     crate::primop::pessimistic_assert(value, Val::Unit, s, info)
                 };
                 assert!(matches!(result, Ok(Val::Unit)));
-                assert_eq!(s.deferred_assertions.as_ref().unwrap().obligations.len(), 1);
+                assert_eq!(s.deferred_assertions.as_ref().unwrap().arm.obligations.len(), 1);
                 assert_eq!(s.check_sat_with_for_branch(&Var(x), info, true), None);
                 assert_eq!(s.check_sat_with_for_bool(&Var(x), info), Unknown);
                 if no_smt {
@@ -600,7 +600,7 @@ fn unify_optional_candidate_checks_keep_real_unknown_and_obligations() {
             assert_eq!(s.check_sat_for_arm(info), None);
             assert_eq!(path_smt_stats().calls, 0);
             assert_eq!(s.check_deferred_assertions(info), if no_smt { None } else { Some(Unsat) });
-            assert_eq!(s.deferred_assertions.as_ref().unwrap().obligations.len(), 1, "未验证义务不能丢失");
+            assert_eq!(s.deferred_assertions.as_ref().unwrap().arm.obligations.len(), 1, "未验证义务不能丢失");
         });
         s.rollback_transaction(root);
     }

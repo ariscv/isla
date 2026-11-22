@@ -203,6 +203,22 @@ impl<'ir, B: BV> RelaxedVal<'ir, B> {
 }
 
 impl<'ir, B: BV> Register<'ir, B> {
+    pub(crate) fn remap_symbols(&mut self, remap: &crate::smt::SymRemap) {
+        match &mut self.value {
+            RelaxedVal::Uninit(_) => (),
+            RelaxedVal::Init { last_write, last_read, old_writes } => {
+                *last_write = last_write.remap_symbols(remap);
+                *last_read = last_read.as_ref().map(|value| value.remap_symbols(remap));
+                for value in old_writes {
+                    *value = value.remap_symbols(remap);
+                }
+            }
+        }
+        if let Initialization::Guarded(symbol) = &mut self.initialization {
+            *symbol = remap.get(*symbol);
+        }
+    }
+
     pub fn read<'a>(
         &'a mut self,
         shared_state: &SharedState<'ir, B>,
@@ -302,6 +318,12 @@ pub struct Iter<'a, 'ir, B> {
 }
 
 impl<'ir, B: BV> RegisterBindings<'ir, B> {
+    pub(crate) fn remap_symbols(&mut self, remap: &crate::smt::SymRemap) {
+        for register in cost::make_mut(&mut self.map).values_mut() {
+            register.remap_symbols(remap);
+        }
+    }
+
     pub fn new() -> Self {
         RegisterBindings { map: Arc::default() }
     }

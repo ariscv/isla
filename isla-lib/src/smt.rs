@@ -92,6 +92,123 @@ impl Sym {
     }
 }
 
+/// 跨 Context 导入远端区域臂时使用的确定性 alpha 重命名。
+///
+/// 未列出的符号属于入口前缀，保持原编号；列出的符号必须只映射一次，重复或
+/// 目标冲突都是协议错误。
+#[derive(Clone, Debug, Default)]
+pub struct SymRemap {
+    symbols: HashMap<Sym, Sym>,
+}
+
+impl SymRemap {
+    pub fn from_pairs(pairs: impl IntoIterator<Item = (Sym, Sym)>) -> Self {
+        let mut symbols = HashMap::new();
+        let mut targets = HashSet::new();
+        for (from, to) in pairs {
+            assert!(symbols.insert(from, to).is_none(), "同一远端符号不得重复重命名");
+            assert!(targets.insert(to), "两个远端符号不得映射到同一目标符号");
+        }
+        Self { symbols }
+    }
+
+    pub fn for_region_arms<R: Ord, A: Ord>(first_target: Sym, mut arms: Vec<(R, A, Vec<Sym>)>) -> Self {
+        arms.sort_by(|(region_a, arm_a, _), (region_b, arm_b, _)| (region_a, arm_a).cmp(&(region_b, arm_b)));
+        let mut next = first_target.id;
+        let mut pairs = Vec::new();
+        for (_, _, symbols) in arms {
+            let mut previous: Option<Sym> = None;
+            for source in symbols {
+                assert!(previous.is_none_or(|prior| prior.id < source.id), "逻辑臂内符号必须按创建次序严格递增");
+                previous = Some(source);
+                let target = Sym::from_u32(next);
+                next = next.checked_add(1).expect("区域臂符号编号溢出");
+                pairs.push((source, target));
+            }
+        }
+        Self::from_pairs(pairs)
+    }
+
+    pub fn get(&self, symbol: Sym) -> Sym {
+        self.symbols.get(&symbol).copied().unwrap_or(symbol)
+    }
+
+    pub fn exp(&self, exp: &smtlib::Exp<Sym>) -> smtlib::Exp<Sym> {
+        let mut mapped = exp.clone();
+        mapped.modify(&mut |term| {
+            if let smtlib::Exp::Var(symbol) | smtlib::Exp::App(symbol, _) = term {
+                *symbol = self.get(*symbol);
+            }
+        });
+        mapped
+    }
+
+    pub fn def(&self, definition: &smtlib::Def) -> smtlib::Def {
+        use smtlib::Def;
+        match definition {
+            Def::DeclareConst(symbol, ty) => Def::DeclareConst(self.get(*symbol), ty.clone()),
+            Def::DeclareFun(symbol, args, result) => Def::DeclareFun(self.get(*symbol), args.clone(), result.clone()),
+            Def::DefineConst(symbol, exp) => Def::DefineConst(self.get(*symbol), self.exp(exp)),
+            Def::DefineEnum(name, members) => Def::DefineEnum(*name, *members),
+            Def::Assert(exp) => Def::Assert(self.exp(exp)),
+        }
+    }
+
+    pub fn event<B: BV>(&self, event: &Event<B>) -> Event<B> {
+        use Event::*;
+        match event {
+            Smt(definition, attributes, location) => Smt(self.def(definition), *attributes, *location),
+            Fork(id, condition, branch, location) => Fork(*id, self.get(*condition), *branch, *location),
+            Merge(id, paths, location) => Merge(*id, *paths, *location),
+            Function { name, call } => Function { name: *name, call: *call },
+            Abstract { name, primitive, args, return_value } => Abstract {
+                name: *name,
+                primitive: *primitive,
+                args: args.iter().map(|value| value.remap_symbols(self)).collect(),
+                return_value: return_value.remap_symbols(self),
+            },
+            ReadReg(name, accessors, value) => ReadReg(*name, accessors.clone(), value.remap_symbols(self)),
+            WriteReg(name, accessors, value) => WriteReg(*name, accessors.clone(), value.remap_symbols(self)),
+            AssumeReg(name, accessors, value) => AssumeReg(*name, accessors.clone(), value.remap_symbols(self)),
+            ReadMem { value, read_kind, address, bytes, tag_value, opts, region } => ReadMem {
+                value: value.remap_symbols(self),
+                read_kind: read_kind.remap_symbols(self),
+                address: address.remap_symbols(self),
+                bytes: *bytes,
+                tag_value: tag_value.as_ref().map(|value| value.remap_symbols(self)),
+                opts: opts.clone(),
+                region,
+            },
+            WriteMem { value, write_kind, address, data, bytes, tag_value, opts, region } => WriteMem {
+                value: self.get(*value),
+                write_kind: write_kind.remap_symbols(self),
+                address: address.remap_symbols(self),
+                data: data.remap_symbols(self),
+                bytes: *bytes,
+                tag_value: tag_value.as_ref().map(|value| value.remap_symbols(self)),
+                opts: opts.clone(),
+                region,
+            },
+            MarkReg { regs, mark } => MarkReg { regs: regs.clone(), mark: mark.clone() },
+            AddressAnnounce { address } => AddressAnnounce { address: address.remap_symbols(self) },
+            Branch { address } => Branch { address: address.remap_symbols(self) },
+            Cycle => Cycle,
+            Instr(value) => Instr(value.remap_symbols(self)),
+            Assume(exp) => Assume(exp.clone()),
+            AssumeFun { name, args, return_value } => AssumeFun {
+                name: *name,
+                args: args.iter().map(|value| value.remap_symbols(self)).collect(),
+                return_value: return_value.remap_symbols(self),
+            },
+            UseFunAssumption { name, args, return_value } => UseFunAssumption {
+                name: *name,
+                args: args.iter().map(|value| value.remap_symbols(self)).collect(),
+                return_value: return_value.remap_symbols(self),
+            },
+        }
+    }
+}
+
 impl<B> From<Sym> for Result<Val<B>, ExecError> {
     fn from(sym: Sym) -> Self {
         Ok(Val::Symbolic(sym))
@@ -203,6 +320,7 @@ mod tactic;
 pub use tactic::Tactic;
 mod dedup;
 mod deferred_assertions;
+pub(crate) use deferred_assertions::DeferredArmAssertions;
 #[cfg(test)]
 pub(crate) use deferred_assertions::{reset_test_mandatory_query_count, test_mandatory_query_count};
 mod finite_domain;
@@ -469,6 +587,16 @@ pub enum Event<B> {
         args: Vec<Val<B>>,
         return_value: Val<B>,
     },
+}
+
+/// 远端区域臂交付的一个事务后缀事件。读取投影序号不属于 `Event` 本身，
+/// 因而必须与事件一同移交，不能在 A 侧按到达顺序重新猜测。
+#[derive(Clone, Debug)]
+pub(crate) struct ArmSuffixEvent<B> {
+    pub(crate) guard: Option<Exp<Sym>>,
+    pub(crate) event: Event<B>,
+    pub(crate) register_read_occurrence: Option<usize>,
+    pub(crate) cycle: bool,
 }
 
 impl<B: BV> Event<B> {
@@ -2701,6 +2829,16 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let n = self.next_var;
         self.next_var += 1;
         Sym { id: n }
+    }
+
+    pub(crate) fn arm_entry_checkpoint(&mut self) -> Checkpoint<B> {
+        let mut entry = checkpoint(self);
+        entry.cycles = self.cycles;
+        entry
+    }
+
+    pub(crate) fn arm_context_options(&self) -> (SolverOptions, bool) {
+        (self.ctx.solver_options, self.ctx.validation)
     }
 
     pub(crate) fn next_join_symbol(&self) -> u32 {

@@ -14,6 +14,7 @@ use crate::ir::regions::{FunctionRegions, Region, RegionOptions, RegionPoint, Re
 
 mod consumer_continuation;
 mod exception_continuation;
+mod parallel_arms;
 
 /// 任一祖先区域拒绝时，随该次推演撤销失败任务的发布。
 struct ArmErrorSink<'ir, 'task, B: BV> {
@@ -66,6 +67,7 @@ pub(super) fn fresh_call_scope() -> usize {
 
 #[derive(Clone)]
 pub(super) struct RegionExecution {
+    pub remote_cancel: Option<Arc<AtomicBool>>,
     pub region: Arc<Region>,
     pub entry_depth: usize,
     pub write_depth: usize,
@@ -78,6 +80,14 @@ pub(super) struct RegionExecution {
     pub mode: MergeMode,
     pub origin: (Name, usize, SourceLoc),
     pub pending_branch: Option<(Sym, usize, Arc<Region>, SourceLoc)>,
+}
+
+impl RegionExecution {
+    pub(crate) fn remap_symbols(&mut self, remap: &crate::smt::SymRemap) {
+        if let Some((condition, _, _, _)) = &mut self.pending_branch {
+            *condition = remap.get(*condition);
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -99,6 +109,37 @@ pub(super) struct AccessLog<B> {
 }
 
 impl<B: BV> AccessLog<B> {
+    pub(crate) fn remap_symbols(&self, remap: &crate::smt::SymRemap) -> Self {
+        Self {
+            writes: self.writes.clone(),
+            reads: self
+                .reads
+                .iter()
+                .map(|(name, accessor, value)| (*name, accessor.clone(), value.remap_symbols(remap)))
+                .collect(),
+            read_guards: self.read_guards.iter().map(|guard| remap.exp(guard)).collect(),
+            guard: self.guard.as_ref().map(|guard| remap.exp(guard)),
+            initial_registers: self
+                .initial_registers
+                .iter()
+                .map(|(name, value)| (*name, value.remap_symbols(remap)))
+                .collect(),
+            initial_variables: self
+                .initial_variables
+                .iter()
+                .map(|(name, value)| (*name, value.remap_symbols(remap)))
+                .collect(),
+            initial_lets: self.initial_lets.iter().map(|(name, value)| (*name, value.remap_symbols(remap))).collect(),
+            call_scope: self.call_scope,
+            function: self.function,
+            pc: self.pc,
+            location: self.location,
+            writes_allowed: self.writes_allowed,
+            global_state: self.global_state,
+            ordered_events: self.ordered_events,
+        }
+    }
+
     /// 每个臂在实际读取处缓冲事件，投影时按读取序号复用事件。
     pub fn record_read(
         &mut self,
@@ -291,6 +332,9 @@ pub(super) fn step<B: BV>(frame: &mut LocalFrame<B>) -> Result<bool, ExecError> 
         }
     }
     let Some(execution) = &frame.region_execution else { return Ok(false) };
+    if execution.remote_cancel.as_ref().is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
+        return Err(reject(frame, SpeculativeRejectReason::IncompatibleState));
+    }
     let depth = frame.backtrace.len();
     if depth < execution.entry_depth {
         return Err(reject(frame, SpeculativeRejectReason::StackEscaped));
@@ -531,6 +575,9 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
     info: SourceLoc,
 ) -> Result<RegionResult, ExecError> {
     let _scope = super::path_account::Scope::enter(super::path_account::Category::Merge);
+    if !frame.region_arrivals.is_empty() {
+        return Ok(RegionResult::Suspended);
+    }
     let mode = policy(frame, state, info);
     let global_state = state.execution_limits.as_ref().is_some_and(|limits| limits.region_global_state);
     let defer_call_effect_checks =
@@ -665,6 +712,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                 let record_start = frame.region_merge_records.len();
                 failure_phase = FailurePhase::ArmExecution;
                 let mut candidate_frame = solver.validates_candidates().then(|| frame.clone());
+                let arm_task_entry = parallel_arms::entry(sink, frame, state, &region, shared, solver);
                 let tx = solver.start_transaction();
                 let defer = solver.defer_region_checks();
                 let probe_context = (!nested && crate::smt::probe_query_timings_enabled()).then(|| {
@@ -687,6 +735,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         condition,
                         target,
                         frame.pc + 1,
+                        arm_task_entry,
                         None,
                         region,
                         depth,
@@ -1082,6 +1131,7 @@ pub(super) fn prepare_region_base<'ir, B: BV>(
             RegionPoint::Instruction(pc) => matches!(frame.instrs.get(pc), Some(Instr::End)),
         };
     let execution = RegionExecution {
+        remote_cancel: None,
         region: region.clone(),
         pending_branch: None,
         entry_depth: frame.backtrace.len(),
@@ -1231,6 +1281,7 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     condition: Sym,
     target: usize,
     fallthrough: usize,
+    arm_task_entry: Option<parallel_arms::Entry<'_, B>>,
     consumer: Option<ConsumerRetry>,
     region: Arc<Region>,
     depth: usize,
@@ -1268,54 +1319,103 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     };
     ready.extend([target, fallthrough].into_iter().zip(guards).enumerate());
     let live_forks = stats::merge_timing::LiveForks::start();
-    while let Some((side, (pc, guard))) = ready.pop() {
-        live_forks.set(if side == 0 { 1 } else { arms[0].len() });
-        if consumer.is_some() && !feasible(frame, solver, &guard, info, shared)? {
-            solver.assert(Not(Box::new(guard)));
-            continue;
-        }
-        let owner = solver.new_logical_arm(solver.current_logical_arm());
-        let tx = solver.start_transaction_with_guard(Some(guard.clone()));
-        let mut arm = branch_arm(&base, pc, guard, owner);
-        if let Some(ConsumerRetry::Choice(guard)) = consumer {
-            cost::make_mut(&mut arm.local_state)
-                .concrete_choices
-                .as_mut()
-                .expect("消费者拆分必须已启用")
-                .insert(guard, side == 0);
-        }
-        if solver.with_logical_arm(owner, |solver| {
-            advance_region_arm(
-                tid,
+    let initial_state = arm_task_entry.as_ref().map(|_| base.local_state.clone());
+    let job = arm_task_entry.filter(|_| catcher.is_none()).map(|(slot, checkpoint)| {
+        let mut remote_base = base.clone();
+        remote_base.path_timing = super::path_timing::PathTiming::from_snapshot(base.path_timing.fork_snapshot());
+        let remote_fraction = fraction.clone();
+        let options = solver.arm_context_options();
+        let work = move |worker, cancelled| {
+            parallel_arms::run_b(
+                checkpoint,
+                options,
+                cancelled,
+                remote_base,
+                fallthrough,
+                Not(Box::new(Var(condition))),
+                worker,
                 task_id,
-                fraction,
+                remote_fraction,
                 timeout,
                 stop,
-                sink,
-                &mut arm,
                 state,
                 shared,
-                solver,
-                consumer.is_some(),
-                tx,
                 info,
             )
-        })? {
-            if arm.region_arrivals.is_empty() {
-                promote_initials(&mut base, &arm, solver);
-                arms[side].push(arm);
-            } else {
-                arms[side] = std::mem::take(&mut arm.region_arrivals);
-                for fragment in &arms[side] {
-                    promote_initials(&mut base, fragment, solver);
+        };
+        (slot, work, reject(frame, SpeculativeRejectReason::IncompatibleState))
+    });
+    let mut local = |cell: Option<&parallel_arms::ArmCell<'ir, B>>| -> Result<(), ExecError> {
+        while let Some((side, (pc, guard))) = ready.pop() {
+            live_forks.set(if side == 0 { 1 } else { arms[0].len() });
+            if side == 1 {
+                if let Some(cell) = cell {
+                    if let Some(arm) = parallel_arms::receive(
+                        cell,
+                        initial_state.as_ref().unwrap(),
+                        &arms[0],
+                        &mut base,
+                        state,
+                        solver,
+                    )? {
+                        arms[1].push(arm);
+                        continue;
+                    }
                 }
             }
-        } else if consumer.is_some()
-            || crate::config::RegionOptions::current().arm_error_leaf
-            || state.observe_assertion_failures
-        {
-            solver.discard_logical_arm_effects(owner);
+            if consumer.is_some() && !feasible(frame, solver, &guard, info, shared)? {
+                solver.assert(Not(Box::new(guard)));
+                continue;
+            }
+            let owner = solver.new_logical_arm(solver.current_logical_arm());
+            let tx = solver.start_transaction_with_guard(Some(guard.clone()));
+            let mut arm = branch_arm(&base, pc, guard, owner);
+            if let Some(ConsumerRetry::Choice(guard)) = consumer {
+                cost::make_mut(&mut arm.local_state)
+                    .concrete_choices
+                    .as_mut()
+                    .expect("消费者拆分必须已启用")
+                    .insert(guard, side == 0);
+            }
+            if solver.with_logical_arm(owner, |solver| {
+                advance_region_arm(
+                    tid,
+                    task_id,
+                    fraction,
+                    timeout,
+                    stop,
+                    sink,
+                    &mut arm,
+                    state,
+                    shared,
+                    solver,
+                    consumer.is_some(),
+                    tx,
+                    info,
+                )
+            })? {
+                if arm.region_arrivals.is_empty() {
+                    promote_initials(&mut base, &arm, solver);
+                    arms[side].push(arm);
+                } else {
+                    arms[side] = std::mem::take(&mut arm.region_arrivals);
+                    for fragment in &arms[side] {
+                        promote_initials(&mut base, fragment, solver);
+                    }
+                }
+            } else if consumer.is_some()
+                || crate::config::RegionOptions::current().arm_error_leaf
+                || state.observe_assertion_failures
+            {
+                solver.discard_logical_arm_effects(owner);
+            }
         }
+        Ok(())
+    };
+    if let Some((slot, work, failure)) = job {
+        parallel_arms::with_worker(slot, state, failure, work, local)?;
+    } else {
+        local(None)?;
     }
     live_forks.set(arms.iter().map(Vec::len).sum::<usize>().saturating_sub(1));
     if let Some(catcher) = catcher {
@@ -2170,6 +2270,7 @@ pub(super) fn concrete_consumer<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + 
         condition,
         pc,
         pc,
+        None,
         Some(retry),
         region,
         depth,

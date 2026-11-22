@@ -95,6 +95,8 @@ pub struct PathMergeConfig {
     pub ordered_events: Option<bool>,
     /// 省略时沿用入口缺省值。完整符号 DAG 缺省开启。
     pub enabled: Option<bool>,
+    /// 最外层两臂区域可作为任务交付；首版缺省关闭。
+    pub arms_as_tasks: bool,
     /// 区域推演嵌套上限；缺省或-1不限。
     pub max_merge_depth: Option<i64>,
     /// 区域因局部汇合失败可保留的片段上限；缺省或 -1 不限。
@@ -139,6 +141,7 @@ impl Default for PathMergeConfig {
             strategy: None,
             ordered_events: None,
             enabled: None,
+            arms_as_tasks: false,
             max_merge_depth: None,
             max_fragments: None,
             defer_range_proofs: true,

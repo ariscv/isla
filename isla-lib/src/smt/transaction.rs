@@ -214,8 +214,14 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 condition_depth: self.transaction_conditions.len(),
                 guard,
                 order_register_reads: false,
-                deferred_input_facts_len: self.deferred_assertions.as_ref().map_or(0, |state| state.input_facts.len()),
-                deferred_obligations_len: self.deferred_assertions.as_ref().map_or(0, |state| state.obligations.len()),
+                deferred_input_facts_len: self
+                    .deferred_assertions
+                    .as_ref()
+                    .map_or(0, |state| state.arm.input_facts.len()),
+                deferred_obligations_len: self
+                    .deferred_assertions
+                    .as_ref()
+                    .map_or(0, |state| state.arm.obligations.len()),
             });
         }
         if let Some(condition) = condition {
@@ -301,8 +307,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.stashed_model = savepoint.model.model.take();
         self.performance_info = savepoint.performance_info;
         if let Some(state) = &mut self.deferred_assertions {
-            state.obligations.truncate(savepoint.deferred_obligations_len);
-            state.input_facts.truncate(savepoint.deferred_input_facts_len);
+            state.arm.obligations.truncate(savepoint.deferred_obligations_len);
+            state.arm.input_facts.truncate(savepoint.deferred_input_facts_len);
         }
         if let Some(saved) = savepoint.path_account {
             crate::executor::stats::path_account::rollback(saved);
@@ -549,6 +555,61 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     pub(crate) fn add_region_register_read(&mut self, event: Event<B>, occurrence: usize) {
         self.add_event(event);
         self.logical_arms.mark_register_read(occurrence);
+    }
+
+    /// 将已 alpha 重命名的远端臂事件加入当前最外层区域事务。
+    ///
+    /// 后缀由另一 Context 生成，故这里只接收纯 Rust 的 SMTLIB/执行迹数据。调用
+    /// 者必须在导入前完成重命名；本函数只恢复逻辑臂归属和事件守卫，并推进本地
+    /// 编号，绝不接收 Z3 AST 或远端 Solver。
+    pub(crate) fn import_arm_suffix(&mut self, arm: LogicalArm, suffix: &[ArmSuffixEvent<B>]) {
+        assert_eq!(self.transaction_depth(), 1, "远端臂只能导入最外层区域事务");
+        assert!(self.current_logical_arm().is_none(), "导入远端臂前不得保留活动逻辑臂");
+        let mut next_var = self.next_var;
+        self.with_logical_arm(arm, |solver| {
+            for item in suffix {
+                let event = &item.event;
+                assert_eq!(item.cycle, matches!(event, Event::Cycle), "周期标记必须与事件对齐");
+                assert_eq!(
+                    item.register_read_occurrence.is_some(),
+                    matches!(event, Event::ReadReg(..)),
+                    "读取投影必须与 ReadReg 对齐"
+                );
+                if item.cycle {
+                    solver.cycles += 1;
+                }
+                if let Some(symbol) = event.defines() {
+                    next_var = next_var.max(symbol.id.checked_add(1).expect("远端符号编号溢出"));
+                }
+                solver.add_event(event.clone());
+                *solver.transaction_event_guards.last_mut().expect("导入事件必须进入根事务缓冲") = item.guard.clone();
+                if let Some(occurrence) = item.register_read_occurrence {
+                    solver.logical_arms.mark_register_read(occurrence);
+                }
+                if item.cycle {
+                    solver.logical_arms.mark_cycle();
+                }
+            }
+        });
+        self.next_var = next_var;
+    }
+
+    /// 导出当前根事务内一个逻辑臂可见的纯数据后缀及读取投影元数据。
+    pub(crate) fn export_arm_suffix(&self, arm: LogicalArm) -> Vec<ArmSuffixEvent<B>> {
+        assert_eq!(self.transaction_depth(), 1, "远端臂只能从最外层区域事务导出");
+        self.transaction_events
+            .iter()
+            .zip(&self.transaction_event_guards)
+            .zip(self.logical_arms.group_events(Some(arm)))
+            .filter_map(|((event, guard), (selected, cycle, read))| {
+                selected.then(|| ArmSuffixEvent {
+                    guard: guard.clone(),
+                    event: event.clone(),
+                    register_read_occurrence: read.map(|value| value.get() - 1),
+                    cycle,
+                })
+            })
+            .collect()
     }
 
     /// 只合并组内实际读取的同值同序号事件。跨组复用较早的位置时，

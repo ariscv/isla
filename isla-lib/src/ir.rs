@@ -309,6 +309,43 @@ impl<B: BV> From<&BitsSegment<B>> for Val<B> {
 }
 
 impl<B: BV> Val<B> {
+    /// 用于将远端区域臂导回 A 的求解器。只改符号标识，不改变值的结构或位宽。
+    pub fn remap_symbols(&self, remap: &crate::smt::SymRemap) -> Self {
+        use Val::*;
+        match self {
+            Symbolic(symbol) => Symbolic(remap.get(*symbol)),
+            I64(value) => I64(*value),
+            I128(value) => I128(*value),
+            Bool(value) => Bool(*value),
+            Bits(value) => Bits(*value),
+            MixedBits(parts) => MixedBits(
+                parts
+                    .iter()
+                    .map(|part| match part {
+                        BitsSegment::Symbolic(symbol) => BitsSegment::Symbolic(remap.get(*symbol)),
+                        BitsSegment::Concrete(value) => BitsSegment::Concrete(*value),
+                    })
+                    .collect(),
+            ),
+            String(value) => String(value.clone()),
+            Guarded(guard, values) => {
+                Guarded(remap.get(*guard), Box::new((values.0.remap_symbols(remap), values.1.remap_symbols(remap))))
+            }
+            Unit => Unit,
+            Vector(values) => Vector(values.iter().map(|value| value.remap_symbols(remap)).collect()),
+            List(values) => List(values.iter().map(|value| value.remap_symbols(remap)).collect()),
+            Enum(member) => Enum(*member),
+            Struct(values) => Struct(values.iter().map(|(name, value)| (*name, value.remap_symbols(remap))).collect()),
+            Ctor(name, value) => Ctor(*name, Box::new(value.remap_symbols(remap))),
+            SymbolicCtor(discriminant, values) => SymbolicCtor(
+                remap.get(*discriminant),
+                values.iter().map(|(name, value)| (*name, value.remap_symbols(remap))).collect(),
+            ),
+            Ref(name) => Ref(*name),
+            Poison => Poison,
+        }
+    }
+
     pub fn parse_bits_literal(bits: String) -> Self {
         match B::from_str_long(&bits) {
             Some(ParsedBits::Short(bv)) => Val::Bits(bv),

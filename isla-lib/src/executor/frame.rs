@@ -79,6 +79,33 @@ pub struct LocalState<'ir, B> {
 }
 
 impl<'ir, B: BV> LocalState<'ir, B> {
+    fn remap_symbols(&mut self, remap: &crate::smt::SymRemap) {
+        for value in self.vars.values_mut().chain(self.lets.values_mut()) {
+            if let UVal::Init(value) = value {
+                *value = value.remap_symbols(remap);
+            }
+        }
+        self.regs.remap_symbols(remap);
+        for value in self.expression_values.values_mut() {
+            *value = value.remap_symbols(remap);
+        }
+        if let Some(values) = &mut self.expression_retry_operands {
+            for value in values {
+                *value = value.remap_symbols(remap);
+            }
+        }
+        if let Some(access) = &mut self.speculative_access {
+            *access = access.remap_symbols(remap);
+        }
+        if let Some(choices) = &mut self.concrete_choices {
+            *choices = choices.drain().map(|(symbol, choice)| (remap.get(symbol), choice)).collect();
+        }
+        for (start, end) in &mut self.pure_definitions {
+            *start = remap.get(Sym::from_u32(*start)).as_u32();
+            *end = remap.get(Sym::from_u32(*end)).as_u32();
+        }
+    }
+
     pub fn should_probe(&self, shared_state: &SharedState<'ir, B>, id: &Name) -> bool {
         if !self.probes.probe_this_function {
             return false;
@@ -337,6 +364,40 @@ pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
 }
 
 impl<'ir, B: BV> LocalFrame<'ir, B> {
+    /// 远端臂到达 A 前的纯数据 alpha 重命名。
+    ///
+    /// 直线臂沿用入口调用续体和合并历史。接收者在此之前已确认调用层与历史长度。
+    pub(crate) fn remap_symbols(&mut self, remap: &crate::smt::SymRemap) {
+        assert!(self.region_arrivals.is_empty(), "远端到达帧不得携带内层片段");
+        assert!(self.arm_error.is_none(), "远端到达帧不得携带错误叶");
+        cost::make_mut(&mut self.local_state).remap_symbols(remap);
+        if let Some(execution) = &mut self.region_execution {
+            execution.remap_symbols(remap);
+        }
+        // 直线臂没有新增记录，保留入口历史的共享身份。
+        self.arm_error_memory_guards = Arc::from(
+            self.arm_error_memory_guards.iter().map(|(index, guard)| (*index, remap.exp(guard))).collect::<Vec<_>>(),
+        );
+        if let Some((_, value)) = &mut self.pending_retry_operand {
+            *value = value.remap_symbols(remap);
+        }
+        for bindings in Arc::make_mut(&mut self.stack_vars) {
+            for value in bindings.values_mut() {
+                if let UVal::Init(value) = value {
+                    *value = value.remap_symbols(remap);
+                }
+            }
+        }
+        for alternatives in Arc::make_mut(&mut self.function_assumptions).values_mut() {
+            for (args, result) in alternatives {
+                for argument in args {
+                    *argument = argument.remap_symbols(remap);
+                }
+                *result = result.remap_symbols(remap);
+            }
+        }
+    }
+
     pub fn arm_error_memory_guards(&self) -> &[(usize, smtlib::Exp<Sym>)] {
         &self.arm_error_memory_guards
     }
