@@ -371,19 +371,26 @@ fn read_register_from_vector<'ir, B: BV>(
                     if !(len < 128 && (1u128 << len) <= regs.len() as u128) {
                         let limit = smtlib::bits64(regs.len() as u64, len);
                         let in_bounds = Bvult(Box::new(Var(v)), Box::new(limit.clone()));
-                        let out_of_bounds = Bvuge(Box::new(Var(v)), Box::new(limit));
-                        let in_bounds_sat = solver
-                            .check_candidate_sat_with(&in_bounds, info)
-                            .map(|result| result.is_sat())
-                            .transpose()?
-                            .unwrap_or(true);
-                        let out_of_bounds_sat = !solver.no_smt_safety(&in_bounds, info)
-                            && !solver.check_sat_with(&out_of_bounds, info).is_unsat()?;
-                        if in_bounds_sat && out_of_bounds_sat {
-                            return Err(ExecError::SymbolicLength("read_register_from_vector", info));
-                        }
-                        if !in_bounds_sat {
-                            return Err(ExecError::Type(invalid_index_argument.to_string(), info));
+                        if solver.region_queries_deferred() {
+                            // 区域内不能用 general 查询判定范围；把原始位宽的安全条件登记为
+                            // 出口义务。defer_safety_check 同时在当前路径假设该条件，使随后
+                            // 的截断和 31 路 ITE 与普通路径相同；出口不能证明时区域仍会拒绝。
+                            assert!(solver.defer_safety_check(&in_bounds, true, "register_index_obligation", info));
+                        } else {
+                            let out_of_bounds = Bvuge(Box::new(Var(v)), Box::new(limit));
+                            let in_bounds_sat = solver
+                                .check_candidate_sat_with(&in_bounds, info)
+                                .map(|result| result.is_sat())
+                                .transpose()?
+                                .unwrap_or(true);
+                            let out_of_bounds_sat = !solver.no_smt_safety(&in_bounds, info)
+                                && !solver.check_sat_with(&out_of_bounds, info).is_unsat()?;
+                            if in_bounds_sat && out_of_bounds_sat {
+                                return Err(ExecError::SymbolicLength("read_register_from_vector", info));
+                            }
+                            if !in_bounds_sat {
+                                return Err(ExecError::Type(invalid_index_argument.to_string(), info));
+                            }
                         }
                     }
                     let v = fix_index_length(v, len, rib, solver, info);
@@ -6946,6 +6953,100 @@ mod tests {
 
     mod review18_tests {
         use super::*;
+
+        #[test]
+        fn read_register_vector_deferred_mixed_index_is_rejected_at_region_exit() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let mut shared = empty_shared_state();
+            let mut frame = make_frame(vec![Instr::End]);
+            let info = info();
+            let index = solver.declare_const(smtlib::Ty::BitVec(8), info);
+            let regs: Vec<_> = (0..31)
+                .map(|i| shared.symtab.intern(Box::leak(format!("zgetx_mixed_reg{i}").into_boxed_str())))
+                .collect();
+            for (i, reg) in regs.iter().enumerate() {
+                frame.regs_mut().insert(*reg, false, UVal::Init(Val::Bits(B64::new(i as u64, 8))));
+            }
+            solver.assert(smtlib::Exp::Or(
+                Box::new(smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(index)), Box::new(smtlib::bits64(0, 8)))),
+                Box::new(smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(index)), Box::new(smtlib::bits64(31, 8)))),
+            ));
+            let transaction = solver.start_transaction();
+            solver.with_deferred_region_queries(|solver| {
+                crate::smt::reset_test_mandatory_query_count();
+                let value = read_register_from_vector(
+                    Val::Symbolic(index),
+                    Val::Vector(regs.iter().copied().map(Val::Ref).collect()),
+                    cost::make_mut(&mut frame.local_state),
+                    &shared,
+                    solver,
+                    info,
+                );
+                assert!(value.is_ok(), "区域内必须保留符号索引读取，出口再认证范围");
+                assert_eq!(crate::smt::test_mandatory_query_count(), 0, "区域内不得发起 general 查询");
+                assert_eq!(solver.check_deferred_assertions(info), Some(SmtResult::Sat), "越界候选必须在出口拒绝");
+            });
+            solver.rollback_transaction(transaction);
+        }
+
+        #[test]
+        fn read_register_vector_deferred_in_bounds_index_preserves_ite_and_reads() {
+            crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+            let ctx = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&ctx);
+            let mut shared = empty_shared_state();
+            let mut frame = make_frame(vec![Instr::End]);
+            let info = info();
+            let index = solver.declare_const(smtlib::Ty::BitVec(8), info);
+            let regs: Vec<_> = (0..31)
+                .map(|i| shared.symtab.intern(Box::leak(format!("zgetx_in_bounds_reg{i}").into_boxed_str())))
+                .collect();
+            for (i, reg) in regs.iter().enumerate() {
+                frame.regs_mut().insert(*reg, false, UVal::Init(Val::Bits(B64::new(42 + i as u64, 8))));
+            }
+            solver.assert(smtlib::Exp::Bvult(Box::new(smtlib::Exp::Var(index)), Box::new(smtlib::bits64(31, 8))));
+            solver.start_transaction();
+            let value = solver
+                .with_deferred_region_queries(|solver| {
+                    crate::smt::reset_test_mandatory_query_count();
+                    let value = read_register_from_vector(
+                        Val::Symbolic(index),
+                        Val::Vector(regs.iter().copied().map(Val::Ref).collect()),
+                        cost::make_mut(&mut frame.local_state),
+                        &shared,
+                        solver,
+                        info,
+                    )?;
+                    assert_eq!(crate::smt::test_mandatory_query_count(), 0, "区域内不得发起 general 查询");
+                    assert_eq!(
+                        solver.check_deferred_assertions(info),
+                        Some(SmtResult::Unsat),
+                        "已受约束的索引必须通过出口认证"
+                    );
+                    Ok::<_, ExecError>(value)
+                })
+                .unwrap();
+            solver.commit_transaction();
+            assert!(
+                solver.trace().to_vec().iter().any(|event| matches!(
+                    event,
+                    Event::Abstract { name, args, .. }
+                        if *name == READ_REGISTER_FROM_VECTOR
+                            && matches!(args.as_slice(), [_, _, Val::Vector(values)] if values.len() == regs.len())
+                )),
+                "符号索引必须在抽象事件中保留所有候选寄存器的读取足迹"
+            );
+            for (i, expected) in (42u64..73).enumerate() {
+                let branch = solver.start_transaction();
+                solver
+                    .assert(smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(index)), Box::new(smtlib::bits64(i as u64, 8))));
+                assert_eq!(solver.check_sat(info), SmtResult::Sat);
+                assert_eq!(Model::new(&solver).get_val(&value).unwrap(), Val::Bits(B64::new(expected, 8)));
+                solver.rollback_transaction(branch);
+            }
+        }
 
         #[test]
         fn singleton_register_vector_symbolic_read_and_write() {
