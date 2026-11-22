@@ -1589,6 +1589,34 @@ fn take_loop_continuation<'ir, B: BV>(work: &mut LoopWork<'ir, B>, state: &TaskS
     })
 }
 
+/// 已完成的只读循环轮次在求解器中仍由已发布的选择器和状态 ITE 完整表示。
+/// 它们不应继续以逐轮区域记录的形式挂在下一轮帧上，否则 64 项 `foreach`
+/// 会让返回前沿和继续前沿都随轮数增长。汇总记录保留所有选择器依赖、单臂读取
+/// 和访存载荷；只压缩运行时的记录组织，不能改变执行迹或最终状态。
+fn compact_completed_loop_history<'ir, B: BV>(frame: &mut LocalFrame<'ir, B>, base: &LocalFrame<'ir, B>) {
+    let start = base.region_merge_records.len();
+    if frame.region_merge_records.len() <= start + 1 {
+        return;
+    }
+    let mut root = frame.region_merge_records.suffix(start).last().cloned().expect("循环历史必须有汇总根记录");
+    assert!(root.parent_record.is_none() && root.arm == "root", "循环历史末尾必须是根记录");
+    let mut value_symbols = HashSet::new();
+    let mut input_symbols = HashSet::new();
+    let mut single_arm_reads = Vec::new();
+    let mut memory_reads = Vec::new();
+    for record in frame.region_merge_records.suffix(start) {
+        value_symbols.extend(record.value_symbols.iter().copied());
+        input_symbols.extend(record.input_symbols.iter().copied());
+        single_arm_reads.extend(record.single_arm_reads.iter().cloned());
+        memory_reads.extend(record.memory_reads.iter().cloned());
+    }
+    root.value_symbols = value_symbols.into();
+    root.input_symbols = input_symbols.into();
+    root.single_arm_reads = single_arm_reads.into();
+    root.memory_reads = memory_reads.into();
+    frame.region_merge_records.replace_suffix_with_root(start, root);
+}
+
 fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     record_id: usize,
     condition: Sym,
@@ -1819,7 +1847,9 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     && work.arms[0].first().is_some_and(|arm| {
                         matches!(arm.instrs.get(arm.pc), Some(Instr::End)) && {
                             let access = arm.local_state.speculative_access.as_ref().unwrap();
-                            !access.ordered_events || access.global_state || access.writes.modified_regs.is_empty()
+                            (!access.ordered_events || access.global_state || access.writes.modified_regs.is_empty())
+                                && (!crate::config::RegionOptions::current().prefix_compact
+                                    || access.writes.modified_regs.is_empty())
                         }
                     })
             });
@@ -1871,11 +1901,14 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 let access = arm.local_state.speculative_access.as_ref().unwrap();
                 let fold_writes =
                     !access.ordered_events || access.global_state || access.writes.modified_regs.is_empty();
+                let compact_history =
+                    crate::config::RegionOptions::current().prefix_compact && access.writes.modified_regs.is_empty();
                 if iterative
                     && single_work
                     && exit_spine
                     && region.branch_pc == root_branch
                     && fold_writes
+                    && (!crate::config::RegionOptions::current().prefix_compact || compact_history)
                     && !solver.transaction_has_memory_writes()
                 {
                     let exit = work.arms[0].pop().expect("退出脊柱必须已有存活前沿");
@@ -1922,6 +1955,12 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         })
                     })?;
                     assert!(matches!(result, RegionResult::Merged));
+                    if compact_history {
+                        compact_completed_loop_history(&mut next, &original_base);
+                        if exit_prefix.len() == 1 {
+                            compact_completed_loop_history(exit_prefix.last_mut().unwrap(), &original_base);
+                        }
+                    }
                     solver.compact_region_query_prefix();
                     // 返回选择器已保存完整到达条件。下一轮引用它的补集，避免每个事件
                     // 复制前面所有轮次的守卫树。

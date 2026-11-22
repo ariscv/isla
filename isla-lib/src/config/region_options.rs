@@ -37,7 +37,7 @@ pub struct RegionOptions {
     pub witness_shadow: bool,
     /// 局部见证补全影子诊断；默认关闭。
     pub witness_local_shadow: bool,
-    /// 迭代边界前缀固化；默认关闭。
+    /// 迭代边界前缀固化，并压缩无架构写入循环的运行时记录历史；默认关闭。
     pub prefix_compact: bool,
     /// 可选布尔证明资源统计；默认关闭。
     pub bool_proof_profile: bool,

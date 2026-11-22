@@ -495,6 +495,45 @@ fn loop_iteration_frontiers_finish_sixty_four_rounds_in_one_region_body() {
 }
 
 #[test]
+fn loop_iteration_frontiers_keep_constant_history_after_each_round() {
+    const TEST: &str = "executor::tests::region_merge_tests::loop_segment_tests::loop_iteration_frontiers_keep_constant_history_after_each_round";
+    let args = ["--exact", TEST, "--nocapture", "--test-threads=1"];
+    if !std::env::args().skip(1).eq(args) {
+        let output = std::process::Command::new(std::env::current_exe().unwrap()).args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "循环历史压缩子进程失败：\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    run_deep_region_test(loop_iteration_frontiers_keep_constant_history_after_each_round_body);
+}
+
+/// `pmpCheck` 的循环体没有架构写入。每轮的命中出口与未命中继续臂汇合后，
+/// 运行时只应保留常数个前沿；完整历史由已发布的选择器表达，不应把每轮区域
+/// 记录和事务层继续挂在下一轮帧上。
+fn loop_iteration_frontiers_keep_constant_history_after_each_round_body() {
+    crate::config::RegionOptions { prefix_compact: true, ..Default::default() }.configure();
+    let shared = empty_shared_state();
+    let run = |n| scan_paths(&shared, n, 128, true, None);
+    let off = scan_paths(&shared, 16, 128, false, None);
+    let four = run(4);
+    let sixteen = run(16);
+    assert_eq!(four.len(), 1);
+    assert_eq!(sixteen.len(), 1);
+    equivalent_scalar_paths(&off, &sixteen, 16);
+    assert_eq!(
+        four[0].records.len(),
+        sixteen[0].records.len(),
+        "无架构写入循环的保留区域记录不能随轮数增长：N=4 为 {}，N=16 为 {}",
+        four[0].records.len(),
+        sixteen[0].records.len()
+    );
+}
+
+#[test]
 fn loop_iteration_frontiers_nested_call_preserves_complete_relation() {
     run_deep_region_test(loop_iteration_frontiers_nested_call_preserves_complete_relation_body);
 }
