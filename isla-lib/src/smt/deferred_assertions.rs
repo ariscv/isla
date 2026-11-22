@@ -2,6 +2,21 @@
 use super::*;
 use std::collections::BTreeMap;
 
+#[cfg(test)]
+thread_local! {
+    static TEST_MANDATORY_QUERY_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_test_mandatory_query_count() {
+    TEST_MANDATORY_QUERY_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn test_mandatory_query_count() -> u64 {
+    TEST_MANDATORY_QUERY_COUNT.with(std::cell::Cell::get)
+}
+
 pub(super) struct DeferredAssertions<B> {
     entry: Checkpoint<B>,
     event_start: usize,
@@ -64,6 +79,8 @@ impl<B: BV> Solver<'_, B> {
         info: SourceLoc,
         returns_unknown: bool,
     ) {
+        #[cfg(test)]
+        TEST_MANDATORY_QUERY_COUNT.with(|count| count.set(count.get() + u64::from(returns_unknown)));
         crate::executor::stats::merge_diagnostics::record_deferred_query(purpose, info, returns_unknown);
         let state = self.deferred_assertions.as_mut().expect("延迟查询必须属于活动区域");
         *state.blocked.entry(purpose).or_default() += 1;

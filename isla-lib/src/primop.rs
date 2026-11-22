@@ -1789,8 +1789,28 @@ pub fn subrange_internal<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
-    let high = concretize_proven_i128(high, solver, info)?;
-    let low = concretize_proven_i128(low, solver, info)?;
+    // 同一有限域输入派生的两个端点可能各自只有保守的 Bounded 集合；分别用模型法
+    // 具体化会在延后区域制造强制查询。保留相关性，随后由 high - low + 1 联合推导长度。
+    let preserve_correlated_bounded_endpoints = solver.region_queries_deferred()
+        && matches!(&high, Val::Symbolic(sym) if matches!(solver.finite_domain(*sym), FiniteDomain::Bounded(values) if values.len() > 1))
+        && matches!(&low, Val::Symbolic(sym) if matches!(solver.finite_domain(*sym), FiniteDomain::Bounded(values) if values.len() > 1));
+    let high = if preserve_correlated_bounded_endpoints { high } else { concretize_proven_i128(high, solver, info)? };
+    let low = if preserve_correlated_bounded_endpoints { low } else { concretize_proven_i128(low, solver, info)? };
+    let symbolic_width = match (&high, &low) {
+        (Val::Symbolic(high), Val::Symbolic(low)) => Some(solver.define_const(subrange_width(*high, *low), info)),
+        _ => None,
+    };
+    let finite_width = if preserve_correlated_bounded_endpoints {
+        let width = symbolic_width.expect("相关端点必须有符号切片长度");
+        match solver.finite_domain(width) {
+            FiniteDomain::Known(values) | FiniteDomain::Bounded(values) if values.len() == 1 => {
+                Some(concretize_proven_i128(Val::Symbolic(width), solver, info)?)
+            }
+            _ => Some(Val::Symbolic(width)),
+        }
+    } else {
+        None
+    };
     if let (Val::I128(high), Val::I128(low)) = (&high, &low) {
         let width = length_bits(&bits, solver, info)?;
         if *low < 0 || high < low || *high >= i128::from(width) {
@@ -1800,6 +1820,26 @@ pub fn subrange_internal<B: BV>(
         let source_width = length_bits(&bits, solver, info)?;
         let high = smt_value(&high, info)?;
         let low = smt_value(&low, info)?;
+        let finite_candidates_satisfy = |sym, predicate: &dyn Fn(i128) -> bool| match solver.finite_domain(sym) {
+            FiniteDomain::Known(values) | FiniteDomain::Bounded(values) if !values.is_empty() => {
+                values.iter().all(|value| {
+                    let value = match value {
+                        Exp::Bits64(value) => Some(i128::from(value.signed())),
+                        Exp::Bits(bits) => i128_from_model_bits(bits),
+                        _ => None,
+                    };
+                    value.is_some_and(predicate)
+                })
+            }
+            _ => false,
+        };
+        let correlated_bounds_proven = match (&high, &low, &finite_width) {
+            (Exp::Var(high), Exp::Var(low), Some(Val::I128(width))) if *width > 0 => {
+                finite_candidates_satisfy(*high, &|value| value < i128::from(source_width))
+                    && finite_candidates_satisfy(*low, &|value| value >= 0)
+            }
+            _ => false,
+        };
         let out_of_bounds = Exp::Or(
             Box::new(Exp::Bvsge(Box::new(high.clone()), Box::new(smt_i128(i128::from(source_width))))),
             Box::new(Exp::Or(
@@ -1807,7 +1847,9 @@ pub fn subrange_internal<B: BV>(
                 Box::new(Exp::Bvsgt(Box::new(low), Box::new(high))),
             )),
         );
-        if solver.finite_domain_predicate(&out_of_bounds) != Some(false)
+        if !correlated_bounds_proven
+            && solver.finite_domain_predicate(&out_of_bounds) != Some(false)
+            && !solver.range_check_handled(&Exp::Not(Box::new(out_of_bounds.clone())), info)
             && !solver.no_smt_safety(&Exp::Not(Box::new(out_of_bounds.clone())), info)
             && !solver.check_sat_with(&out_of_bounds, info).is_unsat()?
         {
@@ -1843,9 +1885,13 @@ pub fn subrange_internal<B: BV>(
             )
         }
         (bits, Val::Symbolic(high), Val::Symbolic(low)) => {
-            let width = solver.define_const(subrange_width(high, low), info);
-
-            let width = concretize_proven_i128(Val::Symbolic(width), solver, info)?;
+            let width = match finite_width {
+                Some(width) => width,
+                None => {
+                    let width = symbolic_width.unwrap_or_else(|| solver.define_const(subrange_width(high, low), info));
+                    concretize_proven_i128(Val::Symbolic(width), solver, info)?
+                }
+            };
             panic_if_negative_concretized_nat("subrange_internal", &width);
 
             match width {
@@ -6652,6 +6698,60 @@ mod tests {
             value => panic!("expected concrete zero byte, got {:?}", value),
         }
 
+        Ok(())
+    }
+
+    /// 页表 walker 的 level 同时决定两个端点。残余路径条件使单个端点只能得到 Bounded，
+    /// 但它们的差仍精确为 8，因此切片长度可在延后区域中结构化具体化为 9。端点的保守
+    /// 联集含有超出 27 位来源的值，故边界检查必须登记为出口义务，不能退回强制查询。
+    #[test]
+    fn subrange_uses_correlated_bounded_endpoints_in_deferred_region() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let mut config = Config::new();
+        config.solver_options.finite_domain_enumeration = true;
+        let context = Context::new(config);
+        let mut solver = Solver::<B64>::new(&context);
+        let info = SourceLoc::unknown();
+        let level = solver.declare_bitvector(8, info);
+        solver.assert(
+            [2, 3, 4]
+                .into_iter()
+                .map(|value| Exp::Eq(Box::new(Exp::Var(level)), Box::new(Exp::Bits64(B64::new(value, 8)))))
+                .reduce(|lhs, rhs| Exp::Or(Box::new(lhs), Box::new(rhs)))
+                .unwrap(),
+        );
+        let level = solver.define_const(Exp::ZeroExtend(120, Box::new(Exp::Var(level))), info);
+        let size = solver.define_const(smt_i128(9), info);
+        let next = solver.define_const(Exp::Bvadd(Box::new(Exp::Var(level)), Box::new(smt_i128(1))), info);
+        let high = solver.define_const(
+            Exp::Bvsub(Box::new(Exp::Bvmul(Box::new(Exp::Var(next)), Box::new(Exp::Var(size)))), Box::new(smt_i128(1))),
+            info,
+        );
+        let low = solver.define_const(Exp::Bvmul(Box::new(Exp::Var(level)), Box::new(Exp::Var(size))), info);
+        let unrelated = solver.declare_bitvector(128, info);
+        solver.assert(Exp::Bvuge(Box::new(Exp::Var(unrelated)), Box::new(smt_i128(7))));
+        let bits = solver.declare_bitvector(27, info);
+        assert!(matches!(solver.finite_domain(high), FiniteDomain::Bounded(values) if values.len() == 3));
+        assert!(matches!(solver.finite_domain(low), FiniteDomain::Bounded(values) if values.len() == 3));
+        let width = solver.define_const(subrange_width(high, low), info);
+        assert!(matches!(solver.finite_domain(width), FiniteDomain::Bounded(values) if values == vec![smt_i128(9)]));
+
+        crate::smt::reset_test_mandatory_query_count();
+        let transaction = solver.start_transaction();
+        let result = solver.with_deferred_region_queries(|solver| {
+            match subrange_internal(Val::Symbolic(bits), Val::Symbolic(high), Val::Symbolic(low), solver, info)? {
+                Val::Symbolic(slice) => assert_eq!(solver.length(slice), Some(9)),
+                value => panic!("expected symbolic 9-bit slice, got {value:?}"),
+            }
+            Ok(())
+        });
+        solver.rollback_transaction(transaction);
+        result?;
+        assert_eq!(
+            crate::smt::test_mandatory_query_count(),
+            0,
+            "相关端点的有限域长度推导及保守边界检查不得在延后区域请求模型"
+        );
         Ok(())
     }
 

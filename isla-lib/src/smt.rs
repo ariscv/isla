@@ -203,6 +203,8 @@ mod tactic;
 pub use tactic::Tactic;
 mod dedup;
 mod deferred_assertions;
+#[cfg(test)]
+pub(crate) use deferred_assertions::{reset_test_mandatory_query_count, test_mandatory_query_count};
 mod finite_domain;
 pub(crate) use finite_domain::FiniteDomain;
 pub mod no_smt;
