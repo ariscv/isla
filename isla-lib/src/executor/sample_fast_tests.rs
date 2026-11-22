@@ -32,6 +32,14 @@ fn fast_facts_skip_only_proven_queries() {
     assert!(!timing.contains_key("recheck_bind"));
     let expected = path.judge(&mut solver, &shared, &sample, &[], 1, |_, _| Ok(())).unwrap().unwrap();
     assert_eq!(serde_json::to_value(actual).unwrap(), serde_json::to_value(expected).unwrap());
+
+    let mut partial = sample.clone();
+    partial.pre_registers.clear();
+    let fast_partial = path.classify(&mut solver, &shared, &partial, &[], 1, &facts, |_, _| Ok(())).unwrap().unwrap();
+    let full_partial = path.judge(&mut solver, &shared, &partial, &[], 1, |_, _| Ok(())).unwrap().unwrap();
+    assert_eq!(serde_json::to_value(fast_partial).unwrap(), serde_json::to_value(&full_partial).unwrap());
+    assert!(full_partial.sample.pre_registers.contains_key("x"));
+
     path.result = Val::Symbolic(free);
     let facts = fast::FastFacts::analyze(&path, &mut solver, &[]).unwrap();
     assert!(!facts.post_unique);

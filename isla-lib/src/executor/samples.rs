@@ -533,11 +533,6 @@ impl<B: BV> SamplePath<B> {
         signature: u64,
         mut consume: impl FnMut(&mut Sample, &mut Model<B>) -> Result<(), ExecError>,
     ) -> Result<Option<JudgedSample>, ExecError> {
-        for name in self.pre.keys() {
-            if !input.pre_registers.contains_key(name) {
-                return Err(ExecError::Type(format!("缺少前态寄存器：{name}"), SourceLoc::unknown()));
-            }
-        }
         assert_eq!(solver.transaction_depth(), 0, "judge 必须在路径结束后运行");
         let tx = solver.start_transaction_with_guard(Some(Exp::Bool(true)));
         let outcome = (|| {
@@ -963,13 +958,6 @@ impl SampleChecker {
         mut consume: impl FnMut(&mut Sample, &mut Model<B>) -> Result<(), ExecError>,
     ) -> Result<(), ExecError> {
         for (index, sample) in self.samples.iter().enumerate() {
-            if self.judge_output.is_some() {
-                for name in path.pre.keys() {
-                    if !sample.pre_registers.contains_key(name) {
-                        return Err(ExecError::Type(format!("缺少前态寄存器：{name}"), SourceLoc::unknown()));
-                    }
-                }
-            }
             if let Some(consistent) =
                 self.record_execution_error(index, signature, path.check(solver, shared, sample))?
             {
@@ -1260,12 +1248,13 @@ mod tests {
     }
 
     #[test]
-    fn samples_judge_rejects_missing_pre_register_and_nonunique_post() {
+    fn samples_judge_completes_missing_pre_register_from_path_constraints() {
         crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::<B64>::new(&context);
-        let input = solver.declare_const(crate::smt::smtlib::Ty::Bool, SourceLoc::unknown());
-        let mut path = SamplePath {
+        let input = solver.declare_bitvector(8, SourceLoc::unknown());
+        solver.assert(Exp::Bvult(Box::new(Exp::Var(input)), Box::new(Exp::Bits64(B64::new(4, 8)))));
+        let path = SamplePath {
             terminal: Default::default(),
             pre: BTreeMap::from([("x".into(), Val::Symbolic(input))]),
             post: BTreeMap::new(),
@@ -1277,12 +1266,14 @@ mod tests {
         assert!(sat(&mut solver).unwrap());
         let mut sample = path.materialize(&mut Model::new(&mut solver), &shared, "fork", 1, None).unwrap();
         sample.pre_registers.clear();
-        let error = path.judge(&mut solver, &shared, &sample, &[], 1, |_, _| Ok(())).err().unwrap();
-        assert!(error.to_string().contains("缺少前态寄存器：x"));
+        let judged = path.judge(&mut solver, &shared, &sample, &[], 1, |_, _| Ok(())).unwrap().unwrap();
+        let value = u8::from_str_radix(judged.sample.pre_registers["x"]["bits"].as_str().unwrap(), 2).unwrap();
+        assert!(value < 4, "完整见证必须满足路径的 x < 4 约束");
         assert_eq!(solver.transaction_depth(), 0);
-        path.pre.clear();
-        let error = path.judge(&mut solver, &shared, &sample, &[], 1, |_, _| Ok(())).err().unwrap();
-        assert!(error.to_string().contains("后态不唯一"));
+
+        let mut conflicting = sample;
+        conflicting.pre_registers.insert("x".into(), json!({"bits":"11111111"}));
+        assert!(path.judge(&mut solver, &shared, &conflicting, &[], 1, |_, _| Ok(())).unwrap().is_none());
         assert_eq!(solver.transaction_depth(), 0);
     }
 
