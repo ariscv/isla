@@ -341,6 +341,10 @@ pub(super) fn finish_arrivals<'ir, B: BV>(
                 .as_ref()
                 .is_none_or(|execution| execution.mode == crate::config::MergeMode::Adaptive)
             && base.region_execution.as_ref().unwrap().mode == crate::config::MergeMode::Adaptive;
+    let mut arms = arms;
+    if certify_root_groups(region, base, &mut arms, frame, solver, info)? {
+        return Ok(RegionResult::Separate { reason: SpeculativeRejectReason::SolverUnknown, merged_groups: false });
+    }
     let arrivals = arms
         .into_iter()
         .enumerate()
@@ -382,6 +386,85 @@ pub(super) fn finish_arrivals<'ir, B: BV>(
             Ok(RegionResult::Separate { reason, merged_groups })
         }
     }
+}
+
+/// 根出口的整体验证遇到 Unknown 或义务反例时，不提交未经认证的合并状态。
+/// 先按原始到达守卫逐组重验；无法认证的组和已认证的兄弟组都以现有
+/// `Separate` 通路发布。这样每条普通后继仍持有自己的守卫、逻辑臂和事务效果。
+#[allow(clippy::too_many_arguments)]
+fn certify_root_groups<'ir, B: BV>(
+    region: &Region,
+    base: &LocalFrame<'ir, B>,
+    arms: &mut [Vec<LocalFrame<'ir, B>>; 2],
+    frame: &mut LocalFrame<'ir, B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<bool, ExecError> {
+    let options = crate::config::RegionOptions::current();
+    if !options.root_cert_split || !options.defer_exit_check || frame.region_execution.is_some() {
+        return Ok(false);
+    }
+    let obligation = {
+        let _scope = stats::region_progress::QueryScope::enter("exit_obligations");
+        solver.check_deferred_assertions(info)
+    };
+    let needs_split = match obligation {
+        None | Some(SmtResult::Unsat) => {
+            let _scope = stats::region_progress::QueryScope::enter("region_exit");
+            match solver.suspend_deferred_region_queries(|solver| solver.check_candidate_sat(info)) {
+                None | Some(SmtResult::Sat) => return Ok(false),
+                Some(SmtResult::Unsat) => return Ok(false),
+                Some(SmtResult::Unknown) => true,
+                Some(SmtResult::Error(crate::error::SmtError::Unknown { .. }))
+                    if solver.exploration_on_unknown().is_some() =>
+                {
+                    true
+                }
+                Some(SmtResult::Error(error)) => return Err(ExecError::Smt(error)),
+            }
+        }
+        Some(SmtResult::Sat | SmtResult::Unknown) => true,
+        Some(SmtResult::Error(crate::error::SmtError::Unknown { .. })) if solver.exploration_on_unknown().is_some() => {
+            true
+        }
+        Some(SmtResult::Error(error)) => return Err(ExecError::Smt(error)),
+    };
+    assert!(needs_split);
+
+    let mut failed = false;
+    for arm in arms.iter().flatten() {
+        let guard = arm.local_state.speculative_access.as_ref().unwrap().guard.as_ref().unwrap();
+        let obligation = {
+            let _scope = stats::region_progress::QueryScope::enter("exit_obligations");
+            solver.check_deferred_assertions_with(Some(guard), info)
+        };
+        let certified_obligation = matches!(obligation, None | Some(SmtResult::Unsat));
+        let certified_candidate = certified_obligation && {
+            let _scope = stats::region_progress::QueryScope::enter("region_exit");
+            matches!(
+                solver.suspend_deferred_region_queries(|solver| solver.check_candidate_sat_with(guard, info)),
+                None | Some(SmtResult::Sat)
+            )
+        };
+        failed |= !certified_candidate;
+    }
+    if !failed {
+        frame.root_certification_done = true;
+        return Ok(false);
+    }
+
+    let mut groups = Vec::new();
+    for mut group in std::mem::take(arms).into_iter().flatten() {
+        record_projected_arrival(&mut group, base, region, solver, info);
+        group.region_execution = None;
+        group.speculation_mode = frame.speculation_mode;
+        groups.push(group);
+    }
+    assert!(!groups.is_empty(), "根出口认证至少保留一个普通后继");
+    assert!(frame.region_arrivals.is_empty());
+    frame.region_arrivals = groups;
+    frame.root_certification_done = true;
+    Ok(true)
 }
 
 /// 单片段也需要一条出口记录承载条件内存读取。

@@ -32,6 +32,62 @@ impl Strategy {
     }
 }
 
+#[test]
+fn root_cert_split_localizes_unknown_exit_obligation() {
+    const TEST: &str = "executor::tests::nested_merge_failure_tests::root_cert_split_localizes_unknown_exit_obligation";
+    let args = ["--exact", TEST, "--nocapture", "--test-threads=1"];
+    if !std::env::args().skip(1).eq(args) {
+        let result = std::process::Command::new(std::env::current_exe().unwrap()).args(args).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    }
+    RegionOptions { defer_exit_check: true, root_cert_split: true, ..Default::default() }.configure();
+    for strategy in strategies() {
+        let check = || {
+            Instr::PrimopBinary(
+                Loc::Id(RETURN),
+                primop::optimistic_assert::<B64>,
+                input(1),
+                Exp::String("root certification".into()),
+                info(),
+            )
+        };
+        let program = vec![
+            Instr::Jump(input(0), 4, info()),
+            check(),
+            copy_return(Exp::Bool(false)),
+            Instr::Goto(6),
+            check(),
+            copy_return(Exp::Bool(true)),
+            Instr::End,
+        ];
+        let plain = paths_with_state(
+            program.clone(),
+            &empty_shared_state(),
+            2,
+            ExecutionLimits::default().with_path_merging(false),
+            crate::memory::Memory::new(),
+            |_| (),
+        );
+        let mut split = empty_shared_state();
+        split.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+        let localized =
+            crate::smt::test_queries::with_unknown_purposes(&["exit_obligations", "exit_obligations"], || {
+                paths_with_state(program.clone(), &split, 2, strategy.limits(), crate::memory::Memory::new(), |_| ())
+            });
+        assert_eq!(localized.len(), plain.len(), "分组发布不得改变可达正常终态数");
+        assert!(
+            localized.iter().all(|path| path.records.iter().any(|record| record.branch_pc == 0)),
+            "开启开关后每个出口组必须保留根区域记录"
+        );
+    }
+}
+
 #[derive(Debug)]
 struct Observation {
     paths: (usize, usize),

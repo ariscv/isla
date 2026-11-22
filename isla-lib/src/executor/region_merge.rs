@@ -681,7 +681,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         });
                     }
                 };
-                let mut execute = |solver: &mut Solver<B>| {
+                let execute = |solver: &mut Solver<B>| {
                     log_phase("execute_start", None);
                     let output = execute_region(
                         condition,
@@ -707,7 +707,11 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         info,
                     );
                     log_phase("execute_end", None);
-                    if defer && !nested && output.is_ok() {
+                    if defer
+                        && !nested
+                        && output.is_ok()
+                        && !candidate_frame.as_ref().is_some_and(|candidate| candidate.root_certification_done)
+                    {
                         failure_phase = FailurePhase::ExitObligation;
                         log_phase("obligation_start", None);
                         let _scope = stats::region_progress::QueryScope::enter("exit_obligations");
@@ -733,35 +737,38 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                 };
                 let result = if defer { solver.with_deferred_region_queries(execute) } else { execute(solver) };
                 // 只有最外层出口查询可以验证候选；嵌套结果仍带着全部守卫。
-                let result =
-                    if defer && !nested && result.as_ref().is_ok_and(|output| !matches!(output, RegionResult::Dead)) {
-                        failure_phase = FailurePhase::ExitCertification;
-                        log_phase("exit_check_start", None);
-                        let _scope = stats::region_progress::QueryScope::enter("region_exit");
-                        let checked = solver.check_candidate_sat(info);
-                        log_phase("exit_check_end", checked.as_ref());
-                        match checked {
-                            None | Some(SmtResult::Sat) => result,
-                            // 分段可能还有继续前沿；退出前沿为空不代表整次调用为空。
-                            Some(SmtResult::Unsat)
-                                if !matches!(result, Ok(RegionResult::GuardedExits))
-                                    && !pending_errors.tasks.get_mut().unwrap().is_empty() =>
-                            {
-                                Ok(RegionResult::Dead)
-                            }
-                            Some(SmtResult::Unsat | SmtResult::Unknown) => {
-                                Err(reject(frame, SpeculativeRejectReason::SolverUnknown))
-                            }
-                            Some(SmtResult::Error(crate::error::SmtError::Unknown { .. }))
-                                if solver.exploration_on_unknown().is_some() =>
-                            {
-                                Err(reject(frame, SpeculativeRejectReason::SolverUnknown))
-                            }
-                            Some(SmtResult::Error(error)) => Err(ExecError::Smt(error)),
+                let result = if defer
+                    && !nested
+                    && !candidate_frame.as_ref().is_some_and(|candidate| candidate.root_certification_done)
+                    && result.as_ref().is_ok_and(|output| !matches!(output, RegionResult::Dead))
+                {
+                    failure_phase = FailurePhase::ExitCertification;
+                    log_phase("exit_check_start", None);
+                    let _scope = stats::region_progress::QueryScope::enter("region_exit");
+                    let checked = solver.check_candidate_sat(info);
+                    log_phase("exit_check_end", checked.as_ref());
+                    match checked {
+                        None | Some(SmtResult::Sat) => result,
+                        // 分段可能还有继续前沿；退出前沿为空不代表整次调用为空。
+                        Some(SmtResult::Unsat)
+                            if !matches!(result, Ok(RegionResult::GuardedExits))
+                                && !pending_errors.tasks.get_mut().unwrap().is_empty() =>
+                        {
+                            Ok(RegionResult::Dead)
                         }
-                    } else {
-                        result
-                    };
+                        Some(SmtResult::Unsat | SmtResult::Unknown) => {
+                            Err(reject(frame, SpeculativeRejectReason::SolverUnknown))
+                        }
+                        Some(SmtResult::Error(crate::error::SmtError::Unknown { .. }))
+                            if solver.exploration_on_unknown().is_some() =>
+                        {
+                            Err(reject(frame, SpeculativeRejectReason::SolverUnknown))
+                        }
+                        Some(SmtResult::Error(error)) => Err(ExecError::Smt(error)),
+                    }
+                } else {
+                    result
+                };
                 match &result {
                     Ok(_) => {
                         assert!(!solver.transaction_invalid(), "区域提交前保存点必须有效");
