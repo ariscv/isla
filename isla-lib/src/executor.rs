@@ -2468,8 +2468,44 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         let test_false = Not(Box::new(Var(v)));
 
                         let branch_queries = stats::region_progress::QueryScope::enter("branch_feasibility");
-                        let can_be_true = region_merge::feasible(frame, solver, &test_true, *info, shared_state)?;
-                        let can_be_false = region_merge::feasible(frame, solver, &test_false, *info, shared_state)?;
+                        let can_be_true = match region_merge::feasible(frame, solver, &test_true, *info, shared_state) {
+                            Ok(feasible) => feasible,
+                            Err(
+                                error @ ExecError::SpeculativeReject {
+                                    reason: SpeculativeRejectReason::SolverUnknown,
+                                    ..
+                                },
+                            ) if frame.region_execution.is_some()
+                                && crate::config::RegionOptions::current().partial_commit_solver_unknown =>
+                            {
+                                // 内层区域尚未创建自己的事务；当前臂事务保留此前的推演，
+                                // 两个片段从这个分叉继续，仍由外层区域的工作栈持有。
+                                shared_state.execution_stats.merge_rejected(frame.function_name, frame.pc, &error);
+                                task_state.speculation_stats.record_reject(SpeculativeRejectReason::SolverUnknown);
+                                region_merge::separate_nested_solver_unknown(v, *target, frame, solver)?;
+                                return Ok(Run::Suspended);
+                            }
+                            Err(error) => return Err(error),
+                        };
+                        let can_be_false = match region_merge::feasible(frame, solver, &test_false, *info, shared_state)
+                        {
+                            Ok(feasible) => feasible,
+                            Err(
+                                error @ ExecError::SpeculativeReject {
+                                    reason: SpeculativeRejectReason::SolverUnknown,
+                                    ..
+                                },
+                            ) if frame.region_execution.is_some()
+                                && crate::config::RegionOptions::current().partial_commit_solver_unknown =>
+                            {
+                                // 同上：不可行性查询尚未进入内层区域事务，不能回滚外层臂。
+                                shared_state.execution_stats.merge_rejected(frame.function_name, frame.pc, &error);
+                                task_state.speculation_stats.record_reject(SpeculativeRejectReason::SolverUnknown);
+                                region_merge::separate_nested_solver_unknown(v, *target, frame, solver)?;
+                                return Ok(Run::Suspended);
+                            }
+                            Err(error) => return Err(error),
+                        };
 
                         stats::region_progress::branch_result(can_be_true, can_be_false);
                         drop(branch_queries);

@@ -23,6 +23,8 @@ pub struct RegionOptions {
     pub no_smt_keep_bool_proofs: bool,
     /// 延迟区域出口检查；默认关闭。
     pub defer_exit_check: bool,
+    /// 嵌套区域遇到 solver_unknown 时，保留外层区域并在其中退化为普通分叉；默认关闭。
+    pub partial_commit_solver_unknown: bool,
     /// 分支入口识别布尔恒值；默认开启。
     pub prune_constant_branches: bool,
     pub arm_error_leaf: bool,
@@ -88,6 +90,7 @@ impl RegionOptions {
             no_smt: limits.solver.no_smt,
             no_smt_keep_bool_proofs: limits.solver.no_smt_keep_bool_proofs,
             defer_exit_check: merge.defer_exit_check,
+            partial_commit_solver_unknown: merge.partial_commit_solver_unknown,
             prune_constant_branches: merge.prune_constant_branches,
             arm_error_leaf: merge.arm_error_leaf,
             arm_error_batch_size: merge.solver.arm_error_batch_size,

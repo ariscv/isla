@@ -297,7 +297,8 @@ fn is_join_rejection(reason: SpeculativeRejectReason) -> bool {
     )
 }
 
-fn charge_fragment_growth<B: BV>(frame: &LocalFrame<B>, additional: usize) -> Result<(), ExecError> {
+/// 所有区域内片段拆分共用同一个配额；缺省不设上限。
+pub(super) fn charge_fragment_growth<B: BV>(frame: &LocalFrame<B>, additional: usize) -> Result<(), ExecError> {
     if let Some(remaining) =
         frame.region_execution.as_ref().and_then(|execution| execution.additional_fragments.as_ref())
     {

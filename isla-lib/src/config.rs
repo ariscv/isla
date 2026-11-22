@@ -2754,7 +2754,7 @@ end_column = 0
     #[test]
     fn region_options_toml_accepts_switches_and_limits() {
         assert!(merge_config(
-            "[execution_limits.path_merge]\ndefer_exit_check=true\nwitness_eval=true\n[execution_limits.solver]\nbool_proof_rlimit=1"
+            "[execution_limits.path_merge]\ndefer_exit_check=true\npartial_commit_solver_unknown=true\nwitness_eval=true\n[execution_limits.solver]\nbool_proof_rlimit=1"
         )
         .is_ok());
         assert!(merge_config("[execution_limits.path_merge.diagnostics]\nquery_dump_sites=['f@1']\nquery_dump_dir='queries'\nsame_context_sites=['f@1']").is_ok());
@@ -2866,6 +2866,7 @@ obligation_dump_dir = "obligations"
                 no_smt: true,
                 no_smt_keep_bool_proofs: false,
                 defer_exit_check: true,
+                partial_commit_solver_unknown: false,
                 lazy_z3_scope: true,
                 witness_eval: true,
                 prefix_compact: true,
