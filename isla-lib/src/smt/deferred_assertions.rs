@@ -20,16 +20,84 @@ pub(crate) fn test_mandatory_query_count() -> u64 {
 pub(super) struct DeferredAssertions<B> {
     entry: Checkpoint<B>,
     event_start: usize,
-    pub(super) obligations: Vec<Exp<Sym>>,
-    pub(super) input_facts: Vec<Exp<Sym>>,
-    exit_constraints: HashSet<Sym>,
-    blocked: BTreeMap<&'static str, usize>,
-    first_blocked: Option<SourceLoc>,
+    pub(super) arm: DeferredArmAssertions,
     verification_seconds: f64,
     verification_result: Option<String>,
 }
 
+/// 只携带当前臂在执行顺序中已冻结的数据。认证入口和 Z3 状态属于最外层 A。
+#[derive(Default)]
+#[cfg_attr(test, derive(Debug, PartialEq))]
+pub(crate) struct DeferredArmAssertions {
+    pub(super) obligations: Vec<DeferredObligation>,
+    pub(super) input_facts: Vec<Exp<Sym>>,
+    exit_constraints: HashSet<Sym>,
+    blocked: BTreeMap<&'static str, usize>,
+    first_blocked: Option<SourceLoc>,
+}
+
+#[derive(Clone)]
+#[cfg_attr(test, derive(Debug, PartialEq))]
+pub(super) struct DeferredObligation {
+    prefix: Sym,
+    bad: Sym,
+}
+
+impl DeferredArmAssertions {
+    pub(crate) fn remap_symbols(&mut self, remap: &SymRemap) {
+        for item in &mut self.obligations {
+            item.prefix = remap.get(item.prefix);
+            item.bad = remap.get(item.bad);
+        }
+        for fact in &mut self.input_facts {
+            *fact = remap.exp(fact);
+        }
+        self.exit_constraints = self.exit_constraints.drain().map(|sym| remap.get(sym)).collect();
+    }
+}
+
 impl<B: BV> Solver<'_, B> {
+    pub(crate) fn take_arm_assertions(&mut self) -> Option<DeferredArmAssertions> {
+        self.deferred_assertions.as_mut().map(|state| std::mem::take(&mut state.arm))
+    }
+
+    /// B 冻结前序时看不到 A。把串行时排在整个 B 之前的断言接在 B 每个前序的开头，
+    /// 保留 B 内各自的时间边界，再把这些定义与后缀一起登记到 A 的 solver。
+    pub(crate) fn import_arm_assertions(
+        &mut self,
+        remote: Option<DeferredArmAssertions>,
+        suffix: &mut [ArmSuffixEvent<B>],
+    ) {
+        assert_eq!(self.deferred_assertions.is_some(), remote.is_some(), "两臂的延后查询模式必须一致");
+        let Some(remote) = remote else { return };
+        if !remote.obligations.is_empty() {
+            let mut prefixes: HashSet<_> = remote.obligations.iter().map(|item| item.prefix).collect();
+            let prior = self.preceding_assertions();
+            for item in suffix {
+                if let Event::Smt(Def::DefineConst(sym, exp), ..) = &mut item.event {
+                    if prefixes.remove(sym) {
+                        // preceding_assertions 从 true 左折叠。替换起点即得到逐项相同的串行定义。
+                        let mut first = exp;
+                        while let Exp::And(left, _) = first {
+                            first = left;
+                        }
+                        assert_eq!(*first, Exp::Bool(true), "义务前序必须从 true 开始");
+                        *first = prior.clone();
+                    }
+                }
+            }
+            assert!(prefixes.is_empty(), "每项义务的前序定义必须随臂交付");
+        }
+        let local = &mut self.deferred_assertions.as_mut().unwrap().arm;
+        local.obligations.extend(remote.obligations);
+        local.input_facts.extend(remote.input_facts);
+        local.exit_constraints.extend(remote.exit_constraints);
+        local.first_blocked = local.first_blocked.or(remote.first_blocked);
+        for (purpose, count) in remote.blocked {
+            *local.blocked.entry(purpose).or_default() += count;
+        }
+    }
+
     /// 嵌套区域复用同一义务集合；作用域退出或panic时清理，不能泄漏到普通执行。
     pub(crate) fn with_deferred_region_queries<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
         let previous = self.deferred_region_queries;
@@ -38,11 +106,7 @@ impl<B: BV> Solver<'_, B> {
             self.deferred_assertions = Some(DeferredAssertions {
                 entry: self.checkpoint_snapshot(),
                 event_start: self.transaction_events.len(),
-                obligations: Vec::new(),
-                input_facts: Vec::new(),
-                exit_constraints: HashSet::new(),
-                blocked: BTreeMap::new(),
-                first_blocked: None,
+                arm: DeferredArmAssertions::default(),
                 verification_seconds: 0.0,
                 verification_result: None,
             });
@@ -54,14 +118,14 @@ impl<B: BV> Solver<'_, B> {
             let state = self.deferred_assertions.take().expect("区域必须有义务上下文");
             static LOGGED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             if crate::executor::stats::region_progress::enabled()
-                && (!state.obligations.is_empty() || !state.blocked.is_empty())
+                && (!state.arm.obligations.is_empty() || !state.arm.blocked.is_empty())
                 && LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 128
             {
                 eprintln!(
                     "{}",
                     serde_json::json!({"kind":"region_deferred_exit",
-                    "obligations":state.obligations.len(),"blocked_queries":state.blocked,
-                    "first_blocked_source":state.first_blocked,"verification_seconds":state.verification_seconds,
+                    "obligations":state.arm.obligations.len(),"blocked_queries":state.arm.blocked,
+                    "first_blocked_source":state.arm.first_blocked,"verification_seconds":state.verification_seconds,
                     "verification_result":state.verification_result,
                     "attempt":crate::executor::stats::merge_diagnostics::root_attempt()})
                 );
@@ -83,8 +147,8 @@ impl<B: BV> Solver<'_, B> {
         TEST_MANDATORY_QUERY_COUNT.with(|count| count.set(count.get() + u64::from(returns_unknown)));
         crate::executor::stats::merge_diagnostics::record_deferred_query(purpose, info, returns_unknown);
         let state = self.deferred_assertions.as_mut().expect("延迟查询必须属于活动区域");
-        *state.blocked.entry(purpose).or_default() += 1;
-        state.first_blocked.get_or_insert(info);
+        *state.arm.blocked.entry(purpose).or_default() += 1;
+        state.arm.first_blocked.get_or_insert(info);
     }
 
     /// 范围与标签共用原到达域下的出口义务，未验证时不登记求解知识。
@@ -110,22 +174,7 @@ impl<B: BV> Solver<'_, B> {
             .iter()
             .cloned()
             .fold(Exp::Bool(true), |a, b| Exp::And(Box::new(a), Box::new(b)));
-        // 只取在本义务之前出现的断言；已提交的兄弟臂断言已带守卫。
-        // 当前活动臂中的断言由本义务的完整guard限制，不能拿自己的c证明自己。
-        let state = self.deferred_assertions.as_ref().unwrap();
-        let mut preceding = Exp::Bool(true);
-        for event in &self.transaction_events[state.event_start..] {
-            if let Event::Smt(Def::Assert(exp), ..) = event {
-                let mut exit = false;
-                let _ = exp.map_var(&mut |v| {
-                    exit |= state.exit_constraints.contains(v);
-                    Ok::<_, ()>(Exp::Var(*v))
-                });
-                if !exit {
-                    preceding = Exp::And(Box::new(preceding), Box::new(exp.clone()));
-                }
-            }
-        }
+        let preceding = self.preceding_assertions();
         let prefix = self.define_const(preceding, info);
         let bad = self.define_const(
             Exp::And(
@@ -134,9 +183,29 @@ impl<B: BV> Solver<'_, B> {
             ),
             info,
         );
-        self.deferred_assertions.as_mut().unwrap().obligations.push(Exp::Var(bad));
+        self.deferred_assertions.as_mut().unwrap().arm.obligations.push(DeferredObligation { prefix, bad });
         // 只供正常结果和后续义务使用；当前义务已在此之前冻结。
         self.assert(condition);
+    }
+
+    fn preceding_assertions(&self) -> Exp<Sym> {
+        // 只取在本义务之前出现的断言；已提交的兄弟臂断言已带守卫。
+        // 当前活动臂中的断言由本义务的完整guard限制，不能拿自己的c证明自己。
+        let state = self.deferred_assertions.as_ref().unwrap();
+        let mut preceding = Exp::Bool(true);
+        for event in &self.transaction_events[state.event_start..] {
+            if let Event::Smt(Def::Assert(exp), ..) = event {
+                let mut exit = false;
+                let _ = exp.map_var(&mut |v| {
+                    exit |= state.arm.exit_constraints.contains(v);
+                    Ok::<_, ()>(Exp::Var(*v))
+                });
+                if !exit {
+                    preceding = Exp::And(Box::new(preceding), Box::new(exp.clone()));
+                }
+            }
+        }
+        preceding
     }
 
     /// 首次符号化/提升初始值的类型域事实，与假设断言成功分开。
@@ -150,6 +219,7 @@ impl<B: BV> Solver<'_, B> {
             self.deferred_assertions
                 .as_mut()
                 .unwrap()
+                .arm
                 .input_facts
                 .push(Exp::Or(Box::new(Exp::Not(Box::new(guard))), Box::new(exp.clone())));
         }
@@ -160,7 +230,7 @@ impl<B: BV> Solver<'_, B> {
     pub(crate) fn assert_region_exit(&mut self, exp: Exp<Sym>) {
         if self.deferred_region_queries {
             let marker = self.define_const(exp, SourceLoc::unknown());
-            self.deferred_assertions.as_mut().unwrap().exit_constraints.insert(marker);
+            self.deferred_assertions.as_mut().unwrap().arm.exit_constraints.insert(marker);
             self.assert(Exp::Var(marker));
         } else {
             self.assert(exp);
@@ -183,7 +253,7 @@ impl<B: BV> Solver<'_, B> {
                 _ => (),
             }
         }
-        serde_json::json!({"definition_events":definitions,"definition_expression_nodes":nodes,"assertion_expression_nodes":assertions,"obligations":self.deferred_assertions.as_ref().map_or(0,|s|s.obligations.len())})
+        serde_json::json!({"definition_events":definitions,"definition_expression_nodes":nodes,"assertion_expression_nodes":assertions,"obligations":self.deferred_assertions.as_ref().map_or(0,|s|s.arm.obligations.len())})
     }
 
     /// 使用失败点的前缀认证错误，后续正常域的约束不参与检查。
@@ -210,11 +280,16 @@ impl<B: BV> Solver<'_, B> {
             return None;
         }
         let state = self.deferred_assertions.as_ref().expect("验证必须在活动义务作用域中");
-        if state.obligations.is_empty() {
+        if state.arm.obligations.is_empty() {
             return Some(Unsat);
         }
         let started = Instant::now();
-        let bad = state.obligations.iter().cloned().fold(Exp::Bool(false), |a, b| Exp::Or(Box::new(a), Box::new(b)));
+        let bad = state
+            .arm
+            .obligations
+            .iter()
+            .map(|item| Exp::Var(item.bad))
+            .fold(Exp::Bool(false), |a, b| Exp::Or(Box::new(a), Box::new(b)));
         // 前序断言已经冻结到各自的bad定义中；此处仅重放定义和初始类型域。
         // 不再无条件加入所有正常结果断言，避免后续约束掩盖前面的错误。
         let mut definitions: Vec<_> = self.transaction_events[state.event_start..]
@@ -223,7 +298,7 @@ impl<B: BV> Solver<'_, B> {
             .cloned()
             .collect();
         definitions.extend(
-            state.input_facts.iter().cloned().map(|fact| Event::Smt(Def::Assert(fact), DefAttrs::default(), info)),
+            state.arm.input_facts.iter().cloned().map(|fact| Event::Smt(Def::Assert(fact), DefAttrs::default(), info)),
         );
         let diagnostic = crate::executor::stats::region_progress::enabled();
         let definition_nodes: usize = if diagnostic {
@@ -251,7 +326,7 @@ impl<B: BV> Solver<'_, B> {
         if diagnostic {
             eprintln!(
                 "{}",
-                serde_json::json!({"kind":"region_assert_obligation_start", "obligations":state.obligations.len(), "definition_events":count, "definition_expression_nodes":definition_nodes, "obligation_expression_nodes":crate::executor::stats::memory_stats::exp_stats(&bad).0})
+                serde_json::json!({"kind":"region_assert_obligation_start", "obligations":state.arm.obligations.len(), "definition_events":count, "definition_expression_nodes":definition_nodes, "obligation_expression_nodes":crate::executor::stats::memory_stats::exp_stats(&bad).0})
             );
         }
         let replay_started = Instant::now();
@@ -261,7 +336,7 @@ impl<B: BV> Solver<'_, B> {
         let result = verifier.check_sat_with(&bad, info);
         let check_seconds = check_started.elapsed().as_secs_f64();
         // 仅显式诊断开关导出少量小检查；旧日志没有这些dump，不能冒充旧查询重放。
-        if matches!(result, Sat) && state.obligations.len() <= 8 {
+        if matches!(result, Sat) && state.arm.obligations.len() <= 8 {
             if let Some(directory) = &crate::config::RegionOptions::current().obligation_dump_dir {
                 static DUMPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
                 let ordinal = DUMPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -304,7 +379,7 @@ impl<B: BV> Solver<'_, B> {
         if diagnostic {
             eprintln!(
                 "{}",
-                serde_json::json!({"kind":"region_assert_obligation_check","obligations":state.obligations.len(),"definition_events":count,"definition_expression_nodes":definition_nodes,"obligation_expression_nodes":crate::executor::stats::memory_stats::exp_stats(&bad).0,"seconds":seconds,"replay_seconds":replay_seconds,"check_seconds":check_seconds,"result":format!("{result:?}")})
+                serde_json::json!({"kind":"region_assert_obligation_check","obligations":state.arm.obligations.len(),"definition_events":count,"definition_expression_nodes":definition_nodes,"obligation_expression_nodes":crate::executor::stats::memory_stats::exp_stats(&bad).0,"seconds":seconds,"replay_seconds":replay_seconds,"check_seconds":check_seconds,"result":format!("{result:?}")})
             );
         }
         Some(result)

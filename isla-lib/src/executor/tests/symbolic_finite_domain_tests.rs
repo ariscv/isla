@@ -179,6 +179,7 @@ fn symbolic_finite_domain_region_preserves_retry_and_rollback() {
     let symbol = solver.declare_bitvector(64, info());
     let mut frame = make_frame(vec![Instr::End]);
     frame.region_execution = Some(region_merge::RegionExecution {
+        remote_cancel: None,
         region: Arc::new(crate::ir::regions::Region {
             branch_pc: 0,
             has_back_edge: false,

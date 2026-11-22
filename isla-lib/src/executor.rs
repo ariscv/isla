@@ -67,6 +67,7 @@ mod merge_record;
 pub mod model_exception;
 pub mod path_cache;
 mod path_timing;
+pub(crate) mod region_arm;
 mod region_engine;
 mod region_merge;
 mod region_summary;
@@ -1322,6 +1323,10 @@ enum SpecialResult {
 trait ForkSink<'ir, 'task, B: BV> {
     fn submit(&self, task: Task<'ir, 'task, B>);
 
+    fn reserve_arm_thread(&self) -> Option<region_arm::ThreadSlot<'_>> {
+        None
+    }
+
     /// 错误叶跟随祖先区域事务，直到根区域提交才进入任务队列。
     fn submit_consumer_error(&self, task: Task<'ir, 'task, B>) {
         self.submit(task);
@@ -1352,6 +1357,16 @@ where
 {
     fn submit(&self, task: Task<'ir, 'task, B>) {
         self.runtime.submit(self.scope, task);
+    }
+
+    fn reserve_arm_thread(&self) -> Option<region_arm::ThreadSlot<'_>> {
+        self.runtime.try_reserve_thread().then(|| region_arm::ThreadSlot {
+            tid: self.runtime.next_tid.fetch_add(1, Ordering::Relaxed),
+            release: Some(Box::new(|| {
+                self.runtime.active_threads.fetch_sub(1, Ordering::AcqRel);
+                self.runtime.try_refill_threads(self.scope);
+            })),
+        })
     }
 }
 
@@ -1465,8 +1480,8 @@ impl<'ir, 'task, 'collector, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'
         'collector: 'scope,
     {
         self.shared_state.execution_stats.task_completed();
-        let remaining = self.pending_tasks.fetch_sub(1, Ordering::AcqRel) - 1;
         self.active_threads.fetch_sub(1, Ordering::AcqRel);
+        let remaining = self.pending_tasks.fetch_sub(1, Ordering::AcqRel) - 1;
 
         if remaining == 0 {
             let _finished = self.finished_mu.lock().unwrap();
@@ -2177,6 +2192,10 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             )
         {
             return Ok(Run::Dead);
+        }
+        // 远端直线臂遇到消费者时，将原指令留给具有完整入口状态的 A 重跑。
+        if frame.region_execution.as_ref().is_some_and(|execution| execution.remote_cancel.is_some()) {
+            return Err(error);
         }
         let retry = if let ExecError::ConcreteChoice(guard, info) = error {
             concrete_values::retry(
@@ -3864,6 +3883,7 @@ pub fn start_multi<'ir, 'collector, B: BV, R>(
 
         runtime.try_refill_threads(scope);
         runtime.wait_until_finished();
+        debug_assert_eq!(runtime.active_threads.load(Ordering::Acquire), 0);
     })
 }
 
@@ -4463,6 +4483,8 @@ mod tests {
     mod nested_enum_tests;
     mod nested_merge_failure_tests;
     mod read_size_tests;
+    mod region_arm_runtime_tests;
+    mod region_arm_tests;
     mod region_join_plan_tests;
     mod region_measurement_tests;
     mod region_memory_write_tests;

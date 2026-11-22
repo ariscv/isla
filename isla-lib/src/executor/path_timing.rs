@@ -38,6 +38,14 @@ impl PathTiming {
         PathTiming { state: Arc::new(Mutex::new(PathTimingState { totals, active: None })) }
     }
 
+    /// 汇合时两个臂共用入口前缀，各自在工作线程计时。公共后缀继承较长臂的预算用量。
+    pub(super) fn include_parallel(&self, other: PathTimeTotals) {
+        let mut state = self.state.lock().expect("path timing state poisoned");
+        assert!(state.active.is_none(), "合并用时前须暂停 A");
+        state.totals.active_wall = state.totals.active_wall.max(other.active_wall);
+        state.totals.executor_cpu = state.totals.executor_cpu.max(other.executor_cpu);
+    }
+
     pub(super) fn start_active(&self) {
         self.start_active_at(Instant::now(), thread_cpu_time());
     }

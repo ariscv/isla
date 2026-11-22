@@ -60,6 +60,13 @@ impl<B> Default for MergeHistory<B> {
     }
 }
 impl<B> MergeHistory<B> {
+    pub(crate) fn remap_symbols(&self, remap: &crate::smt::SymRemap) -> Self
+    where
+        B: crate::bitvector::BV,
+    {
+        self.iter().map(|record| record.remap_symbols(remap)).collect::<Vec<_>>().into()
+    }
+
     pub fn len(&self) -> usize {
         self.0.len
     }

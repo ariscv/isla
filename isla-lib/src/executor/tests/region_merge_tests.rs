@@ -1787,6 +1787,7 @@ fn region_merge_unique_retry_gate_preserves_guard_checkpoint_and_fraction() {
     let mut frame = make_frame(vec![Instr::Jump(input(0), 1, info()), Instr::End]);
     frame.speculation_mode = SpeculationMode::On;
     frame.region_execution = Some(region_merge::RegionExecution {
+        remote_cancel: None,
         region: Arc::new(crate::ir::regions::Region {
             branch_pc: 0,
             has_back_edge: false,
