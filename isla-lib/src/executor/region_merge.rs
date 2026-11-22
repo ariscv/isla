@@ -1,8 +1,9 @@
 //! 区域推演只调用真实执行循环；此模块负责边界、事务与状态合并。
 use super::concrete_values::ConsumerRetry;
 use super::region_engine::{
-    advance_arm, append_loop_exit, branch_arm, finish_arrivals, finish_prepared_region, finish_region, loop_exit_guard,
-    publish_committed_records, publish_register_writes, record_projected_arrival, LoopDependencies, ReadyFragments,
+    advance_arm, append_loop_exit, branch_arm, charge_fragment_growth, finish_arrivals, finish_prepared_region,
+    finish_region, loop_exit_guard, publish_committed_records, publish_register_writes, record_projected_arrival,
+    LoopDependencies, ReadyFragments,
 };
 use super::region_summary::{function_effect_summaries, instruction_effect, CachedReject, FunctionEffect};
 use super::stats::merge_diagnostics as diagnostics;
@@ -28,6 +29,11 @@ impl<'ir, 'task, B: BV> ArmErrorSink<'ir, 'task, B> {
         for task in self.tasks.into_inner().unwrap() {
             sink.submit_consumer_error(task);
         }
+    }
+
+    /// 区域事务回滚后，缓冲的错误叶也必须由普通片段重新生成。
+    fn discard(&self) {
+        self.tasks.lock().unwrap().clear();
     }
 }
 
@@ -187,6 +193,11 @@ pub(super) fn feasible<B: BV>(
     match solver.check_sat_with_for_branch(exp, info, speculative) {
         None => Ok(true),
         Some(SmtResult::Unknown) if speculative => Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
+        Some(SmtResult::Error(crate::error::SmtError::Unknown { .. }))
+            if speculative && crate::config::RegionOptions::current().partial_commit_solver_unknown =>
+        {
+            Err(reject(frame, SpeculativeRejectReason::SolverUnknown))
+        }
         Some(result) => path_is_feasible(result, frame, solver, shared),
     }
 }
@@ -478,6 +489,30 @@ pub(super) enum RegionResult {
     Suspended,
 }
 
+/// 内层 Unknown 后把原分叉作为祖先区域里的两个待执行片段。调用方若已回滚
+/// 内层事务，片段会重建它；若尚未创建内层事务，则保留当前外层臂事务。绝不能交给
+/// 全局 sink；祖先的组织者会在自己的工作栈中继续它们。
+pub(super) fn separate_nested_solver_unknown<'ir, B: BV>(
+    condition: Sym,
+    target: usize,
+    frame: &mut LocalFrame<'ir, B>,
+    solver: &mut Solver<B>,
+) -> Result<(), ExecError> {
+    use smtlib::Exp::{Not, Var};
+
+    assert!(frame.region_execution.is_some(), "仅嵌套区域可保留普通分叉片段");
+    assert!(frame.region_arrivals.is_empty(), "区域入口不能已有未交付片段");
+    let parent = frame.region_arm.expect("嵌套区域入口必须属于祖先逻辑臂");
+    charge_fragment_growth(frame, 1)?;
+    let then_owner = solver.new_logical_arm(Some(parent));
+    let else_owner = solver.new_logical_arm(Some(parent));
+    frame.region_arrivals = vec![
+        branch_arm(frame, target, Var(condition), then_owner),
+        branch_arm(frame, frame.pc + 1, Not(Box::new(Var(condition))), else_owner),
+    ];
+    Ok(())
+}
+
 /// 组织区域事务。可局部化的汇合失败保留原片段；其余推演拒绝沿原错误出口处理。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
@@ -592,6 +627,8 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
     let replay_join = candidate.as_ref().ok().map(|region| region.join);
     let mut pending_errors = ArmErrorSink::new();
     let mut segmented = false;
+    // 只有此标志为真才说明本层已创建并回滚区域事务。候选识别和缓存拒绝不能退化为片段。
+    let mut arm_execution_rolled_back = false;
     let result = match candidate {
         Err(error) => {
             if let ExecError::SpeculativeReject { reason, function, pc, location } = error {
@@ -773,11 +810,47 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                             }
                         }
                     }
-                    Err(_) => solver.rollback_transaction(tx),
+                    Err(_) => {
+                        solver.rollback_transaction(tx);
+                        arm_execution_rolled_back = true;
+                    }
                 }
                 result
             }
         }
+    };
+    let result = match result {
+        Err(error)
+            if nested
+                && arm_execution_rolled_back
+                && crate::config::RegionOptions::current().partial_commit_solver_unknown
+                && matches!(
+                    error,
+                    ExecError::SpeculativeReject { reason: SpeculativeRejectReason::SolverUnknown, .. }
+                ) =>
+        {
+            // 事务撤销了内层的义务、事件和定义；错误叶也不能越过这次撤销。
+            // 两个片段会从本分叉的后继重新建立它们，再由祖先的出口认证。
+            match separate_nested_solver_unknown(condition, target, frame, solver) {
+                Ok(()) => {
+                    pending_errors.discard();
+                    shared.execution_stats.merge_rejected(key.0, key.1, &error);
+                    state.speculation_stats.record_reject(SpeculativeRejectReason::SolverUnknown);
+                    if diagnostics_active {
+                        diagnostics::emit(serde_json::json!({
+                            "stage":"local_arm_rejected",
+                            "difference":"local_arm_rejected",
+                            "reason":"solver_unknown",
+                            "at":{"function":diagnostics::name_string(frame.function_name, &shared.symtab),
+                                "pc":frame.pc,"location":error.source_loc()}
+                        }));
+                    }
+                    Ok(RegionResult::Separate { reason: SpeculativeRejectReason::SolverUnknown, merged_groups: false })
+                }
+                Err(error) => Err(error),
+            }
+        }
+        result => result,
     };
     if nested && result.is_ok() {
         pending_errors.forward(sink);

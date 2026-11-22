@@ -5935,9 +5935,11 @@ fn no_smt_candidate_merge_does_not_check_assertion_or_exit() {
     assert!(!solver.has_stashed_model());
 }
 
+/// 部分提交开关的缺省回归基线：根出口认证失败仍须整根回滚。
+/// 后续仅在显式开启开关的独立夹具中改为检查 Separate 发布的前沿。
 #[test]
-fn deferred_rejection_restores_frame_with_branch_and_bool_checks_skipped() {
-    if !dead_arm_candidate_child("deferred_rejection_restores_frame_with_branch_and_bool_checks_skipped") {
+fn partial_commit_default_keeps_root_exit_rollback() {
+    if !dead_arm_candidate_child("partial_commit_default_keeps_root_exit_rollback") {
         return;
     }
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);

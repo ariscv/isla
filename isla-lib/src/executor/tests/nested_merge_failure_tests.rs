@@ -512,6 +512,53 @@ fn solver_unknown_nested_arm_panics_in_both_organizers() {
 }
 
 #[test]
+fn partial_commit_solver_unknown_keeps_outer_merge() {
+    const TEST: &str = "executor::tests::nested_merge_failure_tests::partial_commit_solver_unknown_keeps_outer_merge";
+    let args = ["--exact", TEST, "--nocapture", "--test-threads=1"];
+    if !std::env::args().skip(1).eq(args) {
+        let result = std::process::Command::new(std::env::current_exe().unwrap()).args(args).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    }
+    RegionOptions { partial_commit_solver_unknown: true, ..Default::default() }.configure();
+    for strategy in strategies() {
+        let program = vec![
+            Instr::Jump(input(0), 3, info()),
+            copy_return(Exp::Bool(false)),
+            Instr::Goto(7),
+            Instr::Jump(input(1), 6, info()),
+            copy_return(Exp::Bool(false)),
+            Instr::Goto(7),
+            copy_return(Exp::Bool(true)),
+            Instr::End,
+        ];
+        let plain = paths_with_state(
+            program.clone(),
+            &empty_shared_state(),
+            2,
+            ExecutionLimits::default().with_path_merging(false),
+            crate::memory::Memory::new(),
+            |_| (),
+        );
+        let mut shared = empty_shared_state();
+        shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
+        let merged = super::path_failure_policy_tests::with_solver_dead(|| {
+            crate::smt::test_queries::with_results([None, None, Some(z3_sys::Z3_L_UNDEF)], || {
+                paths_with_state(program, &shared, 2, strategy.limits(), crate::memory::Memory::new(), |_| ())
+            })
+        });
+        assert_eq!(equivalent_paths(&plain, &merged, 2, true), (3, 1));
+        assert!(merged[0].records.iter().any(|record| record.branch_pc == 0 && record.parent_record.is_none()));
+        assert_eq!(shared.execution_stats.merge_json()["failure_reasons"]["solver_unknown"], 1);
+    }
+}
+
+#[test]
 fn solver_unknown_exit_obligation_replays_and_drops_per_path() {
     const TEST: &str =
         "executor::tests::nested_merge_failure_tests::solver_unknown_exit_obligation_replays_and_drops_per_path";
