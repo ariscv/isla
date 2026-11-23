@@ -1,4 +1,5 @@
 //! 逻辑臂跨越多个原生作用域，拥有区域事务内的事件及周期贡献。
+mod dependencies;
 use super::*;
 use std::num::NonZeroUsize;
 
@@ -136,12 +137,7 @@ impl<B: BV> Solver<'_, B> {
         let journal = &mut self.logical_arms;
         assert_eq!(journal.owners.len(), self.transaction_events.len(), "事件归属必须对齐");
         assert_eq!(self.transaction_event_guards.len(), self.transaction_events.len(), "事件条件必须对齐");
-        let mut children = vec![Vec::new(); journal.arms.len()];
-        for (index, node) in journal.arms.iter().enumerate() {
-            if let Some(parent) = node.parent {
-                children[parent.0.get() - 1].push(LogicalArm(NonZeroUsize::new(index + 1).unwrap()));
-            }
-        }
+        let children = journal.children();
         // 撤销时沿下游作用域和本组成员走，不越过各组共用的前缀。
         let seen = journal.reachable(arm, |id, _, pending| pending.extend(&children[id.0.get() - 1]));
         let owned_by_arm = |owner: Option<LogicalArm>| owner.is_some_and(|id| seen[id.0.get() - 1]);

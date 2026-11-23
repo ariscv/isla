@@ -14,6 +14,7 @@ use crate::ir::regions::{FunctionRegions, Region, RegionOptions, RegionPoint, Re
 
 mod consumer_continuation;
 mod exception_continuation;
+mod loop_fold;
 mod parallel_arms;
 
 /// 任一祖先区域拒绝时，随该次推演撤销失败任务的发布。
@@ -1556,7 +1557,8 @@ pub(super) fn fold_loop_exit<'ir, B: BV>(
         let access = exit.local_state.speculative_access.as_ref().unwrap();
         if !matches!(exit.instrs.get(exit.pc), Some(Instr::End))
             || (access.ordered_events && !access.global_state && !access.writes.modified_regs.is_empty())
-            || solver.transaction_has_memory_writes()
+            || (solver.transaction_has_memory_writes()
+                && !(crate::config::RegionOptions::current().loop_fold_shapes && exit.memory.ram_version().is_some()))
         {
             let error = reject(exit, SpeculativeRejectReason::StateEffect);
             diagnostics::note_failure_phase(diagnostics::FailurePhase::LoopFold, &error);
@@ -1568,6 +1570,7 @@ pub(super) fn fold_loop_exit<'ir, B: BV>(
 
 #[cfg(test)]
 thread_local! {
+    pub(super) static FOLD_SAMPLES: std::cell::RefCell<Option<Vec<[usize; 7]>>> = const { std::cell::RefCell::new(None) };
     pub(super) static FOLD_HISTORY_ID_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -1698,45 +1701,6 @@ fn take_loop_continuation<'ir, B: BV>(work: &mut LoopWork<'ir, B>, state: &TaskS
     })
 }
 
-/// 已完成的只读循环轮次在求解器中仍由已发布的选择器和状态 ITE 完整表示。
-/// 它们不应继续以逐轮区域记录的形式挂在下一轮帧上，否则 64 项 `foreach`
-/// 会让返回前沿和继续前沿都随轮数增长。汇总记录保留所有选择器依赖、单臂读取
-/// 和访存载荷；只压缩运行时的记录组织，不能改变执行迹或最终状态。
-fn compact_completed_loop_history<'ir, B: BV>(frame: &mut LocalFrame<'ir, B>, base: &LocalFrame<'ir, B>) {
-    let start = base.region_merge_records.len();
-    if frame.region_merge_records.len() <= start + 1 {
-        return;
-    }
-    debug_assert!(
-        frame
-            .region_merge_records
-            .iter()
-            .zip(base.region_merge_records.iter())
-            .all(|(current, original)| current.same_occurrence(original)),
-        "循环历史前缀必须与入口记录及父臂元数据一致"
-    );
-    let mut root = frame.region_merge_records.suffix(start).last().cloned().expect("循环历史必须有汇总根记录");
-    assert!(root.parent_record.is_none() && root.arm == "root", "循环历史末尾必须是根记录");
-    let mut value_symbols = HashSet::new();
-    let mut input_symbols = HashSet::new();
-    let mut single_arm_reads = Vec::new();
-    let mut memory_reads = Vec::new();
-    for record in frame.region_merge_records.suffix(start) {
-        value_symbols.extend(record.value_symbols.iter().copied());
-        input_symbols.extend(record.input_symbols.iter().copied());
-        single_arm_reads.extend(record.single_arm_reads.iter().cloned());
-        memory_reads.extend(record.memory_reads.iter().cloned());
-    }
-    root.value_symbols = value_symbols.into();
-    root.input_symbols = input_symbols.into();
-    root.single_arm_reads = single_arm_reads.into();
-    root.memory_reads = memory_reads.into();
-    // 入口前缀可直接共享。从当前历史截取前缀会保活已汇总的旧后缀。
-    let mut retained = base.region_merge_records.clone();
-    retained.push(root);
-    frame.region_merge_records = retained;
-}
-
 fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     record_id: usize,
     condition: Sym,
@@ -1766,10 +1730,20 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             RegionPoint::FunctionExit => true,
             RegionPoint::Instruction(pc) => matches!(frame.instrs.get(pc), Some(Instr::End)),
         };
+    let expanded = iterative && crate::config::RegionOptions::current().loop_fold_shapes;
+    let back_edges = if expanded {
+        let summaries = state.region_effect_summaries.get().expect("循环分析必须已具有函数摘要");
+        with_function_regions(frame, shared, summaries, true, |analysis| {
+            loop_fold::back_edge_predecessors(analysis.cfg(), &region)
+        })
+    } else {
+        HashSet::new()
+    };
     let mut first_pmp_fold =
         super::stats::region_progress::enabled() && shared.symtab.to_str(frame.function_name) == "zpmpCheck";
     let mut exit_prefix = Vec::new();
     let mut exit_ids = None;
+    let arm_start = solver.loop_arm_count();
     let root_branch = region.branch_pc;
     let root_region = region.clone();
     let remaining = base.region_execution.as_ref().unwrap().remaining.clone();
@@ -1808,6 +1782,9 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         super::stats::memory_stats::poll(frame, solver);
         if pending.work(frontier).completed == 2 {
             let (mut work, parent) = pending.complete(frontier);
+            if back_edges.contains(&work.target) && !back_edges.contains(&(work.original.pc + 1)) {
+                work.arms.swap(0, 1);
+            }
             let segmented_root = parent.is_none() && continuation.is_some();
             if segmented_root {
                 // 暂保留退出组的访问记录，交由根分组出口统一投影。
@@ -1965,13 +1942,13 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             && continuation.is_none()
             && pending.ancestors(frontier).all(|work| {
                 work.completed == 1
+                    && work.continuations.len() == 0
+                    && work.arms[1].is_empty()
                     && work.arms[0].len() == 1
                     && work.arms[0].first().is_some_and(|arm| {
                         matches!(arm.instrs.get(arm.pc), Some(Instr::End)) && {
                             let access = arm.local_state.speculative_access.as_ref().unwrap();
-                            (!access.ordered_events || access.global_state || access.writes.modified_regs.is_empty())
-                                && (!crate::config::RegionOptions::current().prefix_compact
-                                    || access.writes.modified_regs.is_empty())
+                            !access.ordered_events || access.global_state || access.writes.modified_regs.is_empty()
                         }
                     })
             });
@@ -1979,7 +1956,8 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         assert!(work.active_arm.is_none(), "前一逻辑臂必须先收尾");
         let owner = solver.new_logical_arm(work.parent_arm);
         work.active_arm = Some(owner);
-        let first = work.completed == 0;
+        let reversed = back_edges.contains(&work.target) && !back_edges.contains(&(work.original.pc + 1));
+        let first = (work.completed == 0) != reversed;
         let guard = if first { Var(work.condition) } else { Not(Box::new(Var(work.condition))) };
         let mut arm = branch_arm(&work.base, if first { work.target } else { work.original.pc + 1 }, guard, owner);
         let guard = arm.local_state.speculative_access.as_ref().unwrap().guard.clone().unwrap();
@@ -2023,20 +2001,39 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 let access = arm.local_state.speculative_access.as_ref().unwrap();
                 let fold_writes =
                     !access.ordered_events || access.global_state || access.writes.modified_regs.is_empty();
-                let compact_history =
-                    crate::config::RegionOptions::current().prefix_compact && access.writes.modified_regs.is_empty();
                 if iterative
-                    && single_work
+                    && (single_work || expanded)
                     && exit_spine
                     && region.branch_pc == root_branch
                     && fold_writes
-                    && (!crate::config::RegionOptions::current().prefix_compact || compact_history)
-                    && !solver.transaction_has_memory_writes()
+                    && ((expanded && arm.memory.ram_version().is_some()) || !solver.transaction_has_memory_writes())
                 {
-                    let exit = work.arms[0].pop().expect("退出脊柱必须已有存活前沿");
-                    append_loop_exit(&mut exit_prefix, &mut exit_ids, exit, solver, |previous, next, ids, solver| {
-                        fold_loop_exit(previous, next, ids, &original_base, &root_region, state, shared, solver, info)
-                    })?;
+                    let children = pending.drain_spine(&mut frontier);
+                    let work = pending.work_mut(frontier);
+                    let exits = std::iter::once(work.arms[0].pop().expect("根退出前沿必须存活")).chain(
+                        children.into_iter().map(|mut child| child.arms[0].pop().expect("退出脊柱必须已有存活前沿")),
+                    );
+                    for exit in exits {
+                        append_loop_exit(
+                            &mut exit_prefix,
+                            &mut exit_ids,
+                            exit,
+                            solver,
+                            |previous, next, ids, solver| {
+                                fold_loop_exit(
+                                    previous,
+                                    next,
+                                    ids,
+                                    &original_base,
+                                    &root_region,
+                                    state,
+                                    shared,
+                                    solver,
+                                    info,
+                                )
+                            },
+                        )?;
+                    }
                     let guard = arm
                         .local_state
                         .speculative_access
@@ -2077,19 +2074,19 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         })
                     })?;
                     assert!(matches!(result, RegionResult::Merged));
-                    if compact_history {
-                        compact_completed_loop_history(&mut next, &original_base);
-                        if let [exit] = exit_prefix.as_mut_slice() {
-                            compact_completed_loop_history(exit, &original_base);
-                            // 下一次折叠的 previous_ids 只索引累计出口的可见后缀。
-                            exit_ids = Some(
-                                exit.region_merge_records
-                                    .suffix(original_base.region_merge_records.len())
-                                    .map(|record| record.record_id)
-                                    .collect(),
-                            );
-                        }
+                    if crate::config::RegionOptions::current().prefix_compact {
+                        loop_fold::compact_frontiers(
+                            &mut exit_prefix,
+                            &mut next,
+                            &mut exit_ids,
+                            &original_base,
+                            arm_start,
+                            solver,
+                            info,
+                        );
                     }
+                    #[cfg(test)]
+                    loop_fold::sample_frontiers(&exit_prefix, &next, &exit_ids, solver);
                     solver.compact_region_query_prefix();
                     // 返回选择器已保存完整到达条件。下一轮引用它的补集，避免每个事件
                     // 复制前面所有轮次的守卫树。
@@ -2110,7 +2107,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             serde_json::json!({"kind":"loop_iteration_fold","task":task_id.as_usize(),"root_attempt":diagnostics::root_attempt(),
                             "function":diagnostics::name_string(original_frame.function_name,&shared.symtab),
                             "pc":root_branch,"call_instance":original_frame.local_state.call_instance,
-                            "steps_since_budget_renewal":used,"step_budget_unlimited":remaining.is_none(),"logical_frontiers":2,
+                            "steps_since_budget_renewal":used,"step_budget_unlimited":remaining.is_none(),"logical_frontiers":exit_prefix.len() + 1,
                             "returned_records":exit_prefix.iter().map(|exit| exit.region_merge_records.len()).sum::<usize>(),
                             "continuation_records":next.region_merge_records.len(),
                             "savepoint_depth":solver.transaction_depth()})
@@ -2122,6 +2119,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             remaining.store(budget, Ordering::Relaxed);
                         }
                     }
+                    let parent_arm = next.region_arm;
                     *work = LoopWork {
                         original: next.clone(),
                         base: next,
@@ -2133,7 +2131,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         arms: [Vec::new(), Vec::new()],
                         completed: 0,
                         continuations: ReadyFragments::new(state),
-                        parent_arm: Some(owner),
+                        parent_arm,
                         active_arm: None,
                     };
                     // 预算由实际回边更新；此处只收敛前沿，避免半轮重复授予预算。
@@ -2141,10 +2139,11 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     largest_round = 0;
                     continue;
                 }
-                if !exit_prefix.is_empty() {
+                if !exit_prefix.is_empty() && !(expanded && region.branch_pc != root_branch) {
                     return Err(reject(&arm, SpeculativeRejectReason::StateEffect));
                 }
                 if eligible
+                    && exit_prefix.is_empty()
                     && exit_spine
                     && region.branch_pc == root_branch
                     && fold_writes
