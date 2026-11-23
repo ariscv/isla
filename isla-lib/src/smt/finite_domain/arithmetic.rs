@@ -203,6 +203,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                             bindings.push(input.anchor.mk_eq(assigned));
                         }
                     }
+                    let replacements: Vec<_> = anchors.iter().copied().zip(values.iter().copied()).collect();
+                    let free_replacements: Vec<_> =
+                        free_anchors.iter().copied().zip(free_values.iter().copied()).collect();
+                    let rewrites = &prefix.index.rewrites;
                     let mut residual = Ast::mk_bool(self.ctx, true);
                     let mut assignments_by_literal = HashMap::new();
                     let mut exact = true;
@@ -211,13 +215,13 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     for (source, original) in
                         facts.iter().map(|(exp, ast)| (Some(*exp), ast)).chain(bindings.iter().map(|ast| (None, ast)))
                     {
-                        let mut fact = if source.is_some() {
-                            original.substitute_many(&anchors, &values)
+                        let (unchanged, truth, mut fact) = if source.is_some() {
+                            rewrites.narrow(&replacements, original, &anchors, &values)
                         } else {
-                            original.substitute_many(&free_anchors, &free_values)
+                            rewrites.narrow(&free_replacements, original, &free_anchors, &free_values)
                         };
-                        reuse_witness &= fact.z3_ast == original.z3_ast;
-                        if fact.structural_bool().is_none() {
+                        reuse_witness &= unchanged;
+                        if truth.is_none() {
                             if let Some(source) = source.filter(|_| !projected.is_empty()) {
                                 let mut changed = false;
                                 let substituted = source
@@ -238,7 +242,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                                 }
                             }
                         }
-                        match fact.structural_bool() {
+                        let (truth, fact) = rewrites.simplified(fact);
+                        match truth {
                             Some(true) => (),
                             Some(false) => {
                                 possible = false;
@@ -278,3 +283,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "arithmetic_reference.rs"]
+mod reference;

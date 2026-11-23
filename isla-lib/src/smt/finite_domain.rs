@@ -4,10 +4,12 @@ use super::*;
 mod arithmetic;
 mod prefix_index;
 mod projection;
+mod rewrites;
 use prefix_index::{BranchCandidates, Candidate, PathConditions, ProjectionCache};
 pub(super) use prefix_index::{PrefixIndex, BUFFERED};
 use projection::{AnchorProjection, ProjectedFact};
 
+#[derive(Clone)]
 #[cfg_attr(test, derive(Debug, PartialEq))]
 pub(crate) enum FiniteDomain {
     Known(Vec<Exp<Sym>>),
@@ -113,11 +115,23 @@ fn masked_slice<B: BV>(
 }
 
 // 只识别能产生有限上界的布尔形式。排除项与其他谓词在代入候选后检查。
-fn bound<B: BV>(exp: &Exp<Sym>, target: &Exp<Sym>, prefix: &PathConditions<'_, B>, negated: bool) -> Bound {
+fn bound<B: BV>(
+    exp: &Exp<Sym>,
+    target: &Exp<Sym>,
+    prefix: &PathConditions<'_, B>,
+    negated: bool,
+    memo: &mut HashMap<(Sym, bool), Bound>,
+) -> Bound {
+    let symbol = if let Exp::Var(sym) = exp { Some(*sym) } else { None };
+    if let Some(cached) = symbol.and_then(|sym| memo.get(&(sym, negated))) {
+        return cached.clone();
+    }
     use Exp::*;
-    let visit = |child, negated| bound(child, target, prefix, negated);
+    #[cfg(test)]
+    BOUND_NODE_VISITS.set(BOUND_NODE_VISITS.get() + 1);
+    let mut visit = |child, negated| bound(child, target, prefix, negated, memo);
     let exp = resolve(exp, prefix);
-    match exp {
+    let result = match exp {
         Eq(lhs, rhs) | Neq(lhs, rhs) if matches!(exp, Eq(..)) != negated => {
             let (lhs, rhs) = (resolve(lhs, prefix), resolve(rhs, prefix));
             let value = if lhs == target {
@@ -131,16 +145,35 @@ fn bound<B: BV>(exp: &Exp<Sym>, target: &Exp<Sym>, prefix: &PathConditions<'_, B
         }
         Not(inner) => visit(inner, !negated),
         And(lhs, rhs) | Or(lhs, rhs) => {
-            let combine = if matches!(exp, And(..)) != negated { intersect } else { union };
-            combine(visit(lhs, negated), visit(rhs, negated))
+            let left = visit(lhs, negated);
+            if matches!(exp, And(..)) != negated {
+                if left.as_ref().is_some_and(Vec::is_empty) {
+                    left
+                } else {
+                    intersect(left, visit(rhs, negated))
+                }
+            } else {
+                left.and_then(|values| union(Some(values), visit(rhs, negated)))
+            }
         }
-        Ite(condition, yes, no) => union(
-            intersect(visit(condition, false), visit(yes, negated)),
-            intersect(visit(condition, true), visit(no, negated)),
-        ),
+        Ite(condition, yes, no) => {
+            let mut arm = |inverted, value| {
+                let guard = visit(condition, inverted);
+                if guard.as_ref().is_some_and(Vec::is_empty) {
+                    guard
+                } else {
+                    intersect(guard, visit(value, negated))
+                }
+            };
+            arm(false, yes).and_then(|values| union(Some(values), arm(true, no)))
+        }
         Bool(value) if *value == negated => Some(Vec::new()),
         _ => None,
+    };
+    if let Some(sym) = symbol {
+        memo.insert((sym, negated), result.clone());
     }
+    result
 }
 
 // 定义为 ITE 的位向量即使没有显式等式断言，两个值臂也可给出上界。
@@ -158,11 +191,9 @@ impl<B: BV> PathConditions<'_, B> {
     fn bounds(&self, subject: &Exp<Sym>) -> Bound {
         #[cfg(test)]
         BOUND_SEARCHES.set(BOUND_SEARCHES.get() + 1);
+        let input = subject;
         let subject = resolve(subject, self);
-        let mut candidates = value_bound(subject, self);
-        for assertion in self.assertions() {
-            candidates = intersect(candidates, bound(assertion, subject, self, false));
-        }
+        let candidates = intersect(value_bound(subject, self), self.assertion_bound(input, subject));
         candidates.or_else(|| match subject {
             Exp::Ite(_, yes, no) => union(self.bounds(yes), self.bounds(no)),
             _ => None,
@@ -171,20 +202,34 @@ impl<B: BV> PathConditions<'_, B> {
 
     fn comparison_subjects<'a>(&'a self, exp: &'a Exp<Sym>, subjects: &mut Vec<&'a Exp<Sym>>) {
         use Exp::*;
-        match resolve(exp, self) {
-            Eq(lhs, rhs) | Neq(lhs, rhs) => {
-                for (symbolic, concrete) in [(lhs, rhs), (rhs, lhs)] {
-                    if constant(resolve(concrete, self)).is_some() && constant(resolve(symbolic, self)).is_none() {
-                        subjects.push(symbolic);
+        // 分支两侧检查同一完整谓词。一个定义通过多个布尔臂到达时，
+        // 同一操作数的候选和判定一致；保留从左向右第一次出现的位置。
+        let mut visited = HashSet::new();
+        let mut symbols = HashSet::new();
+        let mut pending = vec![exp];
+        while let Some(next) = pending.pop() {
+            let node = resolve(next, self);
+            if !visited.insert(std::ptr::from_ref(node)) {
+                continue;
+            }
+            match node {
+                Eq(lhs, rhs) | Neq(lhs, rhs) => {
+                    for (symbolic, concrete) in [(lhs, rhs), (rhs, lhs)] {
+                        if constant(resolve(concrete, self)).is_some()
+                            && constant(resolve(symbolic, self)).is_none()
+                            && !matches!(&**symbolic, Var(sym) if !symbols.insert(*sym))
+                        {
+                            subjects.push(symbolic);
+                        }
                     }
                 }
+                Not(inner) => pending.push(inner),
+                And(lhs, rhs) | Or(lhs, rhs) => {
+                    pending.push(rhs);
+                    pending.push(lhs);
+                }
+                _ => (),
             }
-            Not(inner) => self.comparison_subjects(inner, subjects),
-            And(lhs, rhs) | Or(lhs, rhs) => {
-                self.comparison_subjects(lhs, subjects);
-                self.comparison_subjects(rhs, subjects);
-            }
-            _ => (),
         }
     }
 }
@@ -372,6 +417,18 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     pub(crate) fn finite_domain(&self, sym: Sym) -> FiniteDomain {
         let Some(prefix) = PathConditions::new(self) else { return FiniteDomain::Unknown };
+        let key = (sym, self.has_stashed_model(), self.region_queries_deferred());
+        if let Some(answer) = prefix.index.domains.borrow().get(&key) {
+            return answer.clone();
+        }
+        let answer = self.compute_finite_domain(&prefix, sym);
+        if self.decls.contains_key(&sym) {
+            prefix.index.domains.borrow_mut().insert(key, answer.clone());
+        }
+        answer
+    }
+
+    fn compute_finite_domain(&self, prefix: &PathConditions<'_, B>, sym: Sym) -> FiniteDomain {
         let mut pending = vec![sym];
         let mut seen = HashSet::new();
         let mut best = FiniteDomain::Unknown;
@@ -386,7 +443,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 pending.extend(dependencies);
             }
             let Some(candidates) = prefix.bounds(&source) else { continue };
-            match self.project_finite_values(&prefix, sym, subject, candidates) {
+            match self.project_finite_values(prefix, sym, subject, candidates) {
                 known @ FiniteDomain::Known(_) => return known,
                 bounded @ FiniteDomain::Bounded(_) if matches!(best, FiniteDomain::Unknown) => best = bounded,
                 FiniteDomain::Bounded(mut values) => {
@@ -410,7 +467,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let mut values = Vec::new();
         let mut seen = HashMap::new();
         if self
-            .combined_values(&prefix, &Exp::Var(sym), |mut value, certified| {
+            .combined_values(prefix, &Exp::Var(sym), |mut value, certified| {
                 exact &= certified;
                 let constant = value.finite_bits().expect("有限域表达式必须为位向量常量");
                 if seen.insert(value.z3_ast, value).is_none() {
@@ -556,8 +613,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 continue;
             }
             let (truth, residual) = simplified.entry(key).or_insert_with(|| {
-                let mut residual = asts.get(key);
-                (residual.structural_bool(), asts.keep(residual))
+                let (truth, residual) = prefix.index.rewrites.simplified(asts.get(key));
+                (truth, asts.keep(residual))
             });
             match truth {
                 Some(false) => return FiniteDomain::Known(Vec::new()),
@@ -576,8 +633,11 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             let value = self.translate_exp(&candidate);
             let binding = (!free).then(|| Ast::mk_eq(&anchor, &value));
             let mut rebuilt = HashMap::new();
-            let path_facts =
-                dependent.iter().map(|&key| facts.project_assertion(asts, key, &anchor, &value, &mut rebuilt));
+            let path_facts = dependent.iter().map(|&key| {
+                prefix.index.rewrites.single(anchor.z3_ast, value.z3_ast, key, || {
+                    facts.project_assertion(asts, key, &anchor, &value, &mut rebuilt)
+                })
+            });
             let mut literals = ProjectionLiterals::new();
             let mut can_reuse_witness = self.has_stashed_model();
             for fact in path_facts.chain(binding.into_iter().map(|mut eq| ProjectedFact {
@@ -670,6 +730,7 @@ thread_local! {
     static PROJECT_TRANSLATIONS: Cell<usize> = const { Cell::new(0) };
     static PROJECT_SUBSTITUTIONS: Cell<usize> = const { Cell::new(0) };
     pub(super) static STRUCTURAL_BOOLS: Cell<usize> = const { Cell::new(0) };
+    static BOUND_NODE_VISITS: Cell<usize> = const { Cell::new(0) };
     static BOUND_SEARCHES: Cell<usize> = const { Cell::new(0) };
 }
 

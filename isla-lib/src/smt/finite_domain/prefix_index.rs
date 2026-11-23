@@ -10,9 +10,12 @@ struct Position(usize, usize);
 pub(in crate::smt) struct PrefixIndex<'ctx> {
     symbols: ahash::AHashMap<Sym, Position>,
     rebindings: usize,
+    bounds: RefCell<HashMap<Sym, (usize, Bound)>>,
     assertions: Vec<Position>,
     bool_symbols: Vec<(Position, Sym)>,
     pub(super) projection: RefCell<ProjectionCache>,
+    pub(super) rewrites: rewrites::Rewrites<'ctx>,
+    pub(super) domains: RefCell<HashMap<(Sym, bool, bool), FiniteDomain>>,
     pub(super) asts: ProjectionAsts<'ctx>,
     pub(super) branch: RefCell<Option<BranchCandidates>>,
 }
@@ -44,11 +47,25 @@ enum BranchCheck {
 // 与 ConstBinding 相同，接管 Ast 的引用，由原 Context 释放。
 // 可变容器只存原生句柄，故 Solver 仍可借给生命周期较短的 Model。
 pub(super) struct ProjectionAsts<'ctx> {
-    ctx: &'ctx Context,
+    pub(super) ctx: &'ctx Context,
     refs: RefCell<HashSet<Z3_ast>>,
 }
 
 impl<'ctx> ProjectionAsts<'ctx> {
+    pub(super) fn new(ctx: &'ctx Context) -> Self {
+        Self { ctx, refs: Default::default() }
+    }
+
+    pub(super) fn retain(&self, key: Z3_ast) {
+        if self.refs.borrow_mut().insert(key) {
+            unsafe { Z3_inc_ref(self.ctx.z3_ctx, key) };
+        }
+    }
+
+    pub(super) fn heap_bytes(&self) -> usize {
+        crate::executor::stats::memory_stats::map_bytes::<Z3_ast, ()>(self.refs.borrow().capacity())
+    }
+
     pub(super) fn keep(&self, ast: Ast<'_>) -> Z3_ast {
         assert!(std::ptr::eq(self.ctx, ast.ctx));
         let key = ast.z3_ast;
@@ -100,10 +117,13 @@ impl<'ctx> PrefixIndex<'ctx> {
         Self {
             symbols: Default::default(),
             rebindings: 0,
+            bounds: Default::default(),
             assertions: Vec::new(),
             bool_symbols: Vec::new(),
             projection: RefCell::default(),
-            asts: ProjectionAsts { ctx, refs: RefCell::default() },
+            asts: ProjectionAsts::new(ctx),
+            domains: Default::default(),
+            rewrites: rewrites::Rewrites::new(ctx),
             branch: RefCell::default(),
         }
     }
@@ -120,9 +140,11 @@ impl<'ctx> PrefixIndex<'ctx> {
                 self.invalidate_candidates();
             }
             if boolean {
+                self.domains.get_mut().clear();
                 self.bool_symbols.push((position, sym));
             }
         } else if matches!(event, Event::Smt(Def::Assert(_), ..)) {
+            self.domains.get_mut().clear();
             self.assertions.push(position);
         } else {
             return;
@@ -150,8 +172,16 @@ impl<'ctx> PrefixIndex<'ctx> {
     }
 
     pub(in crate::smt) fn invalidate_candidates(&mut self) {
+        self.bounds.get_mut().clear();
+        self.guards_changed();
+    }
+
+    // bounds 只含已登记的普通断言，活动守卫由 assertion_bound 逐次套用。
+    pub(in crate::smt) fn guards_changed(&mut self) {
         *self.projection.get_mut() = ProjectionCache::default();
         self.asts.clear();
+        self.domains.get_mut().clear();
+        self.rewrites.advance();
         *self.branch.get_mut() = None;
     }
 
@@ -171,6 +201,27 @@ impl<'ctx> PrefixIndex<'ctx> {
                     facts.projection.heap_bytes()
                         + facts.related.capacity() * size_of::<Z3_ast>()
                         + map_bytes::<Z3_ast, BranchCheck>(facts.candidates.capacity())
+                })
+                .sum::<usize>()
+            + map_bytes::<Sym, (usize, Bound)>(self.bounds.borrow().capacity())
+            + self
+                .bounds
+                .borrow()
+                .values()
+                .filter_map(|(_, v)| v.as_ref())
+                .map(|v| v.capacity() * size_of::<Exp<Sym>>() + v.iter().map(exp_heap_bytes).sum::<usize>())
+                .sum::<usize>()
+            + self.rewrites.heap_bytes()
+            + map_bytes::<(Sym, bool, bool), FiniteDomain>(self.domains.borrow().capacity())
+            + self
+                .domains
+                .borrow()
+                .values()
+                .map(|domain| match domain {
+                    FiniteDomain::Known(v) | FiniteDomain::Bounded(v) => {
+                        v.capacity() * size_of::<Exp<Sym>>() + v.iter().map(exp_heap_bytes).sum::<usize>()
+                    }
+                    FiniteDomain::Unknown => 0,
                 })
                 .sum::<usize>()
             + map_bytes::<Sym, Position>(self.symbols.capacity())
@@ -240,6 +291,33 @@ impl<'a, B: BV> PathConditions<'a, B> {
 
     pub(super) fn assertions(&self) -> impl Iterator<Item = &'a Exp<Sym>> + '_ {
         self.index.assertions.iter().rev().map(|position| self.assertion(*position)).chain(self.guards)
+    }
+
+    // 原顺序是最新断言在前、活动臂守卫在后。追加后用新后缀作交集的左操作数，
+    // 保留第一个给出有限集合的断言所规定的候选顺序。守卫每次单独计算。
+    pub(super) fn assertion_bound(&self, input: &Exp<Sym>, subject: &Exp<Sym>) -> Bound {
+        let symbol = match input {
+            Exp::Var(s) if self.index.symbols.contains_key(s) => Some(*s),
+            _ => None,
+        };
+        let count = self.index.assertions.len();
+        let (start, previous) = symbol.and_then(|s| self.index.bounds.borrow().get(&s).cloned()).unwrap_or_default();
+        let mut memo = HashMap::new();
+        let mut total = previous;
+        if start < count {
+            let mut suffix = None;
+            for &position in self.index.assertions[start..].iter().rev() {
+                suffix = intersect(suffix, bound(self.assertion(position), subject, self, false, &mut memo));
+            }
+            total = intersect(suffix, total);
+            if let Some(s) = symbol {
+                self.index.bounds.borrow_mut().insert(s, (count, total.clone()));
+            }
+        }
+        for guard in self.guards {
+            total = intersect(total, bound(guard, subject, self, false, &mut memo));
+        }
+        total
     }
 
     pub(super) fn translate_projection_suffix(&self, solver: &Solver<'_, B>, cache: &mut ProjectionCache) {

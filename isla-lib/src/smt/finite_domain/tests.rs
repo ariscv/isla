@@ -320,7 +320,7 @@ fn projection_reuses_ast_work_across_prefix_growth_and_anchors() {
     let warm = count(&solver, x);
     eprintln!("同一锚点首次／再次（翻译、代入、结构判定） {cold:?}／{warm:?}");
     assert_eq!(cold, (258, 2, 257));
-    assert_eq!(warm, (0, 2, 0));
+    assert_eq!(warm, (0, 0, 0));
     assert_eq!(count(&solver, y), (0, 2, 1));
     let b = solver.declare_const(Ty::Bool, info);
     solver.assert(not(Exp::Var(b)));
@@ -425,4 +425,274 @@ fn projection_reuses_nonliteral_without_keeping_its_residual() {
             }
         }
     }
+}
+
+#[test]
+fn slice_queries_reuse_candidate_facts_across_sibling_guards() {
+    configure_tastic(Tactic::Qfaufbv);
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let info = SourceLoc::unknown();
+    let x = solver.declare_bitvector(8, info);
+    let g = solver.declare_const(Ty::Bool, info);
+    let other = solver.declare_bitvector(8, info);
+    for n in 0..128 {
+        solver.assert(Exp::Or(Box::new(equal(x, n)), Box::new(equal(other, n))));
+    }
+    let candidates: Vec<_> = (0..4).map(|v| bits64(v, 8)).collect();
+    let mut counts = Vec::new();
+    for guard in [Exp::Var(g), not(Exp::Var(g)), equal(x, 2)] {
+        let tx = solver.start_transaction_with_guard(Some(guard));
+        let prefix = PathConditions::new(&solver).unwrap();
+        let expected = solver.reference_projection(&prefix, x, x, candidates.clone());
+        AST_SIMPLIFY_CALLS.set(0);
+        let (actual, sub, _) = projection_counts(|| solver.project_finite_values(&prefix, x, x, candidates.clone()));
+        counts.push((sub, AST_SIMPLIFY_CALLS.get()));
+        assert_eq!(actual, expected);
+        solver.rollback_transaction(tx);
+    }
+    eprintln!("相邻活动臂的全量代入／化简 {counts:?}");
+    assert!(counts[1].1 < 16);
+}
+
+#[test]
+fn slice_queries_bound_shared_boolean_dag_once() {
+    configure_tastic(Tactic::Qfaufbv);
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let info = SourceLoc::unknown();
+    let x = solver.declare_bitvector(8, info);
+    let mut both = solver.define_const(Exp::Or(Box::new(equal(x, 3)), Box::new(equal(x, 1))), info);
+    for _ in 0..10 {
+        both = solver.define_const(Exp::And(Box::new(Exp::Var(both)), Box::new(Exp::Var(both))), info);
+    }
+    solver.assert(Exp::Var(both));
+    let prefix = PathConditions::new(&solver).unwrap();
+    let expected = vec![bits64(3, 8), bits64(1, 8)];
+    BOUND_NODE_VISITS.set(0);
+    assert_eq!(prefix.bounds(&Exp::Var(x)), Some(expected));
+    let visits = BOUND_NODE_VISITS.get();
+    eprintln!("共享子式上界访问 {visits}");
+    assert!(visits <= 16);
+}
+
+#[test]
+fn slice_queries_reuse_exact_prefix_and_refresh_on_assertion() {
+    configure_tastic(Tactic::Qfaufbv);
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let info = SourceLoc::unknown();
+    let x = solver.declare_bitvector(8, info);
+    solver.assert(Exp::Or(Box::new(equal(x, 2)), Box::new(equal(x, 1))));
+    values(&solver, x, &[2, 1]);
+    let (_, sub, _) = projection_counts(|| values(&solver, x, &[2, 1]));
+    let tx = solver.start_transaction();
+    solver.assert(equal(x, 1));
+    values(&solver, x, &[1]);
+    solver.rollback_transaction(tx);
+    values(&solver, x, &[2, 1]);
+    assert_eq!(sub, 0);
+}
+
+#[test]
+fn slice_queries_joint_combinations_reuse_native_rewrites() {
+    configure_tastic(Tactic::Qfaufbv);
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let info = SourceLoc::unknown();
+    let x = solver.declare_bitvector(8, info);
+    let y = solver.declare_bitvector(8, info);
+    let g = solver.declare_const(Ty::Bool, info);
+    for s in [x, y] {
+        solver.assert(Exp::Or(Box::new(equal(s, 2)), Box::new(equal(s, 1))));
+    }
+    for _ in 0..100 {
+        let b = solver.declare_const(Ty::Bool, info);
+        solver.assert(Exp::Var(b));
+    }
+    let sum = Exp::Bvadd(Box::new(Exp::Var(x)), Box::new(Exp::Var(y)));
+    let mut counts = Vec::new();
+    for guard in [Exp::Var(g), not(Exp::Var(g)), equal(x, 1)] {
+        let tx = solver.start_transaction_with_guard(Some(guard));
+        let prefix = PathConditions::new(&solver).unwrap();
+        let collect = |v: &mut Vec<_>, mut a: Ast, certified| {
+            v.push((a.finite_bits().unwrap(), certified));
+            true
+        };
+        let mut expected = Vec::new();
+        solver.reference_combined_values(&prefix, &sum, |a, b| collect(&mut expected, a, b)).unwrap();
+        let mut actual = Vec::new();
+        AST_SIMPLIFY_CALLS.set(0);
+        let (_, sub, _) =
+            projection_counts(|| solver.combined_values(&prefix, &sum, |a, b| collect(&mut actual, a, b)).unwrap());
+        counts.push((sub, AST_SIMPLIFY_CALLS.get()));
+        assert_eq!(actual, expected);
+        solver.rollback_transaction(tx);
+    }
+    eprintln!("联合切片相邻臂的全量代入／化简 {counts:?}");
+    assert!(counts[1].0 <= 12 && counts[1].1 <= 32);
+}
+
+#[test]
+fn slice_queries_append_bounds_in_latest_assertion_order() {
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let info = SourceLoc::unknown();
+    let x = solver.declare_bitvector(8, info);
+    for _ in 0..128 {
+        let b = solver.declare_const(Ty::Bool, info);
+        solver.assert(Exp::Var(b));
+    }
+    let or = |i, j| Exp::Or(Box::new(equal(x, i)), Box::new(equal(x, j)));
+    solver.assert(or(1, 2));
+    let bounds = |s: &Solver<B64>| PathConditions::new(s).unwrap().bounds(&Exp::Var(x)).unwrap();
+    assert_eq!(bounds(&solver), [bits64(1, 8), bits64(2, 8)]);
+    solver.assert(or(2, 1));
+    BOUND_NODE_VISITS.set(0);
+    assert_eq!(bounds(&solver), [bits64(2, 8), bits64(1, 8)]);
+    let visits = BOUND_NODE_VISITS.get();
+    eprintln!("追加约束后的上界访问 {visits}");
+    assert!(visits <= 3);
+}
+
+#[test]
+fn slice_queries_bound_guarded_disjunction_short_circuits() {
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let info = SourceLoc::unknown();
+    let x = solver.declare_bitvector(8, info);
+    let g = solver.declare_const(Ty::Bool, info);
+    let mut body = equal(x, 1);
+    for i in 2..60 {
+        body = Exp::Or(Box::new(body), Box::new(equal(x, i)));
+    }
+    let prefix = PathConditions::new(&solver).unwrap();
+    let target = Exp::Var(x);
+    let or = Exp::Or(Box::new(not(Exp::Var(g))), Box::new(body.clone()));
+    let and = Exp::And(Box::new(Exp::Bool(false)), Box::new(body.clone()));
+    let ite = Exp::Ite(Box::new(Exp::Var(g)), Box::new(Exp::Var(g)), Box::new(body));
+    for (exp, negated) in [(or.clone(), false), (not(or), true), (and, false), (ite, false)] {
+        let expected = reference_bound(&exp, &target, &prefix, negated);
+        BOUND_NODE_VISITS.set(0);
+        assert_eq!(bound(&exp, &target, &prefix, negated, &mut HashMap::new()), expected);
+        let visits = BOUND_NODE_VISITS.get();
+        eprintln!("守卫子树访问 {visits}");
+        assert!(visits <= 5);
+    }
+}
+
+#[test]
+fn slice_queries_bound_retains_only_stable_assertions_across_guards() {
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let info = SourceLoc::unknown();
+    let x = solver.declare_bitvector(8, info);
+    for _ in 0..100 {
+        let b = solver.declare_const(Ty::Bool, info);
+        solver.assert(Exp::Var(b));
+    }
+    solver.assert(Exp::Or(Box::new(equal(x, 1)), Box::new(equal(x, 2))));
+    let bounds = |s: &Solver<B64>| {
+        let prefix = PathConditions::new(s).unwrap();
+        let target = Exp::Var(x);
+        let expected =
+            prefix.assertions().fold(None, |acc, e| intersect(acc, reference_bound(e, &target, &prefix, false)));
+        BOUND_NODE_VISITS.set(0);
+        let actual = prefix.bounds(&target);
+        assert_eq!(actual, expected);
+        BOUND_NODE_VISITS.get()
+    };
+    bounds(&solver);
+    let tx = solver.start_transaction_with_guard(Some(equal(x, 2)));
+    let visits = bounds(&solver);
+    eprintln!("只换守卫后的上界访问 {visits}");
+    solver.assert(equal(x, 1));
+    bounds(&solver);
+    solver.rollback_transaction(tx);
+    bounds(&solver);
+    let tx = solver.start_transaction_with_guard(Some(equal(x, 1)));
+    bounds(&solver);
+    solver.rollback_transaction(tx);
+    assert!(visits <= 2);
+}
+
+fn reference_bound<B: BV>(exp: &Exp<Sym>, target: &Exp<Sym>, prefix: &PathConditions<'_, B>, negated: bool) -> Bound {
+    use Exp::*;
+    let visit = |child, negated| reference_bound(child, target, prefix, negated);
+    let exp = resolve(exp, prefix);
+    match exp {
+        Eq(lhs, rhs) | Neq(lhs, rhs) if matches!(exp, Eq(..)) != negated => {
+            let (lhs, rhs) = (resolve(lhs, prefix), resolve(rhs, prefix));
+            let value = if lhs == target {
+                constant(rhs)
+            } else if rhs == target {
+                constant(lhs)
+            } else {
+                masked_slice(target, lhs, rhs, prefix).or_else(|| masked_slice(target, rhs, lhs, prefix))
+            };
+            value.map(|value| vec![value])
+        }
+        Not(inner) => visit(inner, !negated),
+        And(lhs, rhs) | Or(lhs, rhs) => {
+            let combine = if matches!(exp, And(..)) != negated { intersect } else { union };
+            combine(visit(lhs, negated), visit(rhs, negated))
+        }
+        Ite(condition, yes, no) => union(
+            intersect(visit(condition, false), visit(yes, negated)),
+            intersect(visit(condition, true), visit(no, negated)),
+        ),
+        Bool(value) if *value == negated => Some(Vec::new()),
+        _ => None,
+    }
+}
+
+#[test]
+fn slice_queries_mixed_single_and_joint_keep_the_previous_joint_results() {
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let info = SourceLoc::unknown();
+    let x = solver.declare_bitvector(8, info);
+    let y = solver.declare_bitvector(8, info);
+    let g = solver.declare_const(Ty::Bool, info);
+    for s in [x, y] {
+        solver.assert(Exp::Or(Box::new(equal(s, 1)), Box::new(equal(s, 2))));
+    }
+    for _ in 0..150 {
+        let b = solver.declare_const(Ty::Bool, info);
+        solver.assert(Exp::Var(b));
+    }
+    let sum = Exp::Bvadd(Box::new(Exp::Var(x)), Box::new(Exp::Var(y)));
+    let mut counts = Vec::new();
+    for joint in [true, false, false, true] {
+        let tx = solver.start_transaction_with_guard(Some(Exp::Var(g)));
+        let prefix = PathConditions::new(&solver).unwrap();
+        if joint {
+            let collect = |v: &mut Vec<_>, mut a: Ast, certified| {
+                v.push((a.finite_bits().unwrap(), certified));
+                true
+            };
+            let mut expected = Vec::new();
+            solver.reference_combined_values(&prefix, &sum, |a, b| collect(&mut expected, a, b)).unwrap();
+            AST_SIMPLIFY_CALLS.set(0);
+            let mut actual = Vec::new();
+            let (_, sub, _) =
+                projection_counts(|| solver.combined_values(&prefix, &sum, |a, b| collect(&mut actual, a, b)).unwrap());
+            counts.push((sub, AST_SIMPLIFY_CALLS.get()));
+            assert_eq!(actual, expected);
+        } else {
+            let candidates = vec![bits64(1, 8), bits64(2, 8)];
+            let expected = solver.reference_projection(&prefix, x, x, candidates.clone());
+            AST_SIMPLIFY_CALLS.set(0);
+            let (actual, sub, _) = projection_counts(|| solver.project_finite_values(&prefix, x, x, candidates));
+            assert_eq!(actual, expected);
+            counts.push((sub, AST_SIMPLIFY_CALLS.get()));
+        }
+        solver.rollback_transaction(tx);
+    }
+    eprintln!("交替查询各轮的全量代入／化简 {counts:?}");
+    assert!(counts[2].1 < 10 && counts[3].0 < 10 && counts[3].1 < 20);
 }

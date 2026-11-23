@@ -5,7 +5,7 @@ impl<B: BV> Solver<'_, B> {
     fn reference_branch_bool(&self, exp: &Exp<Sym>) -> Option<bool> {
         let prefix = PathConditions::new(self)?;
         let mut subjects = Vec::new();
-        prefix.comparison_subjects(exp, &mut subjects);
+        prefix.reference_subjects(exp, &mut subjects);
         let predicate = self.translate_exp(exp);
         if subjects.is_empty() {
             return None;
@@ -177,4 +177,53 @@ fn branch_prefix_matches_reference_across_guards_rebind_and_replay() {
         solver.commit_transaction();
     }
     compare(&s, &r, eq(x, 1), None);
+}
+
+impl<B: BV> PathConditions<'_, B> {
+    fn reference_subjects<'a>(&'a self, exp: &'a Exp<Sym>, subjects: &mut Vec<&'a Exp<Sym>>) {
+        use Exp::*;
+        match resolve(exp, self) {
+            Eq(lhs, rhs) | Neq(lhs, rhs) => {
+                for (symbolic, concrete) in [(lhs, rhs), (rhs, lhs)] {
+                    if constant(resolve(concrete, self)).is_some() && constant(resolve(symbolic, self)).is_none() {
+                        subjects.push(symbolic);
+                    }
+                }
+            }
+            Not(inner) => self.reference_subjects(inner, subjects),
+            And(lhs, rhs) | Or(lhs, rhs) => {
+                self.reference_subjects(lhs, subjects);
+                self.reference_subjects(rhs, subjects);
+            }
+            _ => (),
+        }
+    }
+}
+
+#[test]
+fn finite_domain_bool_visits_each_shared_comparison_subject_once() {
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let info = SourceLoc::unknown();
+    let x = solver.declare_bitvector(8, info);
+    let y = solver.declare_bitvector(8, info);
+    solver.assert(allowed(x, 2));
+    solver.assert(allowed(y, 2));
+    let mut shared = solver.define_const(Exp::And(Box::new(eq(x, 0)), Box::new(not(eq(y, 1)))), info);
+    for _ in 0..7 {
+        shared = solver.define_const(Exp::Or(Box::new(Exp::Var(shared)), Box::new(Exp::Var(shared))), info);
+    }
+    let reference = Solver::from_checkpoint(&ctx, checkpoint(&mut solver));
+    let p = Exp::Var(shared);
+    let old = reference.reference_branch_bool(&p);
+    assert_eq!(old, None);
+    AST_SIMPLIFY_CALLS.set(0);
+    BOUND_SEARCHES.set(0);
+    let (new, counts) = measured(|| solver.finite_domain_bool(&p));
+    assert_eq!(old, new);
+    eprintln!("共享比较的上界查询／代入／化简 {}/{}/{}", BOUND_SEARCHES.get(), counts[1], AST_SIMPLIFY_CALLS.get());
+    assert_eq!(BOUND_SEARCHES.get(), 2);
+    assert!(counts[1] < 12 && AST_SIMPLIFY_CALLS.get() < 12);
+    assert_eq!(solver.finite_domain_bool(&not(p.clone())), reference.reference_branch_bool(&not(p)));
 }

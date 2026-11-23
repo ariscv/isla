@@ -7,7 +7,6 @@ pub(super) struct AnchorProjection {
     dependencies: HashMap<Z3_ast, bool>,
     // 仅持久保留通向锚点的节点，均由已登记的断言或臂条件保活。
     affected: HashSet<Z3_ast>,
-    projections: HashMap<(Z3_ast, Z3_ast), ProjectedFact>,
 }
 
 #[derive(Clone, Copy)]
@@ -78,10 +77,6 @@ impl AnchorProjection {
         value: &Ast<'ctx>,
         rebuilt: &mut HashMap<Z3_ast, (Ast<'ctx>, Option<bool>)>,
     ) -> ProjectedFact {
-        let key = (root, value.z3_ast);
-        if let Some(&fact) = self.projections.get(&key) {
-            return fact;
-        }
         let (mut residual, folded) = if value.z3_ast == anchor.z3_ast {
             (asts.get(root), None)
         } else {
@@ -92,10 +87,7 @@ impl AnchorProjection {
         // DeclareConst 的布尔字面量只可能是零元应用或其否定。复杂残余
         // 只记“非字面量”，缓存不保活其表达式。字面量仍在每次调用按当前声明查找。
         let literal = (truth.is_none() && is_literal_shape(&residual)).then(|| asts.keep(residual));
-        let fact = ProjectedFact { truth, literal, unchanged };
-        asts.keep(value.clone());
-        self.projections.insert(key, fact);
-        fact
+        ProjectedFact { truth, literal, unchanged }
     }
 
     // 同一候选的断言共用重建的子式。复杂残余继续使用精确的原始结构。
@@ -143,9 +135,7 @@ impl AnchorProjection {
 
     pub(super) fn heap_bytes(&self) -> usize {
         use crate::executor::stats::memory_stats::map_bytes;
-        map_bytes::<Z3_ast, bool>(self.dependencies.capacity())
-            + map_bytes::<Z3_ast, ()>(self.affected.capacity())
-            + map_bytes::<(Z3_ast, Z3_ast), ProjectedFact>(self.projections.capacity())
+        map_bytes::<Z3_ast, bool>(self.dependencies.capacity()) + map_bytes::<Z3_ast, ()>(self.affected.capacity())
     }
 }
 

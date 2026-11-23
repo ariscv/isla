@@ -251,7 +251,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             self.transaction_condition_scopes.push(if lazy { Some(condition) } else { None });
             self.transaction_conditions.push(self.savepoints.last().unwrap().guard.clone().unwrap());
             if let Some(prefix) = &mut self.finite_prefix {
-                prefix.invalidate_candidates();
+                prefix.guards_changed();
             }
         }
         token
@@ -317,7 +317,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
         restore_path_smt_stats(savepoint.smt_stats);
         if let Some(prefix) = &mut self.finite_prefix {
-            prefix.invalidate_candidates();
+            prefix.guards_changed();
             prefix.remove_suffix(BUFFERED, &self.transaction_events, savepoint.events_len);
         }
         self.invalidate_error_snapshot(savepoint.events_len);
@@ -378,7 +378,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.transaction_condition_scopes.push(deferred_ast);
         self.transaction_conditions.push(condition.clone());
         if let Some(prefix) = &mut self.finite_prefix {
-            prefix.invalidate_candidates();
+            prefix.guards_changed();
         }
         let depth = self.transaction_depth();
         let events_len = self.transaction_events.len();
