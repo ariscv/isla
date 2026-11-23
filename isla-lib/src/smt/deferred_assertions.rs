@@ -320,6 +320,7 @@ impl<B: BV> Solver<'_, B> {
             head: definitions,
             event_guards: Vec::new(),
             head_prefix: None,
+            projected: None,
             tail: state.entry.trace.clone(),
         }));
         let point = Checkpoint { num: state.entry.num + 1, next_var: self.next_var, trace, cycles: 0 };

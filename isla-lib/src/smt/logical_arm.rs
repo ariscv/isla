@@ -170,6 +170,9 @@ impl<B: BV> Solver<'_, B> {
         assert!(removed_cycles <= self.cycles, "撤销的周期不能超过当前计数");
         self.cycles -= removed_cycles;
         let first_removed = remove.iter().position(|drop| *drop);
+        if let Some(start) = first_removed {
+            self.invalidate_error_snapshot(start);
+        }
         if let (Some(prefix), Some(start)) = (&mut self.finite_prefix, first_removed) {
             prefix.remove_suffix(finite_domain::BUFFERED, &self.transaction_events, start);
         }

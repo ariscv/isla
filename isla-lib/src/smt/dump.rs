@@ -91,6 +91,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             head,
             event_guards: self.trace.event_guards.clone(),
             head_prefix: None,
+            projected: None,
             tail: self.trace.tail.clone(),
         }));
         Checkpoint { num: self.trace.checkpoints + 1, next_var: self.next_var, trace, cycles: self.cycles }

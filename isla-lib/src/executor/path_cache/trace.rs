@@ -93,8 +93,8 @@ impl<B: BV> TracePlan<B> {
         for (key, segment, source) in pending.into_iter().rev() {
             let id = self.segments.len() as u64;
             let depth = segment.path_cache_parts().0 as u64;
-            let (events, prefix) = segment.path_cache_head();
-            let event_count = (events.len() + prefix.map_or(0, |prefix| prefix.events.len())) as u64;
+            let (local_len, _, prefix) = segment.path_cache_head();
+            let event_count = (local_len + prefix.map_or(0, |prefix| prefix.events.len())) as u64;
             let prefix_owner =
                 prefix.map(|prefix| *self.prefix_owners.entry(Arc::as_ptr(prefix) as usize).or_insert(id));
             self.segments.push(PlannedSegment { source, parent, depth, event_count, prefix_owner });
@@ -107,7 +107,7 @@ impl<B: BV> TracePlan<B> {
     pub fn segment(&self, index: usize) -> LinkedSegment<B> {
         let segment = &self.segments[index];
         let id = index as u64;
-        let (events, prefix) = segment.source.as_ref().as_ref().unwrap().path_cache_head();
+        let (_, events, prefix) = segment.source.as_ref().as_ref().unwrap().path_cache_head();
         let head_prefix = segment.prefix_owner.map(|owner| {
             if owner == id {
                 HeadPrefix::Define(prefix.unwrap().events.iter().cloned().map(Into::into).collect())
@@ -121,7 +121,7 @@ impl<B: BV> TracePlan<B> {
             checkpoints: segment.depth,
             event_count: segment.event_count,
             head_prefix,
-            events: events.iter().cloned().map(Into::into).collect(),
+            events: events.cloned().map(Into::into).collect(),
         }
     }
 

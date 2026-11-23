@@ -51,6 +51,7 @@ pub(super) enum DeclarationUndo<'ctx> {
 pub(super) struct SolverSavepoint<'ctx, B> {
     token: SolverTransaction,
     arm_error_prefix: OnceCell<Arc<TraceHead<B>>>,
+    arm_error_blocks: RefCell<error_snapshot::SnapshotBlocks<B>>,
     pub(super) events_len: usize,
     // 只表示不支持的操作；新层继承父层状态，普通断言不会置位。
     pub(super) invalid: bool,
@@ -198,6 +199,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             self.savepoints.push(SolverSavepoint {
                 token,
                 arm_error_prefix: OnceCell::new(),
+                arm_error_blocks: RefCell::default(),
                 events_len: self.transaction_events.len(),
                 invalid: self.transaction_invalid(),
                 declaration_undo_len: self.declaration_undo.len(),
@@ -318,6 +320,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             prefix.invalidate_candidates();
             prefix.remove_suffix(BUFFERED, &self.transaction_events, savepoint.events_len);
         }
+        self.invalidate_error_snapshot(savepoint.events_len);
         // 只保留本层的全局枚举定义；内层回滚也不能提前发布到迹。
         let enums: Vec<_> = self
             .transaction_events
@@ -531,25 +534,32 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     fn project_logical_arm(&self, arm: LogicalArm) -> RegionGroupEffects<B> {
+        let mut events = Vec::new();
+        let cycles = self.visit_logical_arm(arm, |_, event, guard| events.push((guard.cloned(), event.clone())));
+        RegionGroupEffects { events, cycles }
+    }
+
+    fn visit_logical_arm(&self, arm: LogicalArm, mut visit: impl FnMut(usize, &Event<B>, Option<&Exp<Sym>>)) -> i128 {
         assert_eq!(self.transaction_events.len(), self.transaction_event_guards.len());
         let mut cycles = self.savepoints.first().expect("投影必须处于区域事务中").cycles;
         let mut reads = self.project_register_reads(Some(arm));
-        let events = self
+        for (index, ((event, guard), (selected, cycle, read))) in self
             .transaction_events
             .iter()
             .zip(&self.transaction_event_guards)
             .zip(self.logical_arms.group_events(Some(arm)))
             .enumerate()
-            .filter_map(|(index, ((event, guard), (selected, cycle, read)))| {
-                cycles += i128::from(selected && cycle);
-                if read.is_some() {
-                    return reads.remove(&index).map(|guard| (guard, event.clone()));
+        {
+            cycles += i128::from(selected && cycle);
+            if read.is_some() {
+                if let Some(condition) = reads.remove(&index) {
+                    visit(index, event, condition.as_ref());
                 }
-                // 定义和受保护的断言仍可能被本臂引用。
-                (selected || matches!(event, Event::Smt(..))).then(|| (guard.clone(), event.clone()))
-            })
-            .collect();
-        RegionGroupEffects { events, cycles }
+            } else if selected || matches!(event, Event::Smt(..)) {
+                visit(index, event, guard.as_ref());
+            }
+        }
+        cycles
     }
 
     pub(crate) fn add_region_register_read(&mut self, event: Event<B>, occurrence: usize) {
@@ -675,10 +685,15 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         projected
     }
 
+    pub(super) fn invalidate_error_snapshot(&mut self, start: usize) {
+        if let Some(root) = self.savepoints.first_mut() {
+            root.arm_error_blocks.get_mut().truncate(start);
+        }
+    }
+
     /// 在排除正常域之前，冻结当前臂的前缀和完整到达条件。
     pub(crate) fn arm_error_snapshot(&self, arm: LogicalArm) -> (Checkpoint<B>, Vec<(usize, Exp<Sym>)>) {
         assert_eq!(self.current_logical_arm(), Some(arm));
-        let effects = self.project_logical_arm(arm);
         let root = self.savepoints.first().expect("错误叶必须处于根保存点内");
         let prefix = root.arm_error_prefix.get_or_init(|| {
             Arc::new(TraceHead {
@@ -691,25 +706,34 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     .count(),
             })
         });
+        let mut selected = vec![false; self.transaction_events.len()];
+        let mut event_guards = Vec::new();
+        let mut guards = Vec::new();
+        let mut offset = 0;
+        let mut memory_index = prefix.memory_events_before_arm;
+        let cycles = self.visit_logical_arm(arm, |index, event, guard| {
+            selected[index] = true;
+            let memory = event.is_memory_read_or_write();
+            if let Some(guard) = guard {
+                if memory || (TRACE_EVENT_GUARDS.get().is_some() && matches!(event, Event::ReadReg(..))) {
+                    event_guards.push((offset, guard.clone()));
+                }
+                if memory {
+                    guards.push((memory_index, guard.clone()));
+                }
+            }
+            memory_index += usize::from(memory);
+            offset += 1;
+        });
+        let projected = root.arm_error_blocks.borrow_mut().project(&self.transaction_events, &selected);
         let mut trace = Trace {
             checkpoints: self.trace.checkpoints,
-            head: Vec::with_capacity(effects.events.len() + self.transaction_conditions.len()),
-            event_guards: Vec::new(),
+            head: Vec::with_capacity(self.transaction_conditions.len()),
+            event_guards,
             head_prefix: Some(prefix.clone()),
+            projected,
             tail: self.trace.tail.clone(),
         };
-        trace.record_event_guards(0, &effects.events);
-        let mut index = prefix.memory_events_before_arm;
-        let mut guards = Vec::new();
-        for (guard, event) in effects.events {
-            if event.is_memory_read_or_write() {
-                if let Some(guard) = guard {
-                    guards.push((index, guard));
-                }
-                index += 1;
-            }
-            trace.head.push(event);
-        }
         trace.head.extend(
             self.transaction_conditions
                 .iter()
@@ -717,7 +741,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 .map(|guard| Event::Smt(Def::Assert(guard), DefAttrs::default(), SourceLoc::unknown())),
         );
         let mut point = trace.checkpoint(self.next_var);
-        point.cycles = effects.cycles;
+        point.cycles = cycles;
         (point, guards)
     }
 
@@ -775,6 +799,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     fn guard_transaction_events(&mut self, start: usize, guard: &Exp<Sym>) {
+        self.invalidate_error_snapshot(start);
         if let Some(prefix) = &mut self.finite_prefix {
             prefix.invalidate_candidates();
         }

@@ -1001,6 +1001,98 @@ fn arm_error_snapshot_fixture() -> (Checkpoint<B64>, Checkpoint<B64>, Sym) {
 }
 
 #[test]
+fn arm_error_snapshots_share_growing_transaction_prefix() {
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    const M: usize = 257;
+    let mut counts = Vec::new();
+    for n in [4, 16, 64] {
+        let mut solver = Solver::<B64>::new(&ctx);
+        let root = solver.start_transaction();
+        let arm = solver.new_logical_arm(None);
+        let points = solver.with_logical_arm(arm, |solver| {
+            for i in 0..M {
+                solver.add_event(Event::Instr(Val::I64(i as i64)));
+            }
+            (0..n)
+                .map(|i| {
+                    solver.add_event(Event::Instr(Val::I64((M + i) as i64)));
+                    solver.arm_error_snapshot(arm).0
+                })
+                .collect::<Vec<_>>()
+        });
+        solver.rollback_transaction(root);
+        let mut unique = std::collections::HashSet::new();
+        for (i, point) in points.iter().enumerate() {
+            let trace = point.trace().as_ref().unwrap();
+            let events = trace.to_vec();
+            assert_eq!(events.len(), M + i + 1);
+            for (j, event) in events.into_iter().rev().enumerate() {
+                assert!(matches!(event, Event::Instr(Val::I64(v)) if *v == j as i64));
+                unique.insert(event as *const Event<B64>);
+            }
+        }
+        counts.push(unique.len());
+    }
+    assert_eq!(counts, [M + 4, M + 16, M + 64], "每个逻辑位置的事件在所有存活叶里只冻结一次");
+}
+
+#[test]
+fn arm_error_snapshots_freeze_rewritten_and_reused_slots() {
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let loc = SourceLoc::unknown();
+    let mut solver = Solver::<B64>::new(&ctx);
+    let flag = solver.declare_const(Ty::Bool, loc);
+    let root = solver.start_transaction();
+    let parent = solver.new_logical_arm(None);
+    let first = solver.new_logical_arm(Some(parent));
+    let second = solver.new_logical_arm(Some(parent));
+    solver.with_logical_arm(parent, |s| s.add_event(Event::Instr(Val::I64(0))));
+    let inner = solver.start_transaction();
+    let before = solver.with_logical_arm(first, |s| {
+        s.add_event(Event::Instr(Val::I64(1)));
+        s.with_transaction_condition(&Var(flag), |s| {
+            s.assert(Not(Box::new(Var(flag))));
+            s.arm_error_snapshot(first).0
+        })
+    });
+    let guarded = solver.with_logical_arm(first, |s| s.arm_error_snapshot(first).0);
+    solver.rollback_transaction(inner);
+    let value = solver.declare_const(Ty::BitVec(8), loc);
+    let after = solver.with_logical_arm(second, |s| {
+        s.add_event(Event::Instr(Val::I64(2)));
+        s.arm_error_snapshot(second).0
+    });
+    solver.mark_bitvector(value);
+    let tagged = solver.with_logical_arm(second, |s| s.arm_error_snapshot(second).0);
+    solver.rollback_transaction(root);
+    let labels = |point: &Checkpoint<B64>| {
+        point
+            .trace()
+            .as_ref()
+            .unwrap()
+            .head_events()
+            .filter_map(|e| if let Event::Instr(Val::I64(v)) = e { Some(*v) } else { None })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        [labels(&before), labels(&guarded), labels(&after), labels(&tagged)],
+        [vec![0, 1], vec![0, 1], vec![0, 2], vec![0, 2]]
+    );
+    assert_eq!(Solver::from_checkpoint(&ctx, before).check_sat(loc), Unsat);
+    let mut guarded = Solver::from_checkpoint(&ctx, guarded);
+    assert_eq!(guarded.check_sat_with(&Var(flag), loc), Unsat);
+    assert_eq!(guarded.check_sat_with(&Not(Box::new(Var(flag))), loc), Sat);
+    let mut replay = Solver::from_checkpoint(&ctx, after.clone());
+    assert!(!replay.is_sail_bitvector(value));
+    replay.mark_bitvector(value);
+    assert!(Solver::from_checkpoint(&ctx, checkpoint(&mut replay)).is_sail_bitvector(value));
+    assert!(!Solver::from_checkpoint(&ctx, after).is_sail_bitvector(value));
+    assert!(Solver::from_checkpoint(&ctx, tagged).is_sail_bitvector(value));
+}
+
+#[test]
 fn arm_error_snapshots_share_published_events() {
     let (left, right, _) = arm_error_snapshot_fixture();
     let read = |point: &Checkpoint<B64>| {
