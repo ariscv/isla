@@ -168,7 +168,12 @@ pub(super) fn check_symmetric_top_merge(mut limits: ExecutionLimits) {
     super::loop_segment_tests::equivalent_scalar_paths(&plain, &merged, 3);
     assert_eq!(plain.len(), 8, "四路中的字符串分支都须可达");
     if limited {
-        assert!(shared.execution_stats.merge_json()["failure_reasons"]["fragment_limit"].as_u64().unwrap_or(0) > 0);
+        assert!(
+            shared.execution_stats.merge_json()["failure_reasons"]["SpeculativeRejectReason::FragmentLimit"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0
+        );
         assert!(merged.len() > 1, "超限不能截断或无视普通分叉");
         return;
     }

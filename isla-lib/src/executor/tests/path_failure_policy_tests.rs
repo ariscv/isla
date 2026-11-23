@@ -36,9 +36,15 @@ fn unknown_z3_panics_for_one_or_both_branch_sides() {
                 );
             });
         });
-        for detail in
-            ["pc=1", "branch.sail:7", "branch_feasibility", "reason=unknown_z3", "elapsed=", "limit=", "path_depth="]
-        {
+        for detail in [
+            "pc=1",
+            "branch.sail:7",
+            "branch_feasibility",
+            "reason=SpeculativeRejectReason::UnknownZ3",
+            "elapsed=",
+            "limit=",
+            "path_depth=",
+        ] {
             assert!(message.contains(detail), "{message}");
         }
     }
@@ -67,9 +73,15 @@ fn path_timeout_panics_before_the_next_instruction() {
                 },
             );
         });
-        for detail in
-            ["reason=path_timeout", "pc=0", "timeout.sail:5", "path_execution", "elapsed=", "limit=", "path_depth=0"]
-        {
+        for detail in [
+            "reason=SpeculativeRejectReason::PathTimeout",
+            "pc=0",
+            "timeout.sail:5",
+            "path_execution",
+            "elapsed=",
+            "limit=",
+            "path_depth=0",
+        ] {
             assert!(message.contains(detail), "{message}");
         }
     }

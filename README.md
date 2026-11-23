@@ -757,7 +757,7 @@ isarch 在执行前检查正常／压缩编码映射。只有当前配置、初�
 
 探索路径遇到 Z3 未判定、超时或资源耗尽时缺省立即 panic，isarch 返回非零。诊断列出 IR 函数、PC、Sail 位置、查询用途、耗时、限额和路径深度。可以用 `[execution_limits.solver] on_unknown = "dead"` 或 `--solver-on-unknown=dead` 显式丢弃受影响的路径并继续。`error` 已删除，原配置请改用 `panic`。
 
-逐路径 `--timeout` 缺省也在最终路径到限时 panic。需要保留旧的到限记录并继续探索时，设置 `[execution_limits] on_path_timeout = "dead"` 或 `--on-path-timeout=dead`。区域尝试到限或整体查询无法判定时，执行器撤销推演，让普通分叉重新判定。区域拒绝分别记录有限域推导不足、模式限制、路径超时，以及 `unknown_z3`、`z3_timeout`、`z3_resource_exhausted` 三类 Z3 查询结果。嵌套区域可按原因保留外层两个片段，例如 `--partial-commit-z3-resource-exhausted=true` 仅处理 Z3 资源耗尽。[配置示例](specs/isarch-cli.md#探索路径的限时与求解失败)
+逐路径 `--timeout` 缺省也在最终路径到限时 panic。需要保留旧的到限记录并继续探索时，设置 `[execution_limits] on_path_timeout = "dead"` 或 `--on-path-timeout=dead`。区域尝试到限或整体查询无法判定时，执行器撤销推演，让普通分叉重新判定。区域拒绝分别记录有限域推导不足、模式限制、路径超时，以及 `SpeculativeRejectReason::UnknownZ3`、`SpeculativeRejectReason::Z3Timeout`、`SpeculativeRejectReason::Z3ResourceExhausted` 三类 Z3 查询结果。嵌套区域可按原因保留外层两个片段，例如 `--partial-commit-z3-resource-exhausted=true` 仅处理 Z3 资源耗尽。[配置示例](specs/isarch-cli.md#探索路径的限时与求解失败)
 
 显式丢弃真实求解失败的路径时，isarch 收尾报告首个 Sail 位置和用途，返回 **66**，在运行摘要和路径缓存 manifest 写入 `valid=false`、`invalid_reasons` 及丢弃记录。judge、`--check-samples` 和 fuzz 拒绝加载该缓存。程序外限、信号、资源失败及样本验收查询沿用各自处理。
 
@@ -823,11 +823,11 @@ witness_eval = true
 
 Jump 的条件恒值折叠默认开启，可用 `--prune-constant-branches=false` 或在 `[execution_limits.path_merge]` 设置 `prune_constant_branches = false` 关闭。求值后，执行器先用表达式结构和已启用的有限域前缀识别恒真／恒假，再作分支限制决策。能判定时只执行可达侧，未知时沿用原规则。不查询 SMT、不取模型，也不重复求值 IR；普通执行、defer、跳过分支检查及无 SMT 均适用。启用执行统计时，`folded_true_conditions`／`folded_false_conditions` 记录包括回滚尝试在内的折叠次数。
 
-区域合并默认在实际到达时检查普通被调函数的传递 `StateEffect`。直接原语仍在执行前检查，`CalleeStateWrite` 和未实现 extern 仍拒绝。可用 `--defer-call-effect-checks=false` 或在 `[execution_limits.path_merge]` 设置 `defer_call_effect_checks = false` 关闭。
+区域合并默认在实际到达时检查普通被调函数的传递 `SpeculativeRejectReason::StateEffect`。直接原语仍在执行前检查，`SpeculativeRejectReason::CalleeStateWrite` 和未实现 extern 仍拒绝。可用 `--defer-call-effect-checks=false` 或在 `[execution_limits.path_merge]` 设置 `defer_call_effect_checks = false` 关闭。
 
 延迟 Z3 作用域使用 `lazy_z3_scope = true` 或 `--region-lazy-z3-scope=true`，默认关闭；只有同时启用 `defer_exit_check` 且正在 defer 推演内才生效，未启用 defer 时静默无效。它延迟临时条件的 Z3 push/pop，实际查询仍使用完整条件，不再读取 `ISLA_REGION_LAZY_Z3_SCOPE`。开启后可能占用更多内存：历史 STORE 两分钟探针峰值约 10.4 GiB（关闭侧约 8.9 GiB），PMP=2 的有限 judge 曾达约 68.8 GiB，62 GiB 上限不足；这些是特定窗口的测量，不是内存上界。
 
-区域嵌套和片段数均缺省不限，显式 `-1` 与省略等价。有限深度对照可用 `[execution_limits.path_merge] max_merge_depth = 16` 或 `--region-max-merge-depth=16`。`--merge-diagnostics=summary|detail` 输出每次区域尝试的累计深度分布与最大深度。保存点深度不限，调用深度另计。正整数 `max_fragments` 限制每次根区域尝试因局部汇合失败保留的片段，超限计为 `fragment_limit`，后续可走普通分叉。
+区域嵌套和片段数均缺省不限，显式 `-1` 与省略等价。有限深度对照可用 `[execution_limits.path_merge] max_merge_depth = 16` 或 `--region-max-merge-depth=16`。`--merge-diagnostics=summary|detail` 输出每次区域尝试的累计深度分布与最大深度。保存点深度不限，调用深度另计。正整数 `max_fragments` 限制每次根区域尝试因局部汇合失败保留的片段，超限计为 `SpeculativeRejectReason::FragmentLimit`，后续可走普通分叉。
 
 `defer_range_proofs` 和 `defer_ctor_checks` 默认开启。进入延后推演时，仍需证明的范围和构造子标签条件登记为出口义务。比如五位符号值零扩展后减一，取值范围是 `[-1, 30]`，窄化到 i64 无需查询或登记义务。有 SMT 时，出口在原到达域下检查反例，未获 UNSAT 的区域会回滚。无 SMT 时沿用义务登记流程，候选仍未认证。可在 `[execution_limits.path_merge]` 中设为 `false`，也可用 `--region-defer-range-proofs=false` 或 `--region-defer-ctor-checks=false` 覆盖。
 

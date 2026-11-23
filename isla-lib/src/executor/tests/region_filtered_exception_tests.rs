@@ -150,7 +150,7 @@ fn region_filtered_exception_empty_and_unmatched_keep_rejection() {
         assert!(paths.iter().all(|path| path.records.is_empty()));
         assert!(paths.iter().any(|path| path.exception.is_some() && fixture.after_throw_executed(path)));
         let rejections = fixture.shared.execution_stats.arm_unsupported_json(&fixture.shared.symtab);
-        assert_eq!(rejections["top"][0]["reason"], "region_escaped");
+        assert_eq!(rejections["top"][0]["reason"], "SpeculativeRejectReason::RegionEscaped");
     }
 }
 

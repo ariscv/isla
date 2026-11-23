@@ -114,7 +114,12 @@ fn region_merge_loop_pessimistic_symbolic_assertion_is_rejected() {
             differential(program, &shared, 3, false);
         }
         if symbolic {
-            assert!(shared.execution_stats.merge_json()["failure_reasons"]["symbolic_assertion"].as_u64().unwrap() > 0);
+            assert!(
+                shared.execution_stats.merge_json()["failure_reasons"]["SpeculativeRejectReason::SymbolicAssertion"]
+                    .as_u64()
+                    .unwrap()
+                    > 0
+            );
         }
     }
 }
@@ -399,7 +404,10 @@ fn region_crossing_loop_nontermination_rolls_back_inner_commits() {
     )
     .unwrap();
     assert!(matches!(result, region_merge::RegionResult::Rejected));
-    assert!(shared.execution_stats.merge_json()["failure_reasons"]["step_budget"].as_u64().unwrap() > 0);
+    assert!(
+        shared.execution_stats.merge_json()["failure_reasons"]["SpeculativeRejectReason::StepBudget"].as_u64().unwrap()
+            > 0
+    );
     assert!(shared.execution_stats.merge_json()["successes"].as_u64().unwrap() > 0);
     assert_eq!(frame.pc, 0);
     assert_eq!(format!("{:?}", frame.vars()), before_vars);
@@ -426,8 +434,10 @@ fn region_crossing_loop_budget_rejection_preserves_complete_execution() {
     let forked = paths(program.clone(), &shared, 3, false);
     for budget in [0, 12] {
         let successes_before = shared.execution_stats.merge_json()["successes"].as_u64().unwrap();
-        let rejected_before =
-            shared.execution_stats.merge_json()["failure_reasons"]["step_budget"].as_u64().unwrap_or(0);
+        let rejected_before = shared.execution_stats.merge_json()["failure_reasons"]
+            ["SpeculativeRejectReason::StepBudget"]
+            .as_u64()
+            .unwrap_or(0);
         crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = Context::new(Config::new());
         let mut solver = Solver::new(&context);
@@ -468,13 +478,17 @@ fn region_crossing_loop_budget_rejection_preserves_complete_execution() {
         equivalent_paths(&forked, &output.into_inner().unwrap(), 3, true);
         if budget == 0 {
             assert!(
-                shared.execution_stats.merge_json()["failure_reasons"]["step_budget"].as_u64().unwrap()
+                shared.execution_stats.merge_json()["failure_reasons"]["SpeculativeRejectReason::StepBudget"]
+                    .as_u64()
+                    .unwrap()
                     > rejected_before
             );
         } else {
             // 预算按完整轮续配；12足以容纳本夹具一轮，不能再要求累计预算失败。
             assert_eq!(
-                shared.execution_stats.merge_json()["failure_reasons"]["step_budget"].as_u64().unwrap(),
+                shared.execution_stats.merge_json()["failure_reasons"]["SpeculativeRejectReason::StepBudget"]
+                    .as_u64()
+                    .unwrap(),
                 rejected_before
             );
             assert!(shared.execution_stats.merge_json()["successes"].as_u64().unwrap() > successes_before);
@@ -703,7 +717,9 @@ fn region_merge_unlimited_budget_applies_to_independent_loop_rounds() {
             .with_region_global_state(true);
         let merged = paths_with_state(code.clone(), &shared, 3, limits, crate::memory::Memory::new(), |_| ());
         equivalent_paths(&forked, &merged, 3, true);
-        let failures = shared.execution_stats.merge_json()["failure_reasons"]["step_budget"].as_u64().unwrap_or(0);
+        let failures = shared.execution_stats.merge_json()["failure_reasons"]["SpeculativeRejectReason::StepBudget"]
+            .as_u64()
+            .unwrap_or(0);
         if budget == Some(8192) {
             assert!(failures > 0, "{:?}", shared.execution_stats.merge_json());
         } else {

@@ -666,7 +666,7 @@ fn diagnose_slot<B: BV>(
         "after_init":{"left":diagnostics::describe_value(a,solver,&shared.symtab),"right":diagnostics::describe_value(b,solver,&shared.symtab)},
         "failure":leaf,"difference":difference,
         "error":error.map(diagnostics::describe_error),
-        "reason":if matches!(error,Some(ExecError::IncompatibleUnionPayload)) {"union_payload"} else {"incompatible_state"}
+        "reason":if matches!(error,Some(ExecError::IncompatibleUnionPayload)) {SpeculativeRejectReason::UnionPayload} else {SpeculativeRejectReason::IncompatibleState}
     }));
 }
 
