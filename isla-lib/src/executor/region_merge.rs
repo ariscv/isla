@@ -67,7 +67,7 @@ pub(super) fn fresh_call_scope() -> usize {
 
 #[derive(Clone)]
 pub(super) struct RegionExecution {
-    pub remote_cancel: Option<Arc<AtomicBool>>,
+    pub remote_cancel: Option<Arc<region_arm::Cancellation>>,
     pub region: Arc<Region>,
     pub entry_depth: usize,
     pub write_depth: usize,
@@ -332,7 +332,7 @@ pub(super) fn step<B: BV>(frame: &mut LocalFrame<B>) -> Result<bool, ExecError> 
         }
     }
     let Some(execution) = &frame.region_execution else { return Ok(false) };
-    if execution.remote_cancel.as_ref().is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
+    if execution.remote_cancel.as_ref().is_some_and(|cancel| cancel.is_cancelled()) {
         return Err(reject(frame, SpeculativeRejectReason::IncompatibleState));
     }
     let depth = frame.backtrace.len();
@@ -750,7 +750,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         fraction,
                         timeout,
                         stop,
-                        &pending_errors,
+                        &parallel_arms::ScheduledErrors { errors: &pending_errors, scheduler: sink.arm_scheduler() },
                         match &mut candidate_frame {
                             Some(candidate) => candidate,
                             None => &mut *frame,
@@ -1318,46 +1318,46 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     ready.extend([target, fallthrough].into_iter().zip(guards).enumerate());
     let live_forks = stats::merge_timing::LiveForks::start();
     let initial_state = arm_task_entry.as_ref().map(|_| base.local_state.clone());
+    let scheduler = sink.arm_scheduler();
     let job = arm_task_entry.filter(|_| catcher.is_none()).map(|(slot, checkpoint)| {
         let mut remote_base = base.clone();
         remote_base.path_timing = super::path_timing::PathTiming::from_snapshot(base.path_timing.fork_snapshot());
-        let remote_fraction = fraction.clone();
-        let options = solver.arm_context_options();
-        let work = move |worker, cancelled| {
-            parallel_arms::run_b(
-                checkpoint,
-                options,
-                cancelled,
-                remote_base,
-                fallthrough,
-                Not(Box::new(Var(condition))),
-                worker,
-                task_id,
-                remote_fraction,
-                timeout,
-                stop,
-                state,
-                shared,
-                info,
-            )
+        let job = region_arm::ArmJob {
+            checkpoint,
+            options: solver.arm_context_options(),
+            base: remote_base,
+            pc: fallthrough,
+            guard: Not(Box::new(Var(condition))),
+            task: task_id,
+            fraction: fraction.clone(),
+            timeout,
+            info,
         };
-        (slot, work, reject(frame, SpeculativeRejectReason::IncompatibleState))
+        (slot, job, reject(frame, SpeculativeRejectReason::IncompatibleState))
     });
     let mut local = |cell: Option<&parallel_arms::ArmCell<'ir, B>>| -> Result<(), ExecError> {
         while let Some((side, (pc, guard))) = ready.pop() {
             live_forks.set(if side == 0 { 1 } else { arms[0].len() });
             if side == 1 {
                 if let Some(cell) = cell {
-                    if let Some(arm) = parallel_arms::receive(
+                    match parallel_arms::receive(
                         cell,
                         initial_state.as_ref().unwrap(),
                         &arms[0],
                         &mut base,
                         state,
                         solver,
+                        sink,
+                        tid,
+                        stop,
+                        shared,
                     )? {
-                        arms[1].push(arm);
-                        continue;
+                        parallel_arms::Received::Dead => continue,
+                        parallel_arms::Received::Arrived(arm) => {
+                            arms[1].push(arm);
+                            continue;
+                        }
+                        parallel_arms::Received::Retry => (),
                     }
                 }
             }
@@ -1415,7 +1415,7 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         Ok(())
     };
     if let Some((slot, work, failure)) = job {
-        parallel_arms::with_worker(slot, state, failure, work, local)?;
+        parallel_arms::with_worker(slot, scheduler, state, stop, shared, failure, work, local)?;
     } else {
         local(None)?;
     }

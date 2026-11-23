@@ -20,8 +20,11 @@ enum Body {
     Inline,
     Call,
     Nested,
+    ThreeLevels,
+    OrderedReads,
     Loop,
     ErrorLeaf,
+    ErrorInB,
 }
 
 fn diamond_case(
@@ -35,6 +38,7 @@ fn diamond_case(
     shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
     let mut limits = ExecutionLimits::default().with_path_merging(true);
     limits.arms_as_tasks = enabled;
+    limits.ordered_events = body == Body::OrderedReads;
     limits.region_loop_analysis = body == Body::Loop;
     limits.region_global_state = body == Body::Loop;
     let mut state = TaskState::new().with_execution_limits(limits);
@@ -46,21 +50,45 @@ fn diamond_case(
     let flag = test_name(9010);
     let input = shared.symtab.intern("zarm_input");
     shared.registers.insert(input, Ty::Bool);
+    let third = test_name(9015);
     let b_result = Exp::Call(Op::Or, vec![Exp::Id(input), Exp::Id(flag)]);
     let b = if body != Body::Inline {
         let counter = shared.symtab.intern("zscan_index");
         let set = |value| Instr::Copy(Loc::Id(RETURN), value, info());
         let code = match body {
             Body::Call => vec![set(b_result), Instr::End],
-            Body::Nested | Body::ErrorLeaf => vec![
+            Body::Nested | Body::ErrorLeaf | Body::ErrorInB => vec![
                 Instr::Jump(Exp::Id(input), 3, info()),
-                set(Exp::Id(flag)),
+                if body == Body::ErrorInB {
+                    Instr::PrimopUnary(Loc::Id(RETURN), primop::not_bool::<B64>, Exp::I128(1), info())
+                } else {
+                    set(Exp::Id(flag))
+                },
                 Instr::Goto(4),
                 if body == Body::ErrorLeaf {
                     Instr::PrimopUnary(Loc::Id(RETURN), primop::not_bool::<B64>, Exp::I128(1), info())
                 } else {
                     set(b_result)
                 },
+                Instr::End,
+            ],
+            Body::ThreeLevels => vec![
+                Instr::Jump(Exp::Id(input), 6, info()),
+                Instr::Jump(Exp::Id(third), 4, info()),
+                set(Exp::Id(flag)),
+                Instr::Goto(5),
+                set(Exp::Id(third)),
+                Instr::Goto(7),
+                set(b_result),
+                Instr::End,
+            ],
+            Body::OrderedReads => vec![
+                Instr::Jump(Exp::Id(input), 4, info()),
+                set(Exp::Id(input)),
+                set(Exp::Id(flag)),
+                Instr::Goto(6),
+                set(Exp::Id(input)),
+                set(b_result),
                 Instr::End,
             ],
             Body::Loop => vec![
@@ -89,6 +117,10 @@ fn diamond_case(
         Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::Not, vec![Exp::Id(input)]), info()),
         Instr::End,
     ]);
+    let third_sym = (body == Body::ThreeLevels).then(|| solver.declare_const(smtlib::Ty::Bool, info()));
+    if let Some(choice) = third_sym {
+        frame.lets_mut().insert(third, UVal::Init(Val::Symbolic(choice)));
+    }
     frame.vars_mut().insert(flag, UVal::Init(Val::Symbolic(c)));
     frame.regs_mut().insert(input, false, UVal::Init(Val::Symbolic(x)));
     let output = Arc::new(Mutex::new(Vec::new()));
@@ -96,7 +128,7 @@ fn diamond_case(
     start_multi(workers, timeout, vec![task], &shared, output.clone(), &|_, _, result, _, mut solver, output| {
         let (value, frame) = match result {
             Ok((Run::Finished(value), frame)) => (value, frame),
-            Err((ExecError::Type(..), frame)) if body == Body::ErrorLeaf => {
+            Err((ExecError::Type(..), frame)) if matches!(body, Body::ErrorLeaf | Body::ErrorInB) => {
                 assert!(frame.arm_error_certified());
                 // 单独收集错误叶的输入域，约定其观察值为 true。
                 (Val::Bool(true), frame)
@@ -140,6 +172,13 @@ fn diamond_case(
                     let equals = |x, y| Eq(Box::new(x), Box::new(Bool(y)));
                     let args = And(Box::new(equals(Var(c), flag)), Box::new(equals(Var(x), input)));
                     let query = And(Box::new(args), Box::new(equals(smt_value(&value, info()).unwrap(), ret)));
+                    if let Some(choice) = third_sym {
+                        for third in [false, true] {
+                            let with_choice = And(Box::new(query.clone()), Box::new(equals(Var(choice), third)));
+                            let expected = if flag { !input } else { input || third };
+                            assert_eq!(solver.check_sat_with(&with_choice, info()).is_sat().unwrap(), ret == expected);
+                        }
+                    }
                     if solver.check_sat_with(&query, info()).is_sat().unwrap() {
                         results.insert((flag, input, ret));
                     }
@@ -152,6 +191,22 @@ fn diamond_case(
     (observations, shared.execution_stats.merge_json())
 }
 
+fn wait_for_arm_claim() -> impl Fn(&str) {
+    let cells = (Mutex::new(HashSet::new()), std::sync::Condvar::new());
+    move |point| {
+        if let Some(id) = point.strip_prefix("claim/") {
+            cells.0.lock().unwrap().insert(id.to_owned());
+            cells.1.notify_all();
+        } else if let Some(id) = point.strip_prefix("join/") {
+            let (mut claims, _) = cells
+                .1
+                .wait_timeout_while(cells.0.lock().unwrap(), Duration::from_secs(5), |claims| !claims.contains(id))
+                .unwrap();
+            assert!(claims.remove(id), "B 未认领 {id}");
+        }
+    }
+}
+
 // 用通道指定先后关系，超时即测试失败。
 fn ordered(
     workers: usize,
@@ -161,11 +216,15 @@ fn ordered(
 ) -> (Vec<Observation>, Vec<(String, std::thread::ThreadId)>, serde_json::Value) {
     let log = Arc::new(Mutex::new(Vec::new()));
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    let (claimed, ready) = std::sync::mpsc::sync_channel(1);
+    let (claimed, ready) = std::sync::mpsc::channel();
     let ready = Mutex::new(ready);
     let rx = Mutex::new(rx);
+    let observe_claim = wait_for_arm_claim();
     let entries = log.clone();
     let hook = Arc::new(move |point: &str| {
+        if first == "worker_claimed" && second == "a_join" {
+            observe_claim(point);
+        }
         entries.lock().unwrap().push((point.to_owned(), std::thread::current().id()));
         if point == "worker_claimed" {
             claimed.send(()).unwrap();
@@ -173,10 +232,10 @@ fn ordered(
         if point == "a_join" && first == "waiting" {
             ready.lock().unwrap().recv_timeout(Duration::from_secs(10)).unwrap();
         }
-        if point == first {
+        if point == first && first != "worker_claimed" {
             tx.send(()).unwrap();
         }
-        if point == second {
+        if point == second && first != "worker_claimed" {
             rx.lock().unwrap().recv_timeout(Duration::from_secs(10)).unwrap();
         }
         if point == "context" {
@@ -197,7 +256,10 @@ fn ordered(
             "call" => Body::Call,
             "nested" => Body::Nested,
             "loop" => Body::Loop,
+            "three" => Body::ThreeLevels,
+            "ordered_reads" => Body::OrderedReads,
             "error_leaf" => Body::ErrorLeaf,
+            "error_in_b" => Body::ErrorInB,
             _ => Body::Inline,
         },
         (fail == "timeout").then_some(1),
@@ -393,13 +455,18 @@ fn check_deferred_indices(nested: bool, name: &str) {
         return;
     }
     crate::config::RegionOptions { defer_exit_check: true, ..Default::default() }.configure();
-    struct TestSink;
-    impl<'ir, 'task> ForkSink<'ir, 'task, B64> for TestSink {
+    struct TestSink<'ir>(region_arm::ArmQueue<'ir, B64>);
+    impl region_arm::ArmThreads for TestSink<'_> {
+        fn reserve(&self) -> Option<region_arm::ThreadSlot<'_>> {
+            Some(region_arm::ThreadSlot { tid: 1, release: Some(Box::new(|| ())) })
+        }
+    }
+    impl<'ir, 'task> ForkSink<'ir, 'task, B64> for TestSink<'ir> {
         fn submit(&self, _: Task<'ir, 'task, B64>) {
             panic!("本区域只有一个汇合点");
         }
-        fn reserve_arm_thread(&self) -> Option<region_arm::ThreadSlot<'_>> {
-            Some(region_arm::ThreadSlot { tid: 1, release: Some(Box::new(|| ())) })
+        fn arm_scheduler(&self) -> Option<region_arm::Scheduler<'_, 'ir, B64>> {
+            Some(region_arm::Scheduler { threads: self, queue: &self.0 })
         }
     }
     let execute = |parallel, safe| {
@@ -469,7 +536,7 @@ fn check_deferred_indices(nested: bool, name: &str) {
             &mut Fraction::one(),
             PathTimeout::unlimited(),
             None,
-            &TestSink,
+            &TestSink(region_arm::ArmQueue::new()),
             &mut frame,
             &state,
             &shared,
@@ -496,16 +563,33 @@ fn check_nested_b(body: Body, label: &'static str) {
     let baseline = diamond_case(1, false, None, body, None).0;
     assert_eq!(baseline.len(), 1);
     assert!(baseline[0].records.len() >= 2, "基准必须执行内层汇合");
-    assert_eq!(
-        baseline[0].results,
-        [(true, true, false), (true, false, true), (false, true, true), (false, false, false)].into_iter().collect()
-    );
-    assert_eq!(diamond_case(1, true, None, body, None).0, baseline);
-    for workers in [2, 4] {
-        let (observed, log, _) = ordered(workers, "worker_claimed", "a_join", label);
-        assert_eq!(log.iter().filter(|(point, _)| point == "imported").count(), 1, "B 必须在外层出口交付一次");
-        assert_eq!(observed, baseline);
+    let mut expected =
+        BTreeSet::from([(true, true, false), (true, false, true), (false, true, true), (false, false, false)]);
+    if body == Body::ThreeLevels {
+        expected.insert((false, false, true));
     }
+    assert_eq!(baseline[0].results, expected);
+    let exhausted = Arc::new(AtomicUsize::new(0));
+    let denied = exhausted.clone();
+    let single = Arc::new(move |point: &str| {
+        if point == "no_slot" {
+            denied.fetch_add(1, Ordering::Relaxed);
+        }
+        assert_ne!(point, "context", "没有线程名额时必须留在当前 Solver");
+        Ok(())
+    });
+    assert_eq!(diamond_case(1, true, Some(single), body, None).0, baseline);
+    assert!(exhausted.load(Ordering::Relaxed) > 0);
+    assert_eq!(diamond_case(2, true, None, body, None).0, baseline);
+    let (observed, log, _) = ordered(4, "worker_claimed", "a_join", label);
+    let imports = log.iter().filter(|(point, _)| point == "imported").count();
+    let minimum = match body {
+        Body::ThreeLevels => 3,
+        Body::Nested => 2,
+        _ => 1,
+    };
+    assert!(imports >= minimum, "{imports} 次导入");
+    assert_eq!(observed, baseline);
 }
 
 #[test]
@@ -514,16 +598,30 @@ fn region_arm_nested_two_arms() {
 }
 
 #[test]
+fn region_arm_nested_preserves_repeated_register_reads() {
+    let baseline = diamond_case(4, false, None, Body::OrderedReads, None).0;
+    let (out, log, _) = ordered(4, "worker_claimed", "a_join", "ordered_reads");
+    assert_eq!(out, baseline);
+    assert!(out.iter().any(|o| o.events.iter().filter(|e| e.contains("ReadReg")).count() > 1));
+    assert_eq!(log.iter().filter(|(p, _)| p == "imported").count(), 2);
+}
+
+#[test]
+fn region_arm_nested_three_levels() {
+    check_nested_b(Body::ThreeLevels, "three");
+}
+
+#[test]
 fn region_arm_nested_foreach_early_exit() {
     check_nested_b(Body::Loop, "loop");
 }
 
 #[test]
-fn region_arm_nested_error_leaf_replays_once() {
+fn region_arm_nested_error_leaf_delivered_once() {
     const CHILD: &str = "ISLA_NESTED_ARM_ERROR_LEAF";
     if std::env::var_os(CHILD).is_none() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "executor::tests::region_arm_runtime_tests::region_arm_nested_error_leaf_replays_once"])
+            .args(["--exact", "executor::tests::region_arm_runtime_tests::region_arm_nested_error_leaf_delivered_once"])
             .env(CHILD, "1")
             .output()
             .unwrap();
@@ -533,13 +631,19 @@ fn region_arm_nested_error_leaf_replays_once() {
     crate::config::RegionOptions { arm_error_leaf: true, defer_exit_check: true, ..Default::default() }.configure();
     let mut baseline = diamond_case(1, false, None, Body::ErrorLeaf, None).0;
     let (mut output, log, _) = ordered(2, "worker_claimed", "a_join", "error_leaf");
-    assert_eq!(log.iter().filter(|(point, _)| point == "serial_retry").count(), 1);
-    assert!(!log.iter().any(|(point, _)| point == "imported"));
-    assert_eq!(output.len(), 2, "串行重跑须各交付一次正常终态和错误叶");
+    assert_eq!(log.iter().filter(|(p, _)| p == "imported_error").count(), 1, "{log:?}");
+    assert!(log.iter().any(|(point, _)| point == "imported"));
+    assert_eq!(output.len(), 2, "须各交付一次正常终态和错误叶");
     baseline.sort_by_key(|o| o.results.len());
     output.sort_by_key(|o| o.results.len());
     assert_eq!(output[0].results, BTreeSet::from([(false, true, true)]));
     assert_eq!(baseline, output);
+    let mut expected = diamond_case(4, false, None, Body::ErrorInB, None).0;
+    let (mut output, log, _) = ordered(4, "worker_claimed", "a_join", "error_in_b");
+    assert_eq!(log.iter().filter(|(p, _)| p == "imported_error").count(), 2, "错误叶须穿过内外两个出口");
+    expected.sort_by_key(|o| o.results.len());
+    output.sort_by_key(|o| o.results.len());
+    assert_eq!(expected, output);
 }
 
 #[test]
@@ -558,13 +662,16 @@ fn region_arm_nested_loop_observes_cancellation_and_path_deadline() {
     let mode = crate::config::MergeMode::Adaptive;
     let mut outer = region_merge::prepare_region_base(&frame, &region, 1, mode, &state, info());
     let cancel = Arc::new(AtomicBool::new(false));
-    outer.region_execution.as_mut().unwrap().remote_cancel = Some(cancel.clone());
+    outer.region_execution.as_mut().unwrap().remote_cancel = Some(region_arm::Cancellation::new(cancel.clone(), None));
     outer.path_timing = path_timing::PathTiming::from_totals(path_timing::PathTimeTotals {
         active_wall: Duration::from_secs(1),
         ..Default::default()
     });
     let loop_region = Arc::new(Region { has_back_edge: true, ..(*region).clone() });
     let mut nested = region_merge::prepare_region_base(&outer, &loop_region, 2, mode, &state, info());
+    let execution = nested.region_execution.as_mut().unwrap();
+    execution.remote_cancel =
+        Some(region_arm::Cancellation::new(Arc::new(AtomicBool::new(false)), execution.remote_cancel.take()));
     cancel.store(true, Ordering::Release);
     assert!(matches!(
         region_merge::step(&mut nested),
@@ -585,4 +692,88 @@ fn region_arm_nested_loop_observes_cancellation_and_path_deadline() {
         &mut Solver::new(&context),
     );
     assert!(matches!(result, Err(ExecError::Timeout)));
+}
+
+#[test]
+fn region_arm_waiter_runs_nested_b_without_another_thread() {
+    let (idle, wait_idle) = std::sync::mpsc::channel();
+    let (claimed, wait_claim) = std::sync::mpsc::channel();
+    let wait_idle = Mutex::new(wait_idle);
+    let wait_claim = Mutex::new(wait_claim);
+    let threads = Arc::new(Mutex::new(Vec::new()));
+    let trace = threads.clone();
+    let first = AtomicBool::new(true);
+    let hook = Arc::new(move |point: &str| {
+        let thread = std::thread::current().id();
+        trace.lock().unwrap().push((point.to_owned(), thread));
+        match point {
+            "worker_claimed" => claimed.send(()).unwrap(),
+            "context" if first.swap(false, Ordering::Relaxed) => {
+                wait_idle.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+            "a_join" => wait_claim.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap(),
+            "idle_helper" => idle.send(()).unwrap(),
+            _ => (),
+        }
+        Ok(())
+    });
+    let observed = diamond_case(2, true, Some(hook), Body::Nested, None).0;
+    assert_eq!(observed, diamond_case(2, false, None, Body::Nested, None).0);
+    let log = threads.lock().unwrap();
+    let root = log.iter().find(|(p, _)| p == "a_join").unwrap().1;
+    let helpers: Vec<_> = log.iter().filter(|(p, _)| p == "helping").map(|(_, id)| *id).collect();
+    assert_eq!(helpers, [root]);
+    assert_eq!(log.iter().filter(|(p, _)| p == "imported").count(), 2);
+}
+
+#[test]
+fn region_arm_nested_worker_panic_wakes_parent() {
+    let count = Arc::new(AtomicUsize::new(0));
+    let contexts = count.clone();
+    let observe_claim = wait_for_arm_claim();
+    let hook = Arc::new(move |point: &str| {
+        observe_claim(point);
+        if point == "context" && contexts.fetch_add(1, Ordering::Relaxed) == 1 {
+            panic!("内层 B 注入 panic");
+        }
+        Ok(())
+    });
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        diamond_case(4, true, Some(hook), Body::Nested, None)
+    }));
+    assert!(count.load(Ordering::Relaxed) >= 2, "必须由内层 B 触发");
+    assert!(result.is_err(), "作用域必须把 worker panic 传播到运行入口");
+}
+
+#[test]
+#[ignore = "比较同线程数的真实菱形程序墙钟"]
+fn region_arm_nested_wall_time() {
+    for (name, body) in [("two", Body::Nested), ("three", Body::ThreeLevels)] {
+        let baseline = diamond_case(4, false, None, body, None).0;
+        assert_eq!(baseline.len(), 1);
+        eprintln!(
+            "fixture {name} records={} events={} reads={}",
+            baseline[0].records.len(),
+            baseline[0].events.len(),
+            baseline[0].events.iter().filter(|event| event.contains("ReadReg")).count()
+        );
+        for round in 0..9 {
+            let order = if round % 2 == 0 { [false, true] } else { [true, false] };
+            for parallel in order {
+                let imported = Arc::new(AtomicUsize::new(0));
+                let count = imported.clone();
+                let hook = Arc::new(move |point: &str| {
+                    if point == "imported" {
+                        count.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Ok(())
+                });
+                let now = Instant::now();
+                let observed = diamond_case(4, parallel, Some(hook), body, None).0;
+                let elapsed = now.elapsed().as_micros();
+                assert_eq!(observed, baseline);
+                eprintln!("diamond {name} {round} {parallel} {elapsed} {}", imported.load(Ordering::Relaxed));
+            }
+        }
+    }
 }
