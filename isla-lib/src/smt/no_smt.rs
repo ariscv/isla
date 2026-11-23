@@ -140,6 +140,8 @@ impl<B: BV> Solver<'_, B> {
 
 impl Ast<'_> {
     pub(super) fn structural_bool(&mut self) -> Option<bool> {
+        #[cfg(test)]
+        finite_domain::STRUCTURAL_BOOLS.set(finite_domain::STRUCTURAL_BOOLS.get() + 1);
         if let Some(value) = unsafe { structural_comparison(self.ctx, self.z3_ast) } {
             return Some(value);
         }

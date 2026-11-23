@@ -122,3 +122,242 @@ fn finite_domain_prefix_follows_trace_compaction_and_group_selection() {
         values(&replayed, alias, &[5]);
     }
 }
+
+// 冻结的旧投影逐项计算每个候选，作为语义与调用次数的对照。
+impl<B: BV> Solver<'_, B> {
+    fn reference_projection(
+        &self,
+        prefix: &PathConditions<'_, B>,
+        target: Sym,
+        source: Sym,
+        candidates: Vec<Exp<Sym>>,
+    ) -> FiniteDomain {
+        // 对派生锚点代入时保留原等式，防止把它错误地当成独立自由变量。
+        let source_var = Exp::Var(source);
+        let free = matches!(resolve(&source_var, prefix), Exp::Var(_));
+        let anchor = self.translate_exp(&source_var);
+        let target_ast = self.translate_exp(&Exp::Var(target));
+        let assertions: Vec<_> = prefix.assertions().map(|exp| self.translate_exp(exp)).collect();
+        let mut bool_atoms = Vec::new();
+        let mut bool_literals = HashMap::new();
+        for sym in prefix.bool_symbols() {
+            let atom = self.decls[&sym].ast();
+            let negative = Ast::mk_not(&atom);
+            bool_literals.insert(atom.z3_ast, (sym, true));
+            bool_literals.insert(negative.z3_ast, (sym, false));
+            bool_atoms.push(negative);
+        }
+        let mut admissible = Vec::new();
+        let mut exact = true;
+        'candidate: for candidate in candidates {
+            let value = self.translate_exp(&candidate);
+            let binding = (!free).then(|| Ast::mk_eq(&anchor, &value));
+            let mut literals = HashMap::new();
+            let mut satisfiable_by_literals = true;
+            let mut can_reuse_witness = self.has_stashed_model();
+            for (index, original) in assertions.iter().chain(&binding).enumerate() {
+                let is_path_fact = index < assertions.len();
+                let mut residual = if is_path_fact { original.substitute(&anchor, &value) } else { original.clone() };
+                let unchanged = residual.z3_ast == original.z3_ast && is_path_fact;
+                match residual.structural_bool() {
+                    Some(false) => continue 'candidate,
+                    Some(true) => (),
+                    None => {
+                        can_reuse_witness &= unchanged;
+                        if let Some(&(literal, positive)) = bool_literals.get(&residual.z3_ast) {
+                            if literals.insert(literal, positive).is_some_and(|previous| previous != positive) {
+                                continue 'candidate;
+                            }
+                        } else {
+                            satisfiable_by_literals = false;
+                        }
+                    }
+                }
+            }
+            let value = match target_ast.substitute(&anchor, &value).finite_bits() {
+                Some(value) => value,
+                None if !free => {
+                    let mut projected = HashMap::from([(source, Some(candidate))]);
+                    let Some(value) = self.project_finite_definition(target, prefix, &mut projected) else {
+                        return FiniteDomain::Unknown;
+                    };
+                    // 重试的排除式可能引用遭化简的目标。先在原表达式中代入，再判是否必假。
+                    for assertion in prefix.assertions() {
+                        let mut changed = false;
+                        let substituted = assertion
+                            .map_var(&mut |sym| {
+                                Ok::<_, std::convert::Infallible>(match projected.get(sym) {
+                                    Some(Some(value)) => {
+                                        changed = true;
+                                        value.clone()
+                                    }
+                                    _ => Exp::Var(*sym),
+                                })
+                            })
+                            .unwrap();
+                        if changed && self.translate_exp(&substituted).structural_bool() == Some(false) {
+                            continue 'candidate;
+                        }
+                    }
+                    value
+                }
+                None => return FiniteDomain::Unknown,
+            };
+            exact &= satisfiable_by_literals || can_reuse_witness;
+            if !admissible.contains(&value) {
+                admissible.push(value);
+            }
+        }
+        if exact {
+            FiniteDomain::Known(admissible)
+        } else {
+            FiniteDomain::Bounded(admissible)
+        }
+    }
+}
+
+fn projection_counts<T>(f: impl FnOnce() -> T) -> (T, usize, usize) {
+    PROJECT_SUBSTITUTIONS.set(0);
+    STRUCTURAL_BOOLS.set(0);
+    (f(), PROJECT_SUBSTITUTIONS.get(), STRUCTURAL_BOOLS.get())
+}
+
+#[test]
+fn projection_factors_independent_assertions() {
+    configure_tastic(Tactic::Qfaufbv);
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let info = SourceLoc::unknown();
+    let x = solver.declare_bitvector(8, info);
+    solver.assert(not(equal(x, 16)));
+    for _ in 0..256 {
+        let b = solver.declare_const(Ty::Bool, info);
+        solver.assert(Exp::Var(b));
+    }
+    let prefix = PathConditions::new(&solver).unwrap();
+    let candidates: Vec<_> = (0..16).map(|v| bits64(v, 8)).collect();
+    let (expected, old_sub, old_bool) =
+        projection_counts(|| solver.reference_projection(&prefix, x, x, candidates.clone()));
+    let (actual, sub, boolean) = projection_counts(|| solver.project_finite_values(&prefix, x, x, candidates.clone()));
+    assert_eq!(actual, FiniteDomain::Known(candidates));
+    assert_eq!(actual, expected);
+    assert_eq!((old_sub, old_bool), (16 * 258, 16 * 257));
+    eprintln!("投影代入 {old_sub} → {sub}，结构判定 {old_bool} → {boolean}");
+    assert!(sub <= 256 + 16 * 2 && boolean <= 256 + 16);
+}
+
+#[test]
+fn projection_matches_reference_for_literals_bindings_and_witness() {
+    configure_tastic(Tactic::Qfaufbv);
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let info = SourceLoc::unknown();
+    let x = solver.declare_bitvector(8, info);
+    let y = solver.declare_bitvector(8, info);
+    let b = solver.declare_const(Ty::Bool, info);
+    let derived =
+        solver.define_bitvector(Exp::Ite(Box::new(Exp::Var(b)), Box::new(bits64(0, 8)), Box::new(bits64(1, 8))), info);
+    let folded = solver.define_bitvector(bits64(0, 8), info);
+    let compare = |solver: &Solver<'_, B64>, source, expected| {
+        let prefix = PathConditions::new(solver).unwrap();
+        let candidates = vec![bits64(0, 8), bits64(1, 8)];
+        let reference = solver.reference_projection(&prefix, source, source, candidates.clone());
+        let result = solver.project_finite_values(&prefix, source, source, candidates);
+        assert_eq!(result, reference);
+        assert_eq!(result, expected);
+    };
+    let both = || vec![bits64(0, 8), bits64(1, 8)];
+    solver.assert(Exp::Bool(true));
+    solver.assert(Exp::Var(b));
+    compare(&solver, x, FiniteDomain::Known(both()));
+    compare(&solver, derived, FiniteDomain::Known(vec![bits64(0, 8)]));
+    compare(&solver, folded, FiniteDomain::Known(vec![bits64(0, 8)]));
+    let tx = solver.start_transaction();
+    solver.assert(Exp::Or(Box::new(equal(x, 0)), Box::new(equal(y, 3))));
+    assert!(matches!(solver.check_sat(info), Sat));
+    // x=1 的非字面量残余式由代入产生，原路径见证不能认证它。
+    compare(&solver, x, FiniteDomain::Bounded(both()));
+    let prefix = PathConditions::new(&solver).unwrap();
+    assert_eq!(solver.project_finite_values(&prefix, y, x, both()), FiniteDomain::Unknown);
+    assert_eq!(solver.reference_projection(&prefix, y, x, both()), FiniteDomain::Unknown);
+    solver.rollback_transaction(tx);
+    // 代入 x=0 后只剩 ¬b，与公共字面量 b 矛盾。
+    solver.assert(Exp::Or(Box::new(equal(x, 1)), Box::new(not(Exp::Var(b)))));
+    compare(&solver, x, FiniteDomain::Known(vec![bits64(1, 8)]));
+    solver.assert(equal(y, 3));
+    compare(&solver, x, FiniteDomain::Bounded(vec![bits64(1, 8)]));
+    assert!(matches!(solver.check_sat(info), Sat));
+    assert!(solver.has_stashed_model());
+    compare(&solver, x, FiniteDomain::Known(vec![bits64(1, 8)]));
+    solver.assert(not(Exp::Var(b)));
+    compare(&solver, x, FiniteDomain::Known(vec![]));
+    solver.assert(Exp::Bool(false));
+    compare(&solver, x, FiniteDomain::Known(vec![]));
+}
+
+#[test]
+fn projection_reuses_ast_work_across_prefix_growth_and_anchors() {
+    configure_tastic(Tactic::Qfaufbv);
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let info = SourceLoc::unknown();
+    let x = solver.declare_bitvector(8, info);
+    let y = solver.declare_bitvector(8, info);
+    for sym in [x, y] {
+        solver.assert(Exp::Or(Box::new(equal(sym, 0)), Box::new(equal(sym, 1))));
+    }
+    for _ in 0..256 {
+        let b = solver.declare_const(Ty::Bool, info);
+        solver.assert(Exp::Var(b));
+    }
+    let count = |solver: &Solver<'_, B64>, sym| {
+        PROJECT_TRANSLATIONS.set(0);
+        let (result, sub, boolean) = projection_counts(|| solver.finite_domain(sym));
+        assert_eq!(result, FiniteDomain::Bounded(vec![bits64(0, 8), bits64(1, 8)]));
+        (PROJECT_TRANSLATIONS.get(), sub, boolean)
+    };
+    let cold = count(&solver, x);
+    let warm = count(&solver, x);
+    eprintln!("同一锚点首次／再次（翻译、代入、结构判定） {cold:?}／{warm:?}");
+    assert_eq!(cold, (258, 261, 259));
+    assert_eq!(warm, (0, 4, 2));
+    assert_eq!(count(&solver, y), (0, 261, 3));
+    let b = solver.declare_const(Ty::Bool, info);
+    solver.assert(not(Exp::Var(b)));
+    assert_eq!(count(&solver, x), (1, 5, 3));
+    assert_eq!(count(&solver, y), (0, 5, 2));
+}
+
+#[test]
+fn projection_cache_tracks_rollback_rewritten_guard_and_new_context() {
+    configure_tastic(Tactic::Qfaufbv);
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let info = SourceLoc::unknown();
+    let x = solver.declare_bitvector(8, info);
+    let b = solver.declare_const(Ty::Bool, info);
+    solver.assert(Exp::Or(Box::new(equal(x, 0)), Box::new(equal(x, 1))));
+    let root = solver.start_transaction();
+    let inner = solver.start_transaction();
+    solver.assert(equal(x, 0));
+    values(&solver, x, &[0]);
+    solver.rollback_transaction(inner);
+    solver.start_transaction_with_guard(Some(Exp::Var(b)));
+    solver.assert(equal(x, 1));
+    values(&solver, x, &[1]);
+    solver.commit_transaction();
+    values(&solver, x, &[0, 1]);
+    solver.with_transaction_condition(&Exp::Var(b), |solver| values(solver, x, &[1]));
+    values(&solver, x, &[0, 1]);
+    solver.rollback_transaction(root);
+    values(&solver, x, &[0, 1]);
+    let point = checkpoint(&mut solver);
+    let other = Context::new(Config::new());
+    let mut replay = Solver::from_checkpoint(&other, point);
+    PROJECT_TRANSLATIONS.set(0);
+    values(&replay, x, &[0, 1]);
+    assert_eq!(PROJECT_TRANSLATIONS.get(), 1);
+    replay.assert(equal(x, 1));
+    values(&replay, x, &[1]);
+    values(&solver, x, &[0, 1]);
+}

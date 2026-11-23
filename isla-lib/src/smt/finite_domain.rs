@@ -3,9 +3,10 @@ use super::*;
 
 mod arithmetic;
 mod prefix_index;
-use prefix_index::{BranchCandidates, Candidate, PathConditions};
+use prefix_index::{BranchCandidates, Candidate, PathConditions, ProjectionCache};
 pub(super) use prefix_index::{PrefixIndex, BUFFERED};
 
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub(crate) enum FiniteDomain {
     Known(Vec<Exp<Sym>>),
     /// 包含全部可行取值，个别候选还可能被残余约束排除。
@@ -186,6 +187,29 @@ impl<B: BV> PathConditions<'_, B> {
     }
 }
 
+// structural_bool 可能替换 AST。字面量必须用化简后的残余式识别。
+struct ProjectionLiterals {
+    values: HashMap<Sym, bool>,
+    only_literals: bool,
+}
+
+impl ProjectionLiterals {
+    fn new() -> Self {
+        Self { values: HashMap::new(), only_literals: true }
+    }
+
+    fn record(&mut self, literal: Option<(Sym, bool)>, common: &HashMap<Sym, bool>) -> bool {
+        if let Some((sym, positive)) = literal {
+            if let Some(previous) = common.get(&sym) {
+                return *previous == positive;
+            }
+            return self.values.insert(sym, positive).is_none_or(|previous| previous == positive);
+        }
+        self.only_literals = false;
+        true
+    }
+}
+
 impl<'ctx> Ast<'ctx> {
     fn substitute(&self, old: &Self, new: &Self) -> Self {
         self.substitute_many(&[old.z3_ast], &[new.z3_ast])
@@ -195,6 +219,8 @@ impl<'ctx> Ast<'ctx> {
         if old.is_empty() {
             return self.clone();
         }
+        #[cfg(test)]
+        PROJECT_SUBSTITUTIONS.set(PROJECT_SUBSTITUTIONS.get() + 1);
         assert_eq!(old.len(), new.len());
         unsafe {
             let z3_ast =
@@ -229,7 +255,7 @@ impl<'ctx> Ast<'ctx> {
     }
 }
 
-impl<B: BV> Solver<'_, B> {
+impl<'ctx, B: BV> Solver<'ctx, B> {
     pub(crate) fn finite_domain_enabled(&self) -> bool {
         self.finite_prefix.is_some()
     }
@@ -254,7 +280,7 @@ impl<B: BV> Solver<'_, B> {
         assert!(self.finite_prefix.is_none(), "有限域索引必须只安装一次");
         let mut segments: Vec<_> =
             std::iter::successors(Some(&self.trace), |trace| trace.tail.as_ref().as_ref()).collect();
-        let mut index = PrefixIndex::default();
+        let mut index = PrefixIndex::new(self.ctx);
         for trace in segments.drain(..).rev() {
             for (offset, event) in trace.head_events().enumerate() {
                 index.push(trace.checkpoints, offset, event);
@@ -434,6 +460,12 @@ impl<B: BV> Solver<'_, B> {
         value
     }
 
+    fn translate_projection_assertion(&self, exp: &Exp<Sym>) -> Ast<'ctx> {
+        #[cfg(test)]
+        PROJECT_TRANSLATIONS.set(PROJECT_TRANSLATIONS.get() + 1);
+        self.translate_exp(exp)
+    }
+
     fn project_finite_values(
         &self,
         prefix: &PathConditions<'_, B>,
@@ -446,7 +478,13 @@ impl<B: BV> Solver<'_, B> {
         let free = matches!(resolve(&source_var, prefix), Exp::Var(_));
         let anchor = self.translate_exp(&source_var);
         let target_ast = self.translate_exp(&Exp::Var(target));
-        let assertions: Vec<_> = prefix.assertions().map(|exp| self.translate_exp(exp)).collect();
+        if candidates.is_empty() {
+            return FiniteDomain::Known(Vec::new());
+        }
+        // 已化简的锚点可能等于第一个候选。选第一个非恒等代入来判依赖，
+        // 全部相等时只复用本次的公共结果，不向依赖缓存登记“无关”。
+        let probe =
+            candidates.iter().map(|c| self.translate_exp(c)).enumerate().find(|(_, c)| c.z3_ast != anchor.z3_ast);
         let mut bool_atoms = Vec::new();
         let mut bool_literals = HashMap::new();
         for sym in prefix.bool_symbols() {
@@ -456,29 +494,65 @@ impl<B: BV> Solver<'_, B> {
             bool_literals.insert(negative.z3_ast, (sym, false));
             bool_atoms.push(negative);
         }
+        let mut cache = prefix.index.projection.borrow_mut();
+        prefix.translate_projection_suffix(self, &mut cache);
+        let ProjectionCache { assertions, guards, anchors, simplified } = &mut *cache;
+        let asts = &prefix.index.asts;
+        let dependencies = anchors.entry(asts.keep(anchor.clone())).or_default();
+        let mut common = ProjectionLiterals::new();
+        let empty = HashMap::new();
+        let mut dependent = Vec::new();
+        for &key in assertions.iter().rev().chain(guards.iter()) {
+            if let Some((_, probe_value)) = &probe {
+                let mut prepared = None;
+                if *dependencies.entry(key).or_insert_with(|| {
+                    let residual = asts.get(key).substitute(&anchor, probe_value);
+                    if residual.z3_ast == key {
+                        false
+                    } else {
+                        prepared = Some(residual);
+                        true
+                    }
+                }) {
+                    dependent.push((asts.get(key), prepared));
+                    continue;
+                }
+            }
+            let (truth, residual) = simplified.entry(key).or_insert_with(|| {
+                let mut residual = asts.get(key);
+                (residual.structural_bool(), asts.keep(residual))
+            });
+            match truth {
+                Some(false) => return FiniteDomain::Known(Vec::new()),
+                Some(true) => (),
+                None if common.record(bool_literals.get(residual).copied(), &empty) => (),
+                None => return FiniteDomain::Known(Vec::new()),
+            }
+        }
+
         let mut admissible = Vec::new();
         let mut exact = true;
-        'candidate: for candidate in candidates {
+        'candidate: for (index, candidate) in candidates.into_iter().enumerate() {
             let value = self.translate_exp(&candidate);
             let binding = (!free).then(|| Ast::mk_eq(&anchor, &value));
-            let mut literals = HashMap::new();
-            let mut satisfiable_by_literals = true;
+            let path_facts = dependent.iter().map(|(original, prepared)| {
+                let residual = match prepared {
+                    Some(first) if Some(index) == probe.as_ref().map(|(index, _)| *index) => first.clone(),
+                    _ => original.substitute(&anchor, &value),
+                };
+                let unchanged = original.z3_ast == residual.z3_ast;
+                (residual, unchanged)
+            });
+            let mut literals = ProjectionLiterals::new();
             let mut can_reuse_witness = self.has_stashed_model();
-            for (index, original) in assertions.iter().chain(&binding).enumerate() {
-                let is_path_fact = index < assertions.len();
-                let mut residual = if is_path_fact { original.substitute(&anchor, &value) } else { original.clone() };
-                let unchanged = residual.z3_ast == original.z3_ast && is_path_fact;
+            for (mut residual, unchanged) in path_facts.chain(binding.map(|eq| (eq, false))) {
                 match residual.structural_bool() {
                     Some(false) => continue 'candidate,
                     Some(true) => (),
                     None => {
                         can_reuse_witness &= unchanged;
-                        if let Some(&(literal, positive)) = bool_literals.get(&residual.z3_ast) {
-                            if literals.insert(literal, positive).is_some_and(|previous| previous != positive) {
-                                continue 'candidate;
-                            }
-                        } else {
-                            satisfiable_by_literals = false;
+                        if !literals.record(bool_literals.get(&residual.z3_ast).copied(), &common.values) {
+                            continue 'candidate;
                         }
                     }
                 }
@@ -512,7 +586,7 @@ impl<B: BV> Solver<'_, B> {
                 }
                 None => return FiniteDomain::Unknown,
             };
-            exact &= satisfiable_by_literals || can_reuse_witness;
+            exact &= (common.only_literals && literals.only_literals) || can_reuse_witness;
             if !admissible.contains(&value) {
                 admissible.push(value);
             }
@@ -528,6 +602,9 @@ impl<B: BV> Solver<'_, B> {
 #[cfg(test)]
 thread_local! {
     static PREFIX_EVENT_VISITS: Cell<usize> = const { Cell::new(0) };
+    static PROJECT_TRANSLATIONS: Cell<usize> = const { Cell::new(0) };
+    static PROJECT_SUBSTITUTIONS: Cell<usize> = const { Cell::new(0) };
+    pub(super) static STRUCTURAL_BOOLS: Cell<usize> = const { Cell::new(0) };
     static BOUND_SEARCHES: Cell<usize> = const { Cell::new(0) };
 }
 

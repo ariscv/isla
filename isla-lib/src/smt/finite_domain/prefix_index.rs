@@ -7,13 +7,58 @@ pub(in crate::smt) const BUFFERED: usize = usize::MAX;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Position(usize, usize);
 
-#[derive(Default)]
-pub(in crate::smt) struct PrefixIndex {
+pub(in crate::smt) struct PrefixIndex<'ctx> {
     symbols: ahash::AHashMap<Sym, Position>,
     rebindings: usize,
     assertions: Vec<Position>,
     bool_symbols: Vec<(Position, Sym)>,
+    pub(super) projection: RefCell<ProjectionCache>,
+    pub(super) asts: ProjectionAsts<'ctx>,
     pub(super) branch: RefCell<Option<BranchCandidates>>,
+}
+
+#[derive(Default)]
+pub(super) struct ProjectionCache {
+    pub(super) assertions: Vec<Z3_ast>,
+    pub(super) guards: Vec<Z3_ast>,
+    pub(super) simplified: HashMap<Z3_ast, (Option<bool>, Z3_ast)>,
+    pub(super) anchors: HashMap<Z3_ast, HashMap<Z3_ast, bool>>,
+}
+
+// 与 ConstBinding 相同，接管 Ast 的引用，由原 Context 释放。
+// 可变容器只存原生句柄，故 Solver 仍可借给生命周期较短的 Model。
+pub(super) struct ProjectionAsts<'ctx> {
+    ctx: &'ctx Context,
+    refs: RefCell<HashSet<Z3_ast>>,
+}
+
+impl<'ctx> ProjectionAsts<'ctx> {
+    pub(super) fn keep(&self, ast: Ast<'_>) -> Z3_ast {
+        assert!(std::ptr::eq(self.ctx, ast.ctx));
+        let key = ast.z3_ast;
+        if self.refs.borrow_mut().insert(key) {
+            std::mem::forget(ast);
+        }
+        key
+    }
+
+    pub(super) fn get(&self, key: Z3_ast) -> Ast<'ctx> {
+        assert!(self.refs.borrow().contains(&key));
+        unsafe { Z3_inc_ref(self.ctx.z3_ctx, key) };
+        Ast { ctx: self.ctx, z3_ast: key }
+    }
+
+    fn clear(&mut self) {
+        for key in self.refs.get_mut().drain() {
+            unsafe { Z3_dec_ref(self.ctx.z3_ctx, key) };
+        }
+    }
+}
+
+impl Drop for ProjectionAsts<'_> {
+    fn drop(&mut self) {
+        self.clear();
+    }
 }
 
 pub(super) struct BranchCandidates {
@@ -34,7 +79,19 @@ fn binding<B>(event: &Event<B>) -> Option<(Sym, bool)> {
     }
 }
 
-impl PrefixIndex {
+impl<'ctx> PrefixIndex<'ctx> {
+    pub(in crate::smt) fn new(ctx: &'ctx Context) -> Self {
+        Self {
+            symbols: Default::default(),
+            rebindings: 0,
+            assertions: Vec::new(),
+            bool_symbols: Vec::new(),
+            projection: RefCell::default(),
+            asts: ProjectionAsts { ctx, refs: RefCell::default() },
+            branch: RefCell::default(),
+        }
+    }
+
     pub(in crate::smt) fn push<B>(&mut self, segment: usize, offset: usize, event: &Event<B>) {
         #[cfg(test)]
         PREFIX_EVENT_VISITS.set(PREFIX_EVENT_VISITS.get() + 1);
@@ -44,6 +101,7 @@ impl PrefixIndex {
                 entry.insert(position);
             } else {
                 self.rebindings += 1;
+                self.invalidate_candidates();
             }
             if boolean {
                 self.bool_symbols.push((position, sym));
@@ -53,7 +111,7 @@ impl PrefixIndex {
         } else {
             return;
         }
-        self.invalidate_candidates();
+        *self.branch.get_mut() = None;
     }
 
     pub(in crate::smt) fn remove_suffix<B>(&mut self, segment: usize, events: &[Event<B>], start: usize) {
@@ -76,6 +134,8 @@ impl PrefixIndex {
     }
 
     pub(in crate::smt) fn invalidate_candidates(&mut self) {
+        *self.projection.get_mut() = ProjectionCache::default();
+        self.asts.clear();
         *self.branch.get_mut() = None;
     }
 
@@ -83,7 +143,13 @@ impl PrefixIndex {
         use crate::executor::stats::memory_stats::{exp_heap_bytes, map_bytes};
         use std::mem::size_of;
 
-        map_bytes::<Sym, Position>(self.symbols.capacity())
+        let cache = self.projection.borrow();
+        (cache.assertions.capacity() + cache.guards.capacity()) * size_of::<Z3_ast>()
+            + map_bytes::<Z3_ast, (Option<bool>, Z3_ast)>(cache.simplified.capacity())
+            + map_bytes::<Z3_ast, ()>(self.asts.refs.borrow().capacity())
+            + map_bytes::<Z3_ast, HashMap<Z3_ast, bool>>(cache.anchors.capacity())
+            + cache.anchors.values().map(|facts| map_bytes::<Z3_ast, bool>(facts.capacity())).sum::<usize>()
+            + map_bytes::<Sym, Position>(self.symbols.capacity())
             + self.assertions.capacity() * size_of::<Position>()
             + self.bool_symbols.capacity() * size_of::<(Position, Sym)>()
             + self.branch.borrow().as_ref().map_or(0, |branch| {
@@ -103,7 +169,7 @@ impl PrefixIndex {
 }
 
 pub(super) struct PathConditions<'a, B> {
-    pub(super) index: &'a PrefixIndex,
+    pub(super) index: &'a PrefixIndex<'a>,
     trace: &'a Trace<B>,
     buffered: &'a [Event<B>],
     guards: &'a [Exp<Sym>],
@@ -150,6 +216,17 @@ impl<'a, B: BV> PathConditions<'a, B> {
 
     pub(super) fn assertions(&self) -> impl Iterator<Item = &'a Exp<Sym>> + '_ {
         self.index.assertions.iter().rev().map(|position| self.assertion(*position)).chain(self.guards)
+    }
+
+    pub(super) fn translate_projection_suffix(&self, solver: &Solver<'_, B>, cache: &mut ProjectionCache) {
+        for &position in &self.index.assertions[cache.assertions.len()..] {
+            cache
+                .assertions
+                .push(self.index.asts.keep(solver.translate_projection_assertion(self.assertion(position))));
+        }
+        for guard in &self.guards[cache.guards.len()..] {
+            cache.guards.push(self.index.asts.keep(solver.translate_projection_assertion(guard)));
+        }
     }
 
     fn assertion(&self, position: Position) -> &'a Exp<Sym> {

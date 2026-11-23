@@ -2060,7 +2060,7 @@ pub struct Solver<'ctx, B> {
     savepoints: Vec<SolverSavepoint<'ctx, B>>,
     declaration_undo: Vec<DeclarationUndo<'ctx>>,
     transaction_events: Vec<Event<B>>,
-    finite_prefix: Option<finite_domain::PrefixIndex>,
+    finite_prefix: Option<finite_domain::PrefixIndex<'ctx>>,
     logical_arms: logical_arm::LogicalArms,
     // 与缓冲事件一一对应；不改变 Event，避免波及全部迹消费方。
     transaction_event_guards: Vec<Option<Exp<Sym>>>,
@@ -2810,7 +2810,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 savepoints: Vec::new(),
                 declaration_undo: Vec::new(),
                 transaction_events: Vec::new(),
-                finite_prefix: ctx.solver_options.finite_domain_enumeration.then(finite_domain::PrefixIndex::default),
+                finite_prefix: ctx
+                    .solver_options
+                    .finite_domain_enumeration
+                    .then(|| finite_domain::PrefixIndex::new(ctx)),
                 logical_arms: logical_arm::LogicalArms::default(),
                 transaction_event_guards: Vec::new(),
                 committed_transaction_events: Vec::new(),
