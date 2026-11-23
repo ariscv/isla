@@ -56,6 +56,18 @@ impl<W> LoopDependencies<W> {
         child
     }
 
+    /// 轮次已经只有一条继续路径。按执行顺序交出沿途完成的工作项，保留根槽供下一轮使用。
+    pub(in crate::executor) fn drain_spine(&mut self, frontier: &mut LoopNode) -> Vec<W> {
+        let mut retired = Vec::new();
+        while self.node(*frontier).parent.is_some() {
+            let (work, parent) = self.complete(*frontier);
+            retired.push(work);
+            *frontier = parent.unwrap().0;
+        }
+        retired.reverse();
+        retired
+    }
+
     pub(in crate::executor) fn can_complete(&self, id: LoopNode) -> bool {
         self.node(id).children.iter().all(Option::is_none)
     }

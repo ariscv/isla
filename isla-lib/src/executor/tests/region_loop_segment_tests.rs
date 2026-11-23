@@ -10,6 +10,19 @@ pub(super) fn segment_paths(
     memory: crate::memory::Memory<B64>,
     configure: impl FnOnce(&mut LocalFrame<'static, B64>),
 ) -> Vec<Path> {
+    segment_paths_with_solver(instrs, shared, inputs, limits, budget, memory, |frame, _| configure(frame), |_, _| {})
+}
+
+fn segment_paths_with_solver(
+    instrs: Vec<Instr<Name, B64>>,
+    shared: &SharedState<'static, B64>,
+    inputs: usize,
+    limits: ExecutionLimits,
+    budget: usize,
+    memory: crate::memory::Memory<B64>,
+    configure: impl FnOnce(&mut LocalFrame<'static, B64>, &mut Solver<B64>),
+    observe: impl Fn(&LocalFrame<'static, B64>, &mut Path) + Sync + 'static,
+) -> Vec<Path> {
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
     let mut solver = Solver::new(&context);
@@ -23,25 +36,29 @@ pub(super) fn segment_paths(
         let symbol = solver.declare_const(smtlib::Ty::Bool, info());
         frame.vars_mut().insert(test_name(900 + index as u32), UVal::Init(Val::Symbolic(symbol)));
     }
-    configure(&mut frame);
+    configure(&mut frame, &mut solver);
     let state = TaskState::new().with_execution_limits(limits).with_region_step_budget(budget);
     let output = Mutex::new(Vec::new());
     start_single(
         frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver)),
         shared,
         &output,
-        &|_, _, result, _, mut solver, output| match result {
+        &move |_, _, result, _, mut solver, output| match result {
             Ok((Run::Finished(value), frame)) => match solver.check_sat(info()) {
-                SmtResult::Sat => output.lock().unwrap().push(Path {
-                    exception: frame.get_exception().map(|(value, _)| value.clone()),
-                    records: frame.region_merge_records().clone(),
-                    value,
-                    events: solver.trace().to_vec().into_iter().rev().cloned().collect(),
-                    variables: frame.vars().clone(),
-                    registers: frame.regs().clone(),
-                    lets: frame.lets().clone(),
-                    checkpoint: checkpoint(&mut solver),
-                }),
+                SmtResult::Sat => {
+                    let mut path = Path {
+                        exception: frame.get_exception().map(|(value, _)| value.clone()),
+                        records: frame.region_merge_records().clone(),
+                        value,
+                        events: solver.trace().to_vec().into_iter().rev().cloned().collect(),
+                        variables: frame.vars().clone(),
+                        registers: frame.regs().clone(),
+                        lets: frame.lets().clone(),
+                        checkpoint: checkpoint(&mut solver),
+                    };
+                    observe(&frame, &mut path);
+                    output.lock().unwrap().push(path);
+                }
                 SmtResult::Unsat => (),
                 result => panic!("完成路径的可满足性查询失败：{result:?}"),
             },
@@ -53,6 +70,9 @@ pub(super) fn segment_paths(
     );
     output.into_inner().unwrap()
 }
+
+#[path = "region_loop_shapes_tests.rs"]
+mod shapes;
 
 pub(super) fn scan_program(
     counter: Name,
