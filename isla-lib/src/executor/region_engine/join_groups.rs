@@ -1,6 +1,12 @@
 //! 到达片段先准备状态与定义。只有批准的合并步骤可以发布定义、历史和事件。
 use super::join_terms::{self, Operation, Terms};
 use super::*;
+use std::collections::BTreeMap;
+
+#[cfg(test)]
+thread_local! {
+    pub(in crate::executor) static FOLD_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 use crate::executor::region_merge::fold_prepared_exit_frontiers;
 
 pub(in crate::executor) struct Arrival<'ir, B> {
@@ -108,6 +114,39 @@ struct Planner<'a, 'ctx, 'ir, B> {
     info: SourceLoc,
 }
 
+// 每个可折叠集合只需保留一个可重建的顺序。划分时固定最小未用成员，避免枚举组的排列。
+fn minimum_cover(
+    remaining: Vec<usize>,
+    blocks: &[(Vec<usize>, Vec<usize>)],
+    by_first: &[Vec<usize>],
+    memo: &mut BTreeMap<Vec<usize>, Vec<usize>>,
+) -> Vec<usize> {
+    let Some(&first) = remaining.first() else { return Vec::new() };
+    if let Some(solution) = memo.get(&remaining) {
+        return solution.clone();
+    }
+    let mut best = None;
+    for &index in &by_first[first] {
+        let (members, _) = &blocks[index];
+        if !members.iter().all(|member| remaining.binary_search(member).is_ok()) {
+            continue;
+        }
+        let rest = remaining.iter().copied().filter(|node| members.binary_search(node).is_err()).collect();
+        let mut solution = minimum_cover(rest, blocks, by_first, memo);
+        solution.push(index);
+        if best.as_ref().is_none_or(|current: &Vec<usize>| solution.len() < current.len()) {
+            let complete = solution.len() == 1;
+            best = Some(solution);
+            if complete {
+                break;
+            }
+        }
+    }
+    let best = best.expect("每个单成员块均可行");
+    memo.insert(remaining, best.clone());
+    best
+}
+
 impl<'ir, B: BV> Planner<'_, '_, 'ir, B> {
     fn earliest(&self, node: usize) -> usize {
         if let Some(fold) = node.checked_sub(self.arrivals.len()) {
@@ -156,6 +195,8 @@ impl<'ir, B: BV> Planner<'_, '_, 'ir, B> {
             Some(fold) => &self.folds[fold].prepared.pair.state.frame,
             None => &self.arrivals[node].frame,
         };
+        #[cfg(test)]
+        FOLD_ATTEMPTS.set(FOLD_ATTEMPTS.get() + 1);
         let prepared = PreparedFold::prepare(
             frame(left),
             frame(right),
@@ -188,19 +229,118 @@ impl<'ir, B: BV> Planner<'_, '_, 'ir, B> {
         Ok(Output::Complete { sides, pair })
     }
 
+    // 只剪掉当前已失败的有序前缀。同一集合的不同成功折叠可能有不同的后继，必须分别扩展。
+    fn feasible_blocks(
+        &mut self,
+        node: usize,
+        order: &mut Vec<usize>,
+        remaining: &mut [usize],
+        blocks: &mut BTreeMap<Vec<usize>, Vec<usize>>,
+    ) -> Result<bool, ExecError> {
+        let mut members = order.clone();
+        members.sort_unstable();
+        blocks.entry(members).or_insert_with(|| order.clone());
+        if remaining.is_empty() {
+            return Ok(true);
+        }
+        let mark = self.terms.mark();
+        let folds = self.folds.len();
+        for i in 0..remaining.len() {
+            let member = remaining[i];
+            match self.fold(node, member) {
+                Ok(next) => {
+                    remaining.swap(0, i);
+                    order.push(member);
+                    let complete = self.feasible_blocks(next, order, &mut remaining[1..], blocks)?;
+                    order.pop();
+                    remaining.swap(0, i);
+                    self.folds.truncate(folds);
+                    self.terms.discard(mark);
+                    if complete {
+                        return Ok(true);
+                    }
+                }
+                // 额外试探碰到不可用的折叠时，已有可发布的划分仍有效。
+                Err(ExecError::SpeculativeReject { .. }) => (),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(false)
+    }
+
+    // 同一活跃变量在所有成员中都只有严格具体值时，组内必须相等。
+    // End 可以丢弃局部 I64；区域私有槽也可能被删除。这些槽不能证明下界。
+    fn strict_lower_bound(&self) -> usize {
+        let at_end = self.arrivals.iter().any(|a| matches!(a.frame.instrs.get(a.frame.pc), Some(Instr::End)));
+        self.frame(0)
+            .vars()
+            .keys()
+            .filter_map(|name| {
+                if self.region.local_variables.contains(name) && !self.base.vars().contains_key(name) {
+                    return None;
+                }
+                let mut distinct = Vec::new();
+                for arrival in self.arrivals {
+                    let frame = &arrival.frame;
+                    let UVal::Init(value) = frame.vars().get(name)? else { return None };
+                    match value {
+                        Val::String(_) => (),
+                        Val::I64(_) if *name == RETURN || !at_end => (),
+                        _ => return None,
+                    }
+                    if !distinct.contains(&value) {
+                        distinct.push(value);
+                    }
+                }
+                Some(distinct.len())
+            })
+            .max()
+            .unwrap_or(1)
+    }
+
+    fn better_partition(
+        &mut self,
+        members: &mut [usize],
+        upper_bound: usize,
+    ) -> Result<Option<Vec<Vec<usize>>>, ExecError> {
+        let mut blocks = BTreeMap::new();
+        for i in 0..members.len() {
+            members.swap(0, i);
+            let first = members[0];
+            let complete = self.feasible_blocks(first, &mut vec![first], &mut members[1..], &mut blocks)?;
+            members.swap(0, i);
+            if complete {
+                let all = (0..members.len()).collect::<Vec<_>>();
+                return Ok(Some(vec![blocks.remove(&all).unwrap()]));
+            }
+        }
+        let blocks: Vec<_> = blocks.into_iter().collect();
+        let mut by_first = vec![Vec::new(); members.len()];
+        for (i, (block, _)) in blocks.iter().enumerate() {
+            by_first[block[0]].push(i);
+        }
+        let solution = minimum_cover((0..members.len()).collect(), &blocks, &by_first, &mut BTreeMap::new());
+        Ok((solution.len() < upper_bound).then(|| solution.iter().map(|&i| blocks[i].1.clone()).collect()))
+    }
+
     fn partition(&mut self) -> Result<(Vec<usize>, Option<ExecError>), ExecError> {
         let mut members: Vec<_> = (0..self.arrivals.len()).collect();
-        if !self.state.execution_limits.as_ref().is_some_and(|limits| limits.merge_concrete_values) {
+        let strict = !self.state.execution_limits.as_ref().is_some_and(|limits| limits.merge_concrete_values);
+        let start = self.terms.mark();
+        if strict {
             // 严格模式中，一个已有的 SMT 整数可承载多个具体值。优先用此表示，再按来源坐标排列。
             members.sort_by_cached_key(|&node| {
                 let frame = self.frame(node);
                 let integers = [frame.vars(), frame.lets()]
                     .into_iter()
                     .flat_map(|bindings| bindings.values())
-                    .filter(|value| {
-                        matches!(value, UVal::Init(Val::Symbolic(sym))
-                        if !self.terms.is_sail_bitvector(*sym)
-                            && matches!(self.terms.length(*sym), Some(64 | 128)))
+                    .filter_map(|value| match value {
+                        UVal::Init(val) => Some(val.symbolic_variables()),
+                        _ => None,
+                    })
+                    .flatten()
+                    .filter(|sym| {
+                        !self.terms.is_sail_bitvector(*sym) && matches!(self.terms.length(*sym), Some(64 | 128))
                     })
                     .count();
                 (std::cmp::Reverse(integers), node)
@@ -208,7 +348,7 @@ impl<'ir, B: BV> Planner<'_, '_, 'ir, B> {
         }
         let mut groups = Vec::new();
         let mut first_rejection = None;
-        for member in members {
+        for &member in &members {
             let mut selected = None;
             for group in &mut groups {
                 match self.fold(*group, member) {
@@ -225,6 +365,21 @@ impl<'ir, B: BV> Planner<'_, '_, 'ir, B> {
             }
             if selected.is_none() {
                 groups.push(member);
+            }
+        }
+        if groups.len() > 1 && !(strict && groups.len() == self.strict_lower_bound()) {
+            if let Some(orders) = self.better_partition(&mut members, groups.len())? {
+                self.folds.clear();
+                self.terms.discard(start);
+                groups.clear();
+                for order in orders {
+                    let (&first, rest) = order.split_first().unwrap();
+                    let node = rest
+                        .iter()
+                        .try_fold(first, |node, &next| self.fold(node, next))
+                        .expect("可行块的折叠顺序必须可重建");
+                    groups.push(node);
+                }
             }
         }
         groups.sort_unstable_by_key(|&node| self.earliest(node));
@@ -282,6 +437,28 @@ impl<'ir, B: BV> JoinPlan<'ir, B> {
         let symbols = planner.terms.symbol_range();
         let folds = planner.folds;
         Ok(Self { arrivals, folds, output, symbols })
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::executor) fn feasible_order(
+        arrivals: &[Arrival<'ir, B>],
+        order: &[usize],
+        base: &LocalFrame<'ir, B>,
+        region: &Region,
+        state: &TaskState<B>,
+        shared: &SharedState<'ir, B>,
+        solver: &Solver<B>,
+        info: SourceLoc,
+    ) -> bool {
+        let mut planner =
+            Planner { arrivals, folds: Vec::new(), terms: Terms::new(solver), base, region, state, shared, info };
+        let (&first, rest) = order.split_first().unwrap();
+        match rest.iter().try_fold(first, |node, &member| planner.fold(node, member)) {
+            Ok(_) => true,
+            Err(ExecError::SpeculativeReject { .. }) => false,
+            Err(error) => panic!("对照折叠失败：{error:?}"),
+        }
     }
 
     pub(super) fn separate_groups(&self) -> Option<usize> {
