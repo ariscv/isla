@@ -1,6 +1,6 @@
 //! 历史共享的克隆隔离、回滚和逻辑序列特征化。
 use super::*;
-fn record(id: usize) -> RegionMergeRecord<B64> {
+pub(super) fn record(id: usize) -> RegionMergeRecord<B64> {
     RegionMergeRecord {
         record_id: id,
         parent_record: None,

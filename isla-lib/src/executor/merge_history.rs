@@ -75,6 +75,10 @@ impl<B> MergeHistory<B> {
     }
     #[cfg(test)]
     pub(super) fn retained_record_slots(&self) -> usize {
+        self.retained_storage().1
+    }
+    #[cfg(test)]
+    pub(super) fn retained_storage(&self) -> (usize, usize) {
         let mut pending = vec![self];
         let mut seen = std::collections::HashSet::new();
         let mut slots = 0;
@@ -89,7 +93,7 @@ impl<B> MergeHistory<B> {
                 Items::Range(source, _) => pending.push(source),
             }
         }
-        slots
+        (seen.len(), slots)
     }
     pub fn clear(&mut self) {
         *self = Self::default();
@@ -128,15 +132,6 @@ impl<B> MergeHistory<B> {
         self.concat(other.range(start, other.len()));
     }
 
-    /// 用一个已汇总的根记录替换运行中循环的新增后缀；调用方必须把后缀中
-    /// 所有守卫、读取和访存载荷合并到该记录，不能静默丢弃语义信息。
-    pub(super) fn replace_suffix_with_root(&mut self, start: usize, root: RegionMergeRecord<B>) {
-        assert!(start <= self.len(), "循环历史替换起点不能越过末尾");
-        assert!(root.parent_record.is_none() && root.arm == "root", "循环历史汇总必须是根记录");
-        let mut retained = self.range(0, start);
-        retained.push(root);
-        *self = retained;
-    }
     pub fn push(&mut self, record: RegionMergeRecord<B>) {
         if let Some(segment) = Arc::get_mut(&mut self.0) {
             if let Some(Items::Leaf(items)) = &mut segment.items {

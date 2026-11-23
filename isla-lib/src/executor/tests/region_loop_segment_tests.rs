@@ -34,7 +34,7 @@ pub(super) fn segment_paths(
             Ok((Run::Finished(value), frame)) => match solver.check_sat(info()) {
                 SmtResult::Sat => output.lock().unwrap().push(Path {
                     exception: frame.get_exception().map(|(value, _)| value.clone()),
-                    records: frame.region_merge_records().to_vec(),
+                    records: frame.region_merge_records().clone(),
                     value,
                     events: solver.trace().to_vec().into_iter().rev().cloned().collect(),
                     variables: frame.vars().clone(),
@@ -531,6 +531,77 @@ fn loop_iteration_frontiers_keep_constant_history_after_each_round_body() {
         four[0].records.len(),
         sixteen[0].records.len()
     );
+}
+
+#[test]
+fn loop_prefix_compact_releases_history_behind_shared_prefix() {
+    if !run_in_diagnostics_process(concat!(
+        module_path!(),
+        "::loop_prefix_compact_releases_history_behind_shared_prefix"
+    )) {
+        return;
+    }
+    run_deep_region_test(|| {
+        let shared = empty_shared_state();
+        let counter = test_name(1800);
+        let choices = test_name(1801);
+        let choice = test_name(1802);
+        let root = super::super::merge_history_tests::record(region_merge::next_region_record());
+        let mut child = super::super::merge_history_tests::record(region_merge::next_region_record());
+        child.parent_record = Some(root.record_id);
+        child.arm = "then";
+        let mut sibling = super::super::merge_history_tests::record(region_merge::next_region_record());
+        sibling.parent_record = Some(root.record_id);
+        sibling.arm = "else";
+        let prefix: MergeHistory<_> = vec![child, sibling, root].into();
+        let run = |n| {
+            segment_paths(
+                scan_program(counter, choices, choice, n, None),
+                &shared,
+                n,
+                ExecutionLimits::default()
+                    .with_path_merging(true)
+                    .with_region_loop_analysis(true)
+                    .with_region_global_state(true),
+                128,
+                crate::memory::Memory::new(),
+                |frame| {
+                    let values = (0..n)
+                        .map(|i| match frame.vars()[&test_name(900 + i as u32)].clone() {
+                            UVal::Init(v) => v,
+                            _ => panic!("输入必须初始化"),
+                        })
+                        .collect();
+                    frame.vars_mut().insert(choices, UVal::Init(Val::Vector(values)));
+                    frame.vars_mut().insert(choice, UVal::Uninit(&Ty::Bool));
+                    frame.region_merge_records = prefix.clone();
+                },
+            )
+        };
+
+        assert!(!crate::config::RegionOptions::current().prefix_compact);
+        let off = [run(4), run(16)];
+        crate::config::RegionOptions { prefix_compact: true, ..Default::default() }.configure();
+        let on = [run(4), run(16)];
+        let mut retained = Vec::new();
+        for ((n, off), on) in [4, 16].into_iter().zip(off).zip(on) {
+            equivalent_scalar_paths(&off, &on, n);
+            assert_eq!(on.len(), 1, "N={n} 应得到一个合并终态");
+            let history = &on[0].records;
+            assert!(history.len() > prefix.len(), "必须完成循环合并");
+            for (actual, expected) in history.iter().zip(prefix.iter()) {
+                assert!(std::ptr::eq(actual, expected), "循环必须共享入口记录及父臂元数据");
+            }
+            let ids: HashSet<_> = history.iter().map(|record| record.record_id).collect();
+            assert_eq!(ids.len(), history.len(), "可见记录的 ID 必须唯一");
+            assert!(history.iter().all(|record| record.parent_record.is_none_or(|id| ids.contains(&id))));
+            // 执行已经返回，工作帧已释放。测终态仍能触及的分段和槽位。
+            let storage = history.retained_storage();
+            eprintln!("N={n}：{} 条可见记录、{} 个存活段、{} 个保活槽位", history.len(), storage.0, storage.1);
+            retained.push(storage);
+        }
+        assert_eq!(retained[0], retained[1], "循环轮数增加时，存活段数和保活槽位必须维持不变");
+    });
 }
 
 #[test]

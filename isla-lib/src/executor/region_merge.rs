@@ -1703,6 +1703,14 @@ fn compact_completed_loop_history<'ir, B: BV>(frame: &mut LocalFrame<'ir, B>, ba
     if frame.region_merge_records.len() <= start + 1 {
         return;
     }
+    debug_assert!(
+        frame
+            .region_merge_records
+            .iter()
+            .zip(base.region_merge_records.iter())
+            .all(|(current, original)| current.same_occurrence(original)),
+        "循环历史前缀必须与入口记录及父臂元数据一致"
+    );
     let mut root = frame.region_merge_records.suffix(start).last().cloned().expect("循环历史必须有汇总根记录");
     assert!(root.parent_record.is_none() && root.arm == "root", "循环历史末尾必须是根记录");
     let mut value_symbols = HashSet::new();
@@ -1719,7 +1727,10 @@ fn compact_completed_loop_history<'ir, B: BV>(frame: &mut LocalFrame<'ir, B>, ba
     root.input_symbols = input_symbols.into();
     root.single_arm_reads = single_arm_reads.into();
     root.memory_reads = memory_reads.into();
-    frame.region_merge_records.replace_suffix_with_root(start, root);
+    // 入口前缀可直接共享。从当前历史截取前缀会保活已汇总的旧后缀。
+    let mut retained = base.region_merge_records.clone();
+    retained.push(root);
+    frame.region_merge_records = retained;
 }
 
 fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
@@ -2062,8 +2073,15 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     assert!(matches!(result, RegionResult::Merged));
                     if compact_history {
                         compact_completed_loop_history(&mut next, &original_base);
-                        if exit_prefix.len() == 1 {
-                            compact_completed_loop_history(exit_prefix.last_mut().unwrap(), &original_base);
+                        if let [exit] = exit_prefix.as_mut_slice() {
+                            compact_completed_loop_history(exit, &original_base);
+                            // 下一次折叠的 previous_ids 只索引累计出口的可见后缀。
+                            exit_ids = Some(
+                                exit.region_merge_records
+                                    .suffix(original_base.region_merge_records.len())
+                                    .map(|record| record.record_id)
+                                    .collect(),
+                            );
                         }
                     }
                     solver.compact_region_query_prefix();

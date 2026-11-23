@@ -64,7 +64,7 @@ fn run_in_diagnostics_process(test_path: &str) -> bool {
 }
 
 pub(super) struct Path {
-    pub(super) records: Vec<RegionMergeRecord<B64>>,
+    pub(super) records: MergeHistory<B64>,
     pub(super) value: Val<B64>,
     exception: Option<Val<B64>>,
     events: Vec<Event<B64>>,
@@ -132,7 +132,7 @@ fn paths_with_solver_state(
         &move |_, _, result, _, mut solver, output| match result {
             Ok((Run::Finished(value), frame)) => match solver.check_candidate_sat(info()) {
                 Some(SmtResult::Sat) | None => output.lock().unwrap().0.push(Path {
-                    records: frame.region_merge_records().to_vec(),
+                    records: frame.region_merge_records().clone(),
                     value,
                     exception: frame.get_exception().map(|(value, _)| value.clone()),
                     events: solver.trace().to_vec().into_iter().rev().cloned().collect(),
@@ -2056,7 +2056,7 @@ fn region_merge_prior_fresh_definitions_remain_dependencies_after_next_merge() {
     let merged = paths(program, &shared, 2, true);
     assert_eq!(merged.len(), 1);
     assert!(merged[0].records.len() >= 2);
-    for record in &merged[0].records {
+    for record in merged[0].records.iter() {
         assert!(
             record.input_symbols.iter().all(|symbol| symbol.id < 2),
             "历史纯原语的新鲜定义不能在后续区域提交后重新变成自由输入"
@@ -3088,7 +3088,7 @@ fn merge_enumeration_nested_context_and_fork_inheritance() {
         solver.add_event(event.clone());
     }
     let mut frame = make_frame(vec![Instr::End]);
-    frame.region_merge_records = path.records.clone().into();
+    frame.region_merge_records = path.records.clone();
     let mut restored = make_frame(vec![Instr::End]);
     restored.restore_merge_history(frame.merge_history());
     assert_eq!(restored.region_merge_records().len(), 2);

@@ -454,7 +454,7 @@ fn region_crossing_loop_budget_rejection_preserves_complete_execution() {
                 if solver.check_sat(info()).is_sat().unwrap() {
                     output.lock().unwrap().push(Path {
                         exception: frame.get_exception().map(|(value, _)| value.clone()),
-                        records: frame.region_merge_records().to_vec(),
+                        records: frame.region_merge_records().clone(),
                         value,
                         events: solver.trace().to_vec().into_iter().rev().cloned().collect(),
                         variables: frame.vars().clone(),
@@ -617,7 +617,7 @@ fn bounded_iteration_paths(program: Vec<Instr<Name, B64>>, groups: &[usize], exp
 
     vec![Path {
         exception: None,
-        records: frame.region_merge_records().to_vec(),
+        records: frame.region_merge_records().clone(),
         value,
         events: solver.trace().to_vec().into_iter().rev().cloned().collect(),
         variables: frame.vars().clone(),
