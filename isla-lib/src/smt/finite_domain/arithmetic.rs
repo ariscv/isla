@@ -264,6 +264,55 @@ impl<'ctx> Expression<'_, 'ctx> {
     }
 }
 
+// 每位代表一类输入。超过 128 个输入时碰撞只会多保留代入项。
+fn input_bit(index: usize) -> u128 {
+    1 << (index % u128::BITS as usize)
+}
+
+// 断言根、输入和各自的子节点在此次遍历中均由调用方持有。
+// 即使节点本身是锚点也要统计子树：某组赋值可能只选中了内层锚点。
+fn assertion_inputs(inputs: &[Input], facts: &[(&Formula, Ast)]) -> Vec<u128> {
+    let mut anchors = HashMap::new();
+    for (i, input) in inputs.iter().enumerate() {
+        *anchors.entry(input.anchor.z3_ast).or_insert(0) |= input_bit(i);
+    }
+    let mut dependencies = HashMap::new();
+    facts
+        .iter()
+        .map(|(_, fact)| {
+            let z3 = fact.ctx.z3_ctx;
+            let mut pending = vec![(fact.z3_ast, false)];
+            while let Some((node, expanded)) = pending.pop() {
+                if dependencies.contains_key(&node) {
+                    continue;
+                }
+                let mut mask = anchors.get(&node).copied().unwrap_or(0);
+                unsafe {
+                    match Z3_get_ast_kind(z3, node) {
+                        AstKind::App => {
+                            let app = Z3_to_app(z3, node);
+                            let children = (0..Z3_get_app_num_args(z3, app)).map(|i| Z3_get_app_arg(z3, app, i));
+                            if !expanded {
+                                pending.push((node, true));
+                                pending.extend(children.map(|child| (child, false)));
+                                continue;
+                            }
+                            for child in children {
+                                mask |= dependencies[&child];
+                            }
+                        }
+                        AstKind::Numeral | AstKind::Var => (),
+                        // 带绑定器的子式交给 Z3 按原有作用域执行全部代入。
+                        _ => mask = u128::MAX,
+                    }
+                }
+                dependencies.insert(node, mask);
+            }
+            dependencies[&fact.z3_ast]
+        })
+        .collect()
+}
+
 impl<'ctx, B: BV> Solver<'ctx, B> {
     /// 按产生目标值的输入重算活动守卫。只要一组赋值尚未被排除，就保留该值。
     pub(crate) fn refine_guarded_values(
@@ -321,6 +370,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             return None;
         }
         let facts: Vec<_> = prefix.assertions().map(|exp| (exp, self.translate_exp(exp))).collect();
+        let dependencies = assertion_inputs(&graph.inputs, &facts);
         let mut negative_atoms = Vec::new();
         let mut literals = HashMap::new();
         for sym in prefix.bool_symbols() {
@@ -334,8 +384,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             let mut projected = HashMap::new();
             let mut anchors = Vec::new();
             let mut values = Vec::new();
-            let mut free_anchors = Vec::new();
-            let mut free_values = Vec::new();
+            let mut free_replacements = Vec::new();
             let mut bindings = Vec::new();
             for &(index, next) in stack {
                 let input = &graph.inputs[index];
@@ -346,31 +395,50 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 anchors.push(input.anchor.z3_ast);
                 values.push(assigned.z3_ast);
                 if input.free {
-                    free_anchors.push(input.anchor.z3_ast);
-                    free_values.push(assigned.z3_ast);
+                    free_replacements.push((input.anchor.z3_ast, assigned.z3_ast));
                 } else {
                     bindings.push(input.anchor.mk_eq(assigned));
                 }
             }
             let replacements: Vec<_> = anchors.iter().copied().zip(values.iter().copied()).collect();
-            let free_replacements: Vec<_> = free_anchors.iter().copied().zip(free_values.iter().copied()).collect();
+            let mut local_replacements = HashMap::new();
             let rewrites = &prefix.index.rewrites;
+            // 派生输入必须满足其定义。先用同组自由输入检查绑定，矛盾组无需访问路径断言。
+            // 幸存组仍按原顺序合取残余，绑定的化简结果已在重写表内。
+            if !free_replacements.is_empty()
+                && bindings.iter().any(|binding| {
+                    let (_, _, fact) = rewrites.narrow(&free_replacements, binding);
+                    rewrites.simplified(fact).0 == Some(false)
+                })
+            {
+                return true;
+            }
             let mut residual = Ast::mk_bool(self.ctx, true);
             let mut assignments_by_literal = HashMap::new();
             let mut exact = true;
             let mut reuse_witness = self.has_stashed_model() && bindings.is_empty();
             let mut possible = true;
-            for (source, original) in
-                facts.iter().map(|(exp, ast)| (Some(*exp), ast)).chain(bindings.iter().map(|ast| (None, ast)))
-            {
-                let (unchanged, truth, mut fact) = if source.is_some() {
-                    rewrites.narrow(&replacements, original, &anchors, &values)
+            let assertions = facts.iter().zip(&dependencies).map(|((exp, ast), mask)| (Some((*exp, *mask)), ast));
+            for (source, original) in assertions.chain(bindings.iter().map(|ast| (None, ast))) {
+                let relevant = if let Some((_, mask)) = source {
+                    local_replacements
+                        .entry(mask)
+                        .or_insert_with(|| {
+                            stack
+                                .iter()
+                                .zip(&replacements)
+                                .filter(|((index, _), _)| mask & input_bit(*index) != 0)
+                                .map(|(_, pair)| *pair)
+                                .collect::<Vec<_>>()
+                        })
+                        .as_slice()
                 } else {
-                    rewrites.narrow(&free_replacements, original, &free_anchors, &free_values)
+                    &free_replacements
                 };
+                let (unchanged, truth, mut fact) = rewrites.narrow(relevant, original);
                 reuse_witness &= unchanged;
                 if truth.is_none() {
-                    if let Some(source) = source.filter(|_| !projected.is_empty()) {
+                    if let Some((source, _)) = source.filter(|_| !projected.is_empty()) {
                         let mut changed = false;
                         let substituted = source
                             .map_var(&mut |sym| {

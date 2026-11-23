@@ -105,19 +105,18 @@ impl<'ctx> Rewrites<'ctx> {
         fact
     }
 
-    pub(super) fn narrow(
-        &self,
-        replacements: &[Replacement],
-        original: &Ast,
-        from: &[Z3_ast],
-        to: &[Z3_ast],
-    ) -> (bool, Option<bool>, Ast<'ctx>) {
+    pub(super) fn narrow(&self, replacements: &[Replacement], original: &Ast<'ctx>) -> (bool, Option<bool>, Ast<'ctx>) {
+        if replacements.is_empty() {
+            let (truth, residual) = self.simplified(original.clone());
+            return (true, truth, residual);
+        }
         let find = |g: &Generation<Vec<Replacement>, ByAssertion>| {
             g.entries.borrow().get(replacements).and_then(|m| m.get(&original.z3_ast)).copied()
         };
         let present = find(&self.joint.current);
         let fact = present.or_else(|| find(&self.joint.previous)).unwrap_or_else(|| {
-            let mut residual = original.substitute_many(from, to);
+            let (from, to): (Vec<_>, Vec<_>) = replacements.iter().copied().unzip();
+            let mut residual = original.substitute_many(&from, &to);
             Narrowed {
                 unchanged: residual.z3_ast == original.z3_ast,
                 truth: residual.structural_bool(),

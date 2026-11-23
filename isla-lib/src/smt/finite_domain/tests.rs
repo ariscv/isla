@@ -530,6 +530,8 @@ fn slice_queries_joint_combinations_reuse_native_rewrites() {
         solver.rollback_transaction(tx);
     }
     eprintln!("联合切片相邻臂的全量代入／化简 {counts:?}");
+    // 第一次联合查询也应只代入引用当前锚点的断言：两条上界各有两种局部赋值。
+    assert!(counts[0].0 <= 4, "无关断言不应随四组输入被重复代入");
     assert!(counts[1].0 <= 12 && counts[1].1 <= 32);
 }
 
@@ -772,4 +774,81 @@ fn zero_extend_width_under_mask_choices_matches_eager_solver() {
         assert_eq!(actual, expected, "掩码选择守卫 {guard:?}");
         solver.rollback_transaction(arm);
     }
+}
+
+#[test]
+fn joint_rejects_inconsistent_derived_guards_before_rewriting_path() {
+    use Exp::*;
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut s = Solver::<B64>::new(&ctx);
+    let info = SourceLoc::unknown();
+    let x = s.declare_bitvector(8, info);
+    s.assert(Or(Box::new(equal(x, 1)), Box::new(equal(x, 2))));
+    let odd =
+        s.define_const(Eq(Box::new(Bvand(Box::new(Var(x)), Box::new(bits64(1, 8)))), Box::new(bits64(1, 8))), info);
+    let chosen = Ite(Box::new(Var(odd)), Box::new(bits64(1, 8)), Box::new(bits64(2, 8)));
+    for _ in 0..16 {
+        let flag = s.declare_const(Ty::Bool, info);
+        s.assert(Or(Box::new(Var(flag)), Box::new(Eq(Box::new(Var(x)), Box::new(chosen.clone())))));
+    }
+    let sum = Bvadd(Box::new(Var(x)), Box::new(chosen));
+    let prefix = PathConditions::new(&s).unwrap();
+    let mut old = Vec::new();
+    let mut new = Vec::new();
+    s.reference_combined_values(&prefix, &sum, |mut value, cert| {
+        old.push((value.finite_bits().unwrap(), cert));
+        true
+    })
+    .unwrap();
+    let (_, subs, _) = projection_counts(|| {
+        s.combined_values(&prefix, &sum, |mut value, cert| {
+            new.push((value.finite_bits().unwrap(), cert));
+            true
+        })
+        .unwrap()
+    });
+    eprintln!("派生守卫四组赋值的代入次数 {subs}");
+    assert_eq!(new, old);
+    assert_eq!(new.len(), 2);
+    assert!(subs <= 40, "先用自由输入验证绑定，只让一致的两组触碰普通断言");
+}
+
+#[test]
+fn joint_nested_anchors_match_reference_across_partial_assignments() {
+    use Exp::*;
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut s = Solver::<B64>::new(&ctx);
+    let info = SourceLoc::unknown();
+    let inner = s.declare_const(Ty::Bool, info);
+    let fun = s.fresh();
+    s.add(Def::DeclareFun(fun, vec![Ty::Bool], Ty::Bool));
+    let outer = App(fun, vec![Var(inner)]);
+    s.assert(outer.clone());
+    s.assert(not(App(fun, vec![Bool(false)])));
+    let choose = |g, a, b| Ite(Box::new(g), Box::new(a), Box::new(b));
+    // 内层锚点既在外层锚点里面，也能在外层未赋值时单独被选择。
+    let branch = s.declare_const(Ty::Bool, info);
+    let mut size =
+        choose(Var(branch), choose(outer, bits64(1, 8), bits64(5, 8)), choose(Var(inner), bits64(2, 8), bits64(3, 8)));
+
+    // 独立守卫的数量超过摘要位数，碰撞只能增加工作，不能漏掉代入。
+    for _ in 0..129 {
+        let guard = s.declare_const(Ty::Bool, info);
+        size = choose(Var(guard), bits64(4, 8), size);
+    }
+    let prefix = PathConditions::new(&s).unwrap();
+    let collect = |out: &mut Vec<_>, mut value: Ast, certified| {
+        out.push((value.finite_bits().unwrap(), certified));
+        true
+    };
+    let mut old = Vec::new();
+    s.reference_combined_values(&prefix, &size, |v, c| collect(&mut old, v, c)).unwrap();
+    assert!(old.iter().any(|(v, _)| *v == bits64(2, 8)));
+    assert!(!old.iter().any(|(v, _)| *v == bits64(3, 8)));
+
+    let mut new = Vec::new();
+    s.combined_values(&prefix, &size, |v, c| collect(&mut new, v, c)).unwrap();
+    assert_eq!(new, old);
 }
