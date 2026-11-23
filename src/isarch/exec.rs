@@ -316,7 +316,7 @@ pub(crate) fn encdec_guard_roundtrip_ok<B: BV>(
                         match solver.check_sat(SourceLoc::unknown()) {
                             isla_lib::smt::SmtResult::Sat => Ok(Some(ret)),
                             isla_lib::smt::SmtResult::Unsat => Ok(None),
-                            isla_lib::smt::SmtResult::Unknown => Err(ExecError::Z3Unknown),
+                            isla_lib::smt::SmtResult::Unproven(error) => Err(ExecError::Unproven(error)),
                             isla_lib::smt::SmtResult::Error(error) => {
                                 let error = ExecError::Smt(error);
                                 frame.configure_timeout_smt_dump(&error, shared_state);
@@ -930,6 +930,9 @@ impl SolveCollectorState {
 
     fn record_error(&mut self, error: &ExecError) {
         self.summary.errors += 1;
+        if let Some(reason) = error.rejection_reason() {
+            *self.summary.failure_reasons.entry(reason).or_default() += 1;
+        }
         self.summary.execution_timeouts += usize::from(matches!(error, ExecError::Timeout));
         self.summary.smt_timeouts += usize::from(matches!(error, ExecError::Smt(SmtError::Timeout(_))));
         if self.first_error.is_none() {
@@ -995,12 +998,14 @@ impl ErrorRecorder<'_> {
         if let ExecError::Smt(SmtError::NoSmt { reason, source_loc }) = error {
             eprintln!(
                 "{}",
-                serde_json::json!({"kind":"no_smt_terminated_path", "reason":reason,"source":source_loc,"signature":frame.path_signature(),"certification":"uncertified"})
+                serde_json::json!({"kind":"no_smt_terminated_path", "reason":error.rejection_reason(), "purpose":reason,"source":source_loc,"signature":frame.path_signature(),"certification":"uncertified"})
             );
         }
         self.collected.lock().expect("solve collector mutex poisoned").diagnostics.push(serde_json::json!({
             "status": "incomplete",
-            "reason": "path-error",
+            "reason": error.rejection_reason().map_or_else(|| "path-error".to_owned(), |reason| reason.to_string()),
+            "cause": error.query_failure().map(SmtError::diagnostic),
+            "source": error.source_loc(),
             "path-signature": frame.path_signature(),
             "error": error.to_string(),
         }));
@@ -1131,7 +1136,7 @@ fn diversify_unconstrained_finite_domains<'ir, B: BV>(
     let mut finite_domain_symbols = Vec::new();
     match solver.check_sat(SourceLoc::unknown()) {
         isla_lib::smt::SmtResult::Sat => (),
-        isla_lib::smt::SmtResult::Unsat | isla_lib::smt::SmtResult::Unknown => return Ok(()),
+        isla_lib::smt::SmtResult::Unsat | isla_lib::smt::SmtResult::Unproven(_) => return Ok(()),
         isla_lib::smt::SmtResult::Error(error) => return Err(ExecError::Smt(error)),
     }
     {
@@ -1178,7 +1183,7 @@ fn diversify_unconstrained_finite_domains<'ir, B: BV>(
                 // Unsat 说明这条路径已经把该字段约束成别的值了，保持原样。
                 match solver.check_sat_with(&preferred, SourceLoc::unknown()) {
                     isla_lib::smt::SmtResult::Sat => solver.add(isla_lib::smt::smtlib::Def::Assert(preferred)),
-                    isla_lib::smt::SmtResult::Unsat | isla_lib::smt::SmtResult::Unknown => (),
+                    isla_lib::smt::SmtResult::Unsat | isla_lib::smt::SmtResult::Unproven(_) => (),
                     isla_lib::smt::SmtResult::Error(error) => return Err(ExecError::Smt(error)),
                 }
             }
@@ -1201,7 +1206,7 @@ fn diversify_unconstrained_finite_domains<'ir, B: BV>(
     if let Some(preferred) = arbitrary_preferred {
         match solver.check_sat_with(&preferred, SourceLoc::unknown()) {
             isla_lib::smt::SmtResult::Sat => solver.add(isla_lib::smt::smtlib::Def::Assert(preferred)),
-            isla_lib::smt::SmtResult::Unsat | isla_lib::smt::SmtResult::Unknown => (),
+            isla_lib::smt::SmtResult::Unsat | isla_lib::smt::SmtResult::Unproven(_) => (),
             isla_lib::smt::SmtResult::Error(error) => return Err(ExecError::Smt(error)),
         }
     }
@@ -1875,7 +1880,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         Some(isla_lib::smt::SmtResult::Unsat) => {
             return Err(ExecError::Unreachable("当前初态约束不可满足，不能判为编码域不适用".into()))
         }
-        Some(isla_lib::smt::SmtResult::Unknown) => return Err(ExecError::Z3Unknown),
+        Some(isla_lib::smt::SmtResult::Unproven(error)) => return Err(ExecError::Unproven(error)),
         Some(isla_lib::smt::SmtResult::Error(error)) => return Err(ExecError::Smt(error)),
     }
 
@@ -2383,7 +2388,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                             }
                             other => {
                                 let error = match other {
-                                    isla_lib::smt::SmtResult::Unknown => ExecError::Z3Unknown,
+                                    isla_lib::smt::SmtResult::Unproven(error) => ExecError::Unproven(error),
                                     isla_lib::smt::SmtResult::Error(error) => ExecError::Smt(error),
                                     _ => unreachable!(),
                                 };
@@ -2456,7 +2461,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 let preferred = Exp::And(Box::new(fs_enabled), Box::new(vs_enabled));
                                 match solver.check_sat_with(&preferred, SourceLoc::unknown()) {
                                     isla_lib::smt::SmtResult::Sat => solver.assert(preferred),
-                                    isla_lib::smt::SmtResult::Unsat | isla_lib::smt::SmtResult::Unknown => (),
+                                    isla_lib::smt::SmtResult::Unsat | isla_lib::smt::SmtResult::Unproven(_) => (),
                                     isla_lib::smt::SmtResult::Error(error) => {
                                         let error = ExecError::Smt(error);
                                         trace_diagnostics =
@@ -2566,7 +2571,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                     return;
                                 }
                                 let error = match smt_result {
-                                    isla_lib::smt::SmtResult::Unknown => ExecError::Z3Unknown,
+                                    isla_lib::smt::SmtResult::Unproven(error) => ExecError::Unproven(error),
                                     _ => unreachable!(),
                                 };
                                 trace_diagnostics = error_recorder.record_error_diagnostic(&error, frame, shared_state);
@@ -3070,7 +3075,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             .iter()
             .filter(|case| case.materialization_timed_out)
             .map(|case| {
-                serde_json::json!({"status":"incomplete", "reason":"final-model-query-timeout",
+                serde_json::json!({"status":"incomplete", "reason":"unknown_solver",
             "path-signature":case.path_signature, "symbolic-return-value":case.item.ret_val})
             })
             .collect::<Vec<_>>(),
@@ -3733,7 +3738,8 @@ mod tests {
             dump: Arc::new(TimeoutSmtDump::new(Arc::new(NamesDump))),
         });
         for error in [
-            SmtError::Unknown {
+            SmtError::SolverUnknown {
+                reason: "测试注入".into(),
                 source_loc: SourceLoc::unknown(),
                 purpose: "terminal_value",
                 wall: Duration::from_millis(1),
@@ -3761,7 +3767,7 @@ mod tests {
             let message = panic.downcast_ref::<String>().unwrap();
             assert!(message.contains("function=test_function"), "{message}");
             assert!(
-                message.contains(if is_timeout { "reason=timeout" } else { "purpose=terminal_value" }),
+                message.contains(if is_timeout { "reason=unknown_solver" } else { "purpose=terminal_value" }),
                 "{message}"
             );
             let drop_start = shared_state.execution_stats.solver_path_drop_count();
@@ -3804,10 +3810,49 @@ mod tests {
     }
 
     #[test]
+    fn unknown_taxonomy_counts_each_terminal_reason() {
+        let loc = SourceLoc::unknown();
+        let mut state = SolveCollectorState::new();
+        for error in [
+            ExecError::Smt(SmtError::FiniteDomain {
+                source_loc: loc,
+                symbol: Sym::from_u32(7),
+                width: 64,
+                candidates: None,
+            }),
+            ExecError::Smt(SmtError::SolverUnknown {
+                source_loc: loc,
+                purpose: "test",
+                reason: "rlimit".into(),
+                wall: Duration::ZERO,
+                limit: None,
+            }),
+            ExecError::Unproven(SmtError::DeferredQuery { source_loc: loc, purpose: "model_or_general" }),
+            ExecError::Timeout,
+        ] {
+            state.record_error(&error);
+        }
+        let mut total = SolveSummary::default();
+        total.merge(&state.summary);
+        assert_eq!(
+            total.json()["failure-reasons"],
+            serde_json::json!({
+                "unknown_finite_domain":1, "unknown_solver":1, "unknown_deferred_mode":1, "path_timeout":1
+            })
+        );
+        let saved = serde_json::from_value(total.json()).unwrap();
+        assert_eq!(super::super::path_cache::restored_summary(&saved).failure_reasons, total.failure_reasons);
+        assert_eq!(total.errors, 4);
+    }
+
+    #[test]
     fn collector_preserves_first_error_including_non_smt() {
         let mut state = SolveCollectorState::new();
         state.record_error(&ExecError::AssertionFailure(None, SourceLoc::unknown()));
-        state.record_error(&ExecError::Z3Unknown);
+        state.record_error(&ExecError::Unproven(SmtError::DeferredQuery {
+            source_loc: SourceLoc::unknown(),
+            purpose: "test",
+        }));
         assert!(matches!(state.first_error, Some(ExecError::AssertionFailure(_, _))));
         state.record_error(&ExecError::Timeout);
         assert!(matches!(state.first_error, Some(ExecError::AssertionFailure(_, _))));

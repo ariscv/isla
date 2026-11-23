@@ -23,8 +23,10 @@ pub struct RegionOptions {
     pub no_smt_keep_bool_proofs: bool,
     /// 延迟区域出口检查；默认关闭。
     pub defer_exit_check: bool,
-    /// 嵌套区域遇到 solver_unknown 时，保留外层区域并在其中退化为普通分叉；默认关闭。
-    pub partial_commit_solver_unknown: bool,
+    /// 嵌套区域遇到相应拒绝时，保留外层区域并继续两个普通片段。
+    pub partial_commit_finite_domain: bool,
+    pub partial_commit_solver: bool,
+    pub partial_commit_deferred_mode: bool,
     /// 分支入口识别布尔恒值；默认开启。
     pub prune_constant_branches: bool,
     pub arm_error_leaf: bool,
@@ -37,8 +39,9 @@ pub struct RegionOptions {
     pub witness_shadow: bool,
     /// 局部见证补全影子诊断；默认关闭。
     pub witness_local_shadow: bool,
-    /// 迭代边界前缀固化，并压缩无架构写入循环的运行时记录历史；默认关闭。
+    /// 迭代边界前缀固化，并压缩已完成轮次的记录和逻辑臂；默认关闭。
     pub prefix_compact: bool,
+    pub loop_fold_shapes: bool,
     /// 可选布尔证明资源统计；默认关闭。
     pub bool_proof_profile: bool,
     /// 区域步数和查询进度诊断；默认关闭。
@@ -90,13 +93,16 @@ impl RegionOptions {
             no_smt: limits.solver.no_smt,
             no_smt_keep_bool_proofs: limits.solver.no_smt_keep_bool_proofs,
             defer_exit_check: merge.defer_exit_check,
-            partial_commit_solver_unknown: merge.partial_commit_solver_unknown,
+            partial_commit_finite_domain: merge.partial_commit_finite_domain,
+            partial_commit_solver: merge.partial_commit_solver,
+            partial_commit_deferred_mode: merge.partial_commit_deferred_mode,
             prune_constant_branches: merge.prune_constant_branches,
             arm_error_leaf: merge.arm_error_leaf,
             arm_error_batch_size: merge.solver.arm_error_batch_size,
             lazy_z3_scope: merge.lazy_z3_scope,
             witness_eval: merge.witness_eval,
             prefix_compact: merge.prefix_compact,
+            loop_fold_shapes: merge.loop_fold_shapes,
             bool_proof_rlimit: limits.solver.bool_proof_rlimit,
             witness_shadow: diagnostics.witness_shadow,
             witness_local_shadow: diagnostics.witness_local_shadow,

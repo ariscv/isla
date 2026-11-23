@@ -16,13 +16,15 @@ pub enum SpeculationMode {
 }
 
 /// 上层位置优先报告来源；直接使用底层分叉接口时报告对应底层标签。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SpeculativeRejectReason {
-    SolverUnknown,
+    UnknownFiniteDomain,
+    UnknownSolver,
+    UnknownDeferredMode,
+    ExitUnsat,
     SymbolicAssertion,
-    SmtError,
-    Timeout,
+    PathTimeout,
     NoJoin,
     HasBackEdge,
     ExceptionCheck,
@@ -67,6 +69,21 @@ pub enum SpeculativeRejectReason {
     Assert,
     Arbitrary,
     Exit,
+}
+
+impl SpeculativeRejectReason {
+    pub(crate) fn is_indeterminate(self) -> bool {
+        matches!(self, Self::UnknownFiniteDomain | Self::UnknownSolver | Self::UnknownDeferredMode | Self::PathTimeout)
+    }
+
+    pub(crate) fn partial_commit(self, options: &crate::config::RegionOptions) -> bool {
+        match self {
+            Self::UnknownFiniteDomain => options.partial_commit_finite_domain,
+            Self::UnknownSolver => options.partial_commit_solver,
+            Self::UnknownDeferredMode => options.partial_commit_deferred_mode,
+            _ => false,
+        }
+    }
 }
 
 impl fmt::Display for SpeculativeRejectReason {
@@ -162,15 +179,17 @@ pub(super) fn force_diagnostic(
 ) -> String {
     use crate::error::ExecError;
     let (reason, rejected_function, rejected_pc, rejected_location) = match error {
-        ExecError::SpeculativeReject { reason, function, pc, location } => (*reason, Some(*function), *pc, *location),
-        ExecError::Smt(error) => (SpeculativeRejectReason::SmtError, None, pc, error.source_loc()),
-        ExecError::Timeout => (SpeculativeRejectReason::Timeout, None, pc, location),
+        ExecError::SpeculativeReject { reason, function, pc, location, .. } => {
+            (*reason, Some(*function), *pc, *location)
+        }
+        ExecError::Smt(error) | ExecError::Unproven(error) => (error.reject_reason(), None, pc, error.source_loc()),
+        ExecError::Timeout => (SpeculativeRejectReason::PathTimeout, None, pc, location),
         _ => (SpeculativeRejectReason::IncompatibleState, None, pc, location),
     };
     json!({"kind":"force_region_merge_failure", "rule":rule, "function":function,
         "branch_pc":pc, "source_loc":location, "reason":reason,
         "rejected_function_id":rejected_function, "rejected_pc":rejected_pc,
-        "rejected_source_loc":rejected_location, "force_origin":origin, "error":error.to_string()})
+        "rejected_source_loc":rejected_location, "force_origin":origin, "cause":error.query_failure().map(|cause|cause.diagnostic()), "error":error.to_string()})
     .to_string()
 }
 

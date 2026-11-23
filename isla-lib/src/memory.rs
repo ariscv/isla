@@ -388,7 +388,7 @@ impl<B: BV> Memory<B> {
                 let overlaps = crate::smt::smtlib::Exp::Not(Box::new(disjoint));
                 match solver.check_candidate_sat_with(&overlaps, loc) {
                     Some(SmtResult::Unsat) => Ok(true),
-                    None | Some(SmtResult::Sat | SmtResult::Unknown) => Ok(false),
+                    None | Some(SmtResult::Sat | SmtResult::Unproven(_)) => Ok(false),
                     Some(SmtResult::Error(error)) => Err(ExecError::Smt(error)),
                 }
             }
@@ -600,7 +600,7 @@ impl<B: BV> Memory<B> {
                     let uniqueness_constraint = Neq(Box::new(addr_exp), Box::new(bits64(sat_address, cmp_size)));
                     match solver.check_sat_with(&uniqueness_constraint, SourceLoc::unknown()) {
                         Unsat => Ok(Overlap::Unique(sat_address)),
-                        Unknown => Err(ExecError::Z3Unknown),
+                        Unproven(error) => Err(ExecError::Unproven(error)),
                         Error(error) => Err(ExecError::Smt(error)),
                         Sat => {
                             log!(log::MEMORY, &format!("Overlapping satisfiable address: {:x}", sat_address));
@@ -609,7 +609,7 @@ impl<B: BV> Memory<B> {
                         }
                     }
                 }
-                Unknown => Err(ExecError::Z3Unknown),
+                Unproven(error) => Err(ExecError::Unproven(error)),
                 Error(error) => Err(ExecError::Smt(error)),
                 Unsat => Ok(Overlap::NoOverlap),
             }

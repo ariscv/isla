@@ -14,7 +14,7 @@ pub(super) fn with_solver_dead<T>(run: impl FnOnce() -> T) -> T {
 }
 
 #[test]
-fn solver_unknown_panics_for_one_or_both_branch_sides() {
+fn unknown_solver_panics_for_one_or_both_branch_sides() {
     let mut shared = empty_shared_state();
     shared.symtab.set_files(vec!["branch.sail"]);
     let source = SourceLoc::new(0, 7, 3, 7, 9);
@@ -36,7 +36,15 @@ fn solver_unknown_panics_for_one_or_both_branch_sides() {
                 );
             });
         });
-        for detail in ["pc=1", "branch.sail:7", "branch_feasibility", "unknown", "elapsed=", "limit=", "path_depth="] {
+        for detail in [
+            "pc=1",
+            "branch.sail:7",
+            "branch_feasibility",
+            "reason=unknown_solver",
+            "elapsed=",
+            "limit=",
+            "path_depth=",
+        ] {
             assert!(message.contains(detail), "{message}");
         }
     }
@@ -65,7 +73,9 @@ fn path_timeout_panics_before_the_next_instruction() {
                 },
             );
         });
-        for detail in ["pc=0", "timeout.sail:5", "path_execution", "elapsed=", "limit=", "path_depth=0"] {
+        for detail in
+            ["reason=path_timeout", "pc=0", "timeout.sail:5", "path_execution", "elapsed=", "limit=", "path_depth=0"]
+        {
             assert!(message.contains(detail), "{message}");
         }
     }

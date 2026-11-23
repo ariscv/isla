@@ -2604,13 +2604,14 @@ impl<'ctx, B: BV> Model<'ctx, B> {
 pub enum SmtResult {
     Sat,
     Unsat,
-    Unknown,
+    /// 可选证明或暂缓查询没有结论，调用方可以保留原符号表达式。
+    Unproven(SmtError),
     Error(SmtError),
 }
 
 use SmtResult::*;
 
-fn unknown_result(info: SourceLoc, wall: Duration, deadline: Option<Duration>) -> SmtResult {
+fn z3_unknown_error(info: SourceLoc, wall: Duration, deadline: Option<Duration>, reason: String) -> SmtError {
     #[cfg(feature = "smt-thread-interrupt")]
     let limit = deadline.or_else(z3_timeout::configured_operation_timeout);
     #[cfg(not(feature = "smt-thread-interrupt"))]
@@ -2618,12 +2619,17 @@ fn unknown_result(info: SourceLoc, wall: Duration, deadline: Option<Duration>) -
         let _ = deadline;
         None
     };
-    Error(SmtError::Unknown {
+    SmtError::SolverUnknown {
+        reason,
         source_loc: info,
         wall,
         limit,
         purpose: crate::executor::stats::region_progress::query_label(),
-    })
+    }
+}
+
+fn z3_reason_unknown(ctx: &Context, solver: Z3_solver) -> String {
+    unsafe { CStr::from_ptr(Z3_solver_get_reason_unknown(ctx.z3_ctx, solver)).to_string_lossy().into_owned() }
 }
 
 #[cfg(test)]
@@ -2708,7 +2714,7 @@ impl SmtResult {
         match self {
             Sat => Ok(true),
             Unsat => Ok(false),
-            Unknown => Err(ExecError::Z3Unknown),
+            Unproven(error) => Err(ExecError::Unproven(error.clone())),
             Error(error) => Err(ExecError::Smt(error.clone())),
         }
     }
@@ -2717,13 +2723,14 @@ impl SmtResult {
         match self {
             Sat => Ok(false),
             Unsat => Ok(true),
-            Unknown => Err(ExecError::Z3Unknown),
+            Unproven(error) => Err(ExecError::Unproven(error.clone())),
             Error(error) => Err(ExecError::Smt(error.clone())),
         }
     }
 
+    /// 保留可选证明未完成与 Z3 返回 UNDEF 的判定；拒绝分类读取具体载荷。
     pub fn is_unknown(&self) -> bool {
-        matches!(self, Unknown | Error(SmtError::Unknown { .. }))
+        matches!(self, Unproven(_) | Error(SmtError::SolverUnknown { .. }))
     }
 }
 
@@ -3641,7 +3648,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     /// 布尔恒值及推演可行性证明：复杂目标按成本选择完整快照，其余复用原查询。
     pub(crate) fn check_sat_with_for_bool(&mut self, exp: &Exp<Sym>, info: SourceLoc) -> SmtResult {
         if self.ctx.solver_options.skip_bool_proofs || (self.no_smt() && !self.ctx.solver_options.keep_bool_proofs) {
-            return Unknown;
+            return Unproven(SmtError::DeferredQuery { source_loc: info, purpose: "boolean_proof" });
         }
         let previous = self.deferred_region_queries;
         let active = self.boolean_proof_active;
@@ -3661,32 +3668,25 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     fn check_sat_with_strategy(&mut self, exp: &Exp<Sym>, info: SourceLoc, purpose: query::QueryPurpose) -> SmtResult {
-        if self.no_smt() && !matches!(purpose, query::QueryPurpose::BooleanProof) {
-            return Error(self.no_smt_cannot_continue("mandatory_query", info));
-        }
-        if self.deferred_region_queries {
-            if !matches!(purpose, query::QueryPurpose::BooleanProof) {
-                self.note_deferred_mandatory_query(
-                    match purpose {
-                        query::QueryPurpose::RangeProof => "range_proof",
-                        _ => "general",
-                    },
-                    info,
-                    true,
-                );
-            }
-            return Unknown;
-        }
         let label = match purpose {
             query::QueryPurpose::General => "general",
             query::QueryPurpose::RangeProof => "range_proof",
             query::QueryPurpose::BooleanProof => "boolean_proof",
             query::QueryPurpose::BranchFeasibility => "branch_feasibility",
         };
+        if self.no_smt() && !matches!(purpose, query::QueryPurpose::BooleanProof) {
+            return Error(self.no_smt_cannot_continue("mandatory_query", info));
+        }
+        if self.deferred_region_queries {
+            if !matches!(purpose, query::QueryPurpose::BooleanProof) {
+                self.note_deferred_mandatory_query(label, info, true);
+            }
+            return Unproven(SmtError::DeferredQuery { source_loc: info, purpose: label });
+        }
         let query_scope = crate::executor::stats::region_progress::QueryScope::fallback(label);
         #[cfg(test)]
         if test_queries::take_unknown_purpose() {
-            return unknown_result(info, Duration::ZERO, None);
+            return Error(z3_unknown_error(info, Duration::ZERO, None, "测试注入".into()));
         }
 
         let proof_limit = if matches!(&purpose, query::QueryPurpose::BooleanProof) && self.transaction_depth() > 0 {
@@ -3813,11 +3813,14 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             Sat
         } else if z3_result == Z3_L_FALSE {
             Unsat
-        } else if proof_limit.is_some() {
-            // 显式限额只约束可选折叠，耗尽时保留原布尔表达式。
-            Unknown
         } else {
-            unknown_result(info, check_elapsed, None)
+            let error = z3_unknown_error(info, check_elapsed, None, z3_reason_unknown(self.ctx, query.z3_solver));
+            // 显式限额只约束可选折叠，耗尽时保留原布尔表达式。
+            if proof_limit.is_some() {
+                Unproven(error)
+            } else {
+                Error(error)
+            }
         };
 
         self.record_check_result(&result, query.z3_solver);
@@ -3839,7 +3842,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
         if self.deferred_region_queries {
             self.note_deferred_mandatory_query("model_or_general", info, true);
-            return Unknown;
+            return Unproven(SmtError::DeferredQuery { source_loc: info, purpose: "model_or_general" });
         }
         let query_scope = crate::executor::stats::region_progress::QueryScope::fallback("arm_close_or_general");
         // 模型缓存由新增断言、臂条件及提交/回滚统一维护，仍有效即有 Sat 见证。
@@ -3880,7 +3883,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         } else if z3_result == Z3_L_FALSE {
             Unsat
         } else {
-            unknown_result(info, check_started.elapsed(), None)
+            Error(z3_unknown_error(info, check_started.elapsed(), None, z3_reason_unknown(self.ctx, query.z3_solver)))
         };
         self.slow_query_finish(slow_query, query.z3_solver, None, info, z3_result);
         self.record_check_result(&result, query.z3_solver);
@@ -3975,7 +3978,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
         if self.deferred_region_queries {
             self.note_deferred_mandatory_query("model_or_general", info, true);
-            return Unknown;
+            return Unproven(SmtError::DeferredQuery { source_loc: info, purpose: "model_or_general" });
         }
         let started = Instant::now();
         let pending = self.transaction_assertions();
@@ -4014,7 +4017,12 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         } else if z3_result == Z3_L_FALSE {
             Unsat
         } else {
-            unknown_result(info, check_started.elapsed(), Some(deadline))
+            Error(z3_unknown_error(
+                info,
+                check_started.elapsed(),
+                Some(deadline),
+                z3_reason_unknown(self.ctx, query.z3_solver),
+            ))
         };
         self.record_check_result(&result, query.z3_solver);
         result

@@ -97,7 +97,7 @@ fn read_with_finite_size(no_smt: bool, strategy: Option<MergeStrategy>, constrai
         );
         queries += crate::smt::test_query_count() - start;
         if !constrained {
-            assert!(matches!(run, Err(ExecError::Smt(crate::error::SmtError::NoSmt { .. }))));
+            assert!(matches!(run, Err(ExecError::Smt(crate::error::SmtError::FiniteDomain { .. }))));
             assert!(!solver.trace().to_vec().iter().any(|event| event.is_memory_read_or_write()));
             paths += 1;
             continue;

@@ -2,7 +2,7 @@
 //!
 //! 跨线程交付使用稳定的区域和逻辑臂次序，不能以
 //! worker、到达时间或全局计数决定符号编号。
-use super::TaskState;
+use super::{Fraction, Frame, PathTimeout, SourceLoc, TaskId, TaskState};
 use crate::bitvector::BV;
 use crate::error::ExecError;
 use crate::executor::frame::LocalFrame;
@@ -18,6 +18,107 @@ pub(super) struct ThreadSlot<'a> {
 impl Drop for ThreadSlot<'_> {
     fn drop(&mut self) {
         self.release.take().unwrap()();
+    }
+}
+
+pub(super) struct Cancellation {
+    flag: Arc<AtomicBool>,
+    parent: Option<Arc<Self>>,
+}
+
+impl Cancellation {
+    pub(super) fn new(flag: Arc<AtomicBool>, parent: Option<Arc<Self>>) -> Arc<Self> {
+        Arc::new(Self { flag, parent })
+    }
+
+    pub(super) fn is_cancelled(&self) -> bool {
+        std::iter::successors(Some(self), |node| node.parent.as_deref()).any(|node| node.flag.load(Ordering::Acquire))
+    }
+}
+
+pub(super) trait ArmThreads: Sync {
+    fn reserve(&self) -> Option<ThreadSlot<'_>>;
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct Scheduler<'a, 'ir, B: BV> {
+    pub threads: &'a dyn ArmThreads,
+    pub queue: &'a ArmQueue<'ir, B>,
+}
+
+pub(super) struct ArmJob<'ir, B: BV> {
+    pub checkpoint: Checkpoint<B>,
+    pub options: (crate::smt::SolverOptions, bool),
+    pub base: LocalFrame<'ir, B>,
+    pub pc: usize,
+    pub guard: crate::smt::smtlib::Exp<Sym>,
+    pub task: TaskId,
+    pub fraction: Fraction,
+    pub timeout: PathTimeout,
+    pub info: SourceLoc,
+}
+
+pub(super) type Delivery<'ir, B> = Option<RemoteArrival<'ir, B>>;
+pub(super) type ArmCell<'ir, B> = JoinCell<Delivery<'ir, B>>;
+pub(super) struct QueuedArm<'ir, B: BV> {
+    pub job: ArmJob<'ir, B>,
+    pub cell: Arc<ArmCell<'ir, B>>,
+    pub failure: ExecError,
+    pub parent_attempt: Option<usize>,
+}
+
+/// 普通任务独占队列。只有等候子臂的线程才借出自己的执行名额。
+pub(super) struct ArmQueue<'ir, B: BV> {
+    inner: Mutex<(usize, std::collections::VecDeque<QueuedArm<'ir, B>>)>,
+    changed: Condvar,
+}
+
+impl<'ir, B: BV> ArmQueue<'ir, B> {
+    pub(super) fn new() -> Self {
+        Self { inner: Mutex::new((0, Default::default())), changed: Condvar::new() }
+    }
+
+    pub(super) fn has_helper(&self) -> bool {
+        let queue = self.inner.lock().unwrap();
+        queue.0 > queue.1.len()
+    }
+
+    pub(super) fn enqueue(&self, work: QueuedArm<'ir, B>) {
+        self.inner.lock().unwrap().1.push_back(work);
+        self.changed.notify_one();
+    }
+
+    pub(super) fn retire(&self, cell: &ArmCell<'ir, B>) {
+        self.inner.lock().unwrap().1.retain(|work| !std::ptr::eq(work.cell.as_ref(), cell));
+        self.changed.notify_all();
+    }
+
+    pub(super) fn wake(&self) {
+        let _lock = self.inner.lock().unwrap();
+        self.changed.notify_all();
+    }
+
+    pub(super) fn help_until(
+        &self,
+        cell: &ArmCell<'ir, B>,
+        mut execute: impl FnMut(QueuedArm<'ir, B>),
+        state: &TaskState<B>,
+    ) {
+        let mut queue = self.inner.lock().unwrap();
+        while cell.state() == ArmJobState::Claimed {
+            if let Some(work) = queue.1.pop_front() {
+                drop(queue);
+                execute(work);
+                queue = self.inner.lock().unwrap();
+            } else {
+                queue.0 += 1;
+                #[cfg(test)]
+                observe(state, "idle_helper").expect("等待名额观察点不可失败");
+                let _ = state;
+                queue = self.changed.wait(queue).unwrap();
+                queue.0 -= 1;
+            }
+        }
     }
 }
 
@@ -44,6 +145,14 @@ impl<T> JoinCell<T> {
             changed: Condvar::new(),
             cancelled: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn observe_id<B>(&self, state: &TaskState<B>, point: &str) -> Result<(), ExecError> {
+        if let Some(hook) = &state.arm_test_hook {
+            hook(&format!("{point}/{self:p}"))?;
+        }
+        Ok(())
     }
 
     pub(crate) fn try_claim(&self) -> bool {
@@ -83,7 +192,6 @@ impl<T> JoinCell<T> {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn state(&self) -> ArmJobState {
         self.inner.lock().unwrap().0
     }
@@ -100,8 +208,7 @@ impl<T> JoinCell<T> {
 }
 
 pub(super) fn transferable_entry<B>(frame: &LocalFrame<B>) -> bool {
-    frame.region_execution.is_none()
-        && frame.region_arrivals.is_empty()
+    frame.region_arrivals.is_empty()
         && frame.arm_error.is_none()
         && frame.pending_retry_operand.is_none()
         && frame.local_state.expression_retry_operands.is_none()
@@ -159,7 +266,17 @@ pub(crate) fn capture_arm_entry_checkpoint<B: BV>(solver: &mut Solver<B>) -> Che
 }
 
 /// B worker 交付给固定 A 汇合者的纯 Rust 数据。它不携带 Z3 AST、Solver 或 Context。
+pub(super) struct ErrorLeaf<'ir, B> {
+    pub task: TaskId,
+    pub fraction: Fraction,
+    pub frame: Frame<'ir, B>,
+    pub checkpoint: Checkpoint<B>,
+    pub fork: (crate::smt::smtlib::Def, Event<B>),
+}
+
 pub(crate) struct RemoteArrival<'ir, B> {
+    pub(super) errors: Vec<ErrorLeaf<'ir, B>>,
+    pub(super) dead: bool,
     pub(crate) region: RegionId,
     pub(crate) arm: ArmPath,
     pub(crate) symbols: std::ops::Range<u32>,

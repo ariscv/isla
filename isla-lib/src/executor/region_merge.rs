@@ -14,6 +14,7 @@ use crate::ir::regions::{FunctionRegions, Region, RegionOptions, RegionPoint, Re
 
 mod consumer_continuation;
 mod exception_continuation;
+mod loop_fold;
 mod parallel_arms;
 
 /// 任一祖先区域拒绝时，随该次推演撤销失败任务的发布。
@@ -67,7 +68,7 @@ pub(super) fn fresh_call_scope() -> usize {
 
 #[derive(Clone)]
 pub(super) struct RegionExecution {
-    pub remote_cancel: Option<Arc<AtomicBool>>,
+    pub remote_cancel: Option<Arc<region_arm::Cancellation>>,
     pub region: Arc<Region>,
     pub entry_depth: usize,
     pub write_depth: usize,
@@ -180,7 +181,13 @@ impl<B: BV> AccessLog<B> {
     }
 
     pub fn reject(&self, reason: SpeculativeRejectReason) -> ExecError {
-        ExecError::SpeculativeReject { reason, function: self.function, pc: self.pc, location: self.location }
+        ExecError::SpeculativeReject {
+            cause: None,
+            reason,
+            function: self.function,
+            pc: self.pc,
+            location: self.location,
+        }
     }
 }
 
@@ -215,10 +222,21 @@ fn assert_initial_type<B: BV>(value: &Val<B>, solver: &mut Solver<B>) {
 
 pub(super) fn reject<B: BV>(frame: &LocalFrame<B>, reason: SpeculativeRejectReason) -> ExecError {
     ExecError::SpeculativeReject {
+        cause: None,
         reason,
         function: frame.function_name,
         pc: frame.pc,
         location: frame.instrs.get(frame.pc).and_then(stats::instr_source_loc).unwrap_or(SourceLoc::unknown()),
+    }
+}
+
+pub(super) fn reject_query<B: BV>(frame: &LocalFrame<B>, cause: crate::error::SmtError) -> ExecError {
+    ExecError::SpeculativeReject {
+        reason: cause.reject_reason(),
+        location: cause.source_loc(),
+        function: frame.function_name,
+        pc: frame.pc,
+        cause: Some(Box::new(cause)),
     }
 }
 
@@ -233,11 +251,11 @@ pub(super) fn feasible<B: BV>(
     let speculative = frame.region_execution.is_some();
     match solver.check_sat_with_for_branch(exp, info, speculative) {
         None => Ok(true),
-        Some(SmtResult::Unknown) if speculative => Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
-        Some(SmtResult::Error(crate::error::SmtError::Unknown { .. }))
-            if speculative && crate::config::RegionOptions::current().partial_commit_solver_unknown =>
+        Some(SmtResult::Unproven(cause)) if speculative => Err(reject_query(frame, cause)),
+        Some(SmtResult::Error(cause))
+            if speculative && cause.reject_reason().partial_commit(crate::config::RegionOptions::current()) =>
         {
-            Err(reject(frame, SpeculativeRejectReason::SolverUnknown))
+            Err(reject_query(frame, cause))
         }
         Some(result) => path_is_feasible(result, frame, solver, shared),
     }
@@ -332,7 +350,7 @@ pub(super) fn step<B: BV>(frame: &mut LocalFrame<B>) -> Result<bool, ExecError> 
         }
     }
     let Some(execution) = &frame.region_execution else { return Ok(false) };
-    if execution.remote_cancel.as_ref().is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
+    if execution.remote_cancel.as_ref().is_some_and(|cancel| cancel.is_cancelled()) {
         return Err(reject(frame, SpeculativeRejectReason::IncompatibleState));
     }
     let depth = frame.backtrace.len();
@@ -541,7 +559,7 @@ pub(super) enum RegionResult {
 /// 内层 Unknown 后把原分叉作为祖先区域里的两个待执行片段。调用方若已回滚
 /// 内层事务，片段会重建它；若尚未创建内层事务，则保留当前外层臂事务。绝不能交给
 /// 全局 sink；祖先的组织者会在自己的工作栈中继续它们。
-pub(super) fn separate_nested_solver_unknown<'ir, B: BV>(
+pub(super) fn separate_nested_branch<'ir, B: BV>(
     condition: Sym,
     target: usize,
     frame: &mut LocalFrame<'ir, B>,
@@ -683,7 +701,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
     let mut arm_execution_rolled_back = false;
     let result = match candidate {
         Err(error) => {
-            if let ExecError::SpeculativeReject { reason, function, pc, location } = error {
+            if let ExecError::SpeculativeReject { reason, function, pc, location, .. } = error {
                 if !matches!(
                     reason,
                     SpeculativeRejectReason::SamplingState | SpeculativeRejectReason::SymbolicAssertion
@@ -750,7 +768,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         fraction,
                         timeout,
                         stop,
-                        &pending_errors,
+                        &parallel_arms::ScheduledErrors { errors: &pending_errors, scheduler: sink.arm_scheduler() },
                         match &mut candidate_frame {
                             Some(candidate) => candidate,
                             None => &mut *frame,
@@ -772,13 +790,11 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                             Some(SmtResult::Sat) => {
                                 return Err(reject(frame, SpeculativeRejectReason::SymbolicAssertion))
                             }
-                            Some(SmtResult::Unknown) => {
-                                return Err(reject(frame, SpeculativeRejectReason::SolverUnknown))
-                            }
-                            Some(SmtResult::Error(crate::error::SmtError::Unknown { .. }))
+                            Some(SmtResult::Unproven(cause)) => return Err(reject_query(frame, cause)),
+                            Some(SmtResult::Error(cause @ crate::error::SmtError::SolverUnknown { .. }))
                                 if solver.exploration_on_unknown().is_some() =>
                             {
-                                return Err(reject(frame, SpeculativeRejectReason::SolverUnknown));
+                                return Err(reject_query(frame, cause));
                             }
                             Some(SmtResult::Error(error)) => return Err(ExecError::Smt(error)),
                         }
@@ -803,13 +819,12 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                             {
                                 Ok(RegionResult::Dead)
                             }
-                            Some(SmtResult::Unsat | SmtResult::Unknown) => {
-                                Err(reject(frame, SpeculativeRejectReason::SolverUnknown))
-                            }
-                            Some(SmtResult::Error(crate::error::SmtError::Unknown { .. }))
+                            Some(SmtResult::Unsat) => Err(reject(frame, SpeculativeRejectReason::ExitUnsat)),
+                            Some(SmtResult::Unproven(cause)) => Err(reject_query(frame, cause)),
+                            Some(SmtResult::Error(cause @ crate::error::SmtError::SolverUnknown { .. }))
                                 if solver.exploration_on_unknown().is_some() =>
                             {
-                                Err(reject(frame, SpeculativeRejectReason::SolverUnknown))
+                                Err(reject_query(frame, cause))
                             }
                             Some(SmtResult::Error(error)) => Err(ExecError::Smt(error)),
                         }
@@ -877,29 +892,35 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
         Err(error)
             if nested
                 && arm_execution_rolled_back
-                && crate::config::RegionOptions::current().partial_commit_solver_unknown
-                && matches!(
-                    error,
-                    ExecError::SpeculativeReject { reason: SpeculativeRejectReason::SolverUnknown, .. }
-                ) =>
+                && error
+                    .rejection_reason()
+                    .is_some_and(|cause| cause.partial_commit(crate::config::RegionOptions::current())) =>
         {
+            let reason = error.rejection_reason().unwrap();
             // 事务撤销了内层的义务、事件和定义；错误叶也不能越过这次撤销。
             // 两个片段会从本分叉的后继重新建立它们，再由祖先的出口认证。
-            match separate_nested_solver_unknown(condition, target, frame, solver) {
+            match separate_nested_branch(condition, target, frame, solver) {
                 Ok(()) => {
                     pending_errors.discard();
-                    shared.execution_stats.merge_rejected(key.0, key.1, &error);
-                    state.speculation_stats.record_reject(SpeculativeRejectReason::SolverUnknown);
+                    let site;
+                    let rejection = if matches!(&error, ExecError::SpeculativeReject { .. }) {
+                        &error
+                    } else {
+                        site = reject(frame, reason);
+                        &site
+                    };
+                    shared.execution_stats.merge_rejected(key.0, key.1, rejection);
+                    state.speculation_stats.record_reject(reason);
                     if diagnostics_active {
                         diagnostics::emit(serde_json::json!({
                             "stage":"local_arm_rejected",
                             "difference":"local_arm_rejected",
-                            "reason":"solver_unknown",
+                            "reason":reason,"cause":error.query_failure().map(|cause|cause.diagnostic()),"error":error.to_string(),
                             "at":{"function":diagnostics::name_string(frame.function_name, &shared.symtab),
                                 "pc":frame.pc,"location":error.source_loc()}
                         }));
                     }
-                    Ok(RegionResult::Separate { reason: SpeculativeRejectReason::SolverUnknown, merged_groups: false })
+                    Ok(RegionResult::Separate { reason, merged_groups: false })
                 }
                 Err(error) => Err(error),
             }
@@ -945,17 +966,12 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         serde_json::json!({
                             "function": zencode::decode(shared.symtab.to_str(frame.function_name)),
                             "branch_pc": frame.pc, "nested": nested,
-                            "error": error.to_string(), "source_loc": error.source_loc(),
+                            "reason":error.reject_reason(), "error": error.to_string(), "source_loc": error.source_loc(),
                         })
                     );
                 }
             }
-            let reason = match &error {
-                ExecError::SpeculativeReject { reason, .. } => *reason,
-                ExecError::Smt(_) => SpeculativeRejectReason::SmtError,
-                ExecError::Timeout => SpeculativeRejectReason::Timeout,
-                _ => SpeculativeRejectReason::IncompatibleState,
-            };
+            let reason = error.rejection_reason().unwrap_or(SpeculativeRejectReason::IncompatibleState);
             let site;
             let rejection = if matches!(&error, ExecError::SpeculativeReject { .. }) {
                 &error
@@ -1318,46 +1334,46 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     ready.extend([target, fallthrough].into_iter().zip(guards).enumerate());
     let live_forks = stats::merge_timing::LiveForks::start();
     let initial_state = arm_task_entry.as_ref().map(|_| base.local_state.clone());
+    let scheduler = sink.arm_scheduler();
     let job = arm_task_entry.filter(|_| catcher.is_none()).map(|(slot, checkpoint)| {
         let mut remote_base = base.clone();
         remote_base.path_timing = super::path_timing::PathTiming::from_snapshot(base.path_timing.fork_snapshot());
-        let remote_fraction = fraction.clone();
-        let options = solver.arm_context_options();
-        let work = move |worker, cancelled| {
-            parallel_arms::run_b(
-                checkpoint,
-                options,
-                cancelled,
-                remote_base,
-                fallthrough,
-                Not(Box::new(Var(condition))),
-                worker,
-                task_id,
-                remote_fraction,
-                timeout,
-                stop,
-                state,
-                shared,
-                info,
-            )
+        let job = region_arm::ArmJob {
+            checkpoint,
+            options: solver.arm_context_options(),
+            base: remote_base,
+            pc: fallthrough,
+            guard: Not(Box::new(Var(condition))),
+            task: task_id,
+            fraction: fraction.clone(),
+            timeout,
+            info,
         };
-        (slot, work, reject(frame, SpeculativeRejectReason::IncompatibleState))
+        (slot, job, reject(frame, SpeculativeRejectReason::IncompatibleState))
     });
     let mut local = |cell: Option<&parallel_arms::ArmCell<'ir, B>>| -> Result<(), ExecError> {
         while let Some((side, (pc, guard))) = ready.pop() {
             live_forks.set(if side == 0 { 1 } else { arms[0].len() });
             if side == 1 {
                 if let Some(cell) = cell {
-                    if let Some(arm) = parallel_arms::receive(
+                    match parallel_arms::receive(
                         cell,
                         initial_state.as_ref().unwrap(),
                         &arms[0],
                         &mut base,
                         state,
                         solver,
+                        sink,
+                        tid,
+                        stop,
+                        shared,
                     )? {
-                        arms[1].push(arm);
-                        continue;
+                        parallel_arms::Received::Dead => continue,
+                        parallel_arms::Received::Arrived(arm) => {
+                            arms[1].push(arm);
+                            continue;
+                        }
+                        parallel_arms::Received::Retry => (),
                     }
                 }
             }
@@ -1415,7 +1431,7 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         Ok(())
     };
     if let Some((slot, work, failure)) = job {
-        parallel_arms::with_worker(slot, state, failure, work, local)?;
+        parallel_arms::with_worker(slot, scheduler, state, stop, shared, failure, work, local)?;
     } else {
         local(None)?;
     }
@@ -1467,8 +1483,13 @@ pub fn validate_force_regions<B: BV>(shared: &SharedState<B>, limits: &Execution
                                     panic!("Force 结构校验的候选必须是普通 Jump")
                                 }
                             };
-                            let error =
-                                ExecError::SpeculativeReject { reason, function: *function, pc, location: *info };
+                            let error = ExecError::SpeculativeReject {
+                                cause: None,
+                                reason,
+                                function: *function,
+                                pc,
+                                location: *info,
+                            };
                             shared.execution_stats.print(shared);
                             return Err(speculation::force_diagnostic(
                                 limits.merge_rule(*function, *info).map(|(rule, _)| rule),
@@ -1556,7 +1577,8 @@ pub(super) fn fold_loop_exit<'ir, B: BV>(
         let access = exit.local_state.speculative_access.as_ref().unwrap();
         if !matches!(exit.instrs.get(exit.pc), Some(Instr::End))
             || (access.ordered_events && !access.global_state && !access.writes.modified_regs.is_empty())
-            || solver.transaction_has_memory_writes()
+            || (solver.transaction_has_memory_writes()
+                && !(crate::config::RegionOptions::current().loop_fold_shapes && exit.memory.ram_version().is_some()))
         {
             let error = reject(exit, SpeculativeRejectReason::StateEffect);
             diagnostics::note_failure_phase(diagnostics::FailurePhase::LoopFold, &error);
@@ -1568,6 +1590,7 @@ pub(super) fn fold_loop_exit<'ir, B: BV>(
 
 #[cfg(test)]
 thread_local! {
+    pub(super) static FOLD_SAMPLES: std::cell::RefCell<Option<Vec<[usize; 7]>>> = const { std::cell::RefCell::new(None) };
     pub(super) static FOLD_HISTORY_ID_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -1698,45 +1721,6 @@ fn take_loop_continuation<'ir, B: BV>(work: &mut LoopWork<'ir, B>, state: &TaskS
     })
 }
 
-/// 已完成的只读循环轮次在求解器中仍由已发布的选择器和状态 ITE 完整表示。
-/// 它们不应继续以逐轮区域记录的形式挂在下一轮帧上，否则 64 项 `foreach`
-/// 会让返回前沿和继续前沿都随轮数增长。汇总记录保留所有选择器依赖、单臂读取
-/// 和访存载荷；只压缩运行时的记录组织，不能改变执行迹或最终状态。
-fn compact_completed_loop_history<'ir, B: BV>(frame: &mut LocalFrame<'ir, B>, base: &LocalFrame<'ir, B>) {
-    let start = base.region_merge_records.len();
-    if frame.region_merge_records.len() <= start + 1 {
-        return;
-    }
-    debug_assert!(
-        frame
-            .region_merge_records
-            .iter()
-            .zip(base.region_merge_records.iter())
-            .all(|(current, original)| current.same_occurrence(original)),
-        "循环历史前缀必须与入口记录及父臂元数据一致"
-    );
-    let mut root = frame.region_merge_records.suffix(start).last().cloned().expect("循环历史必须有汇总根记录");
-    assert!(root.parent_record.is_none() && root.arm == "root", "循环历史末尾必须是根记录");
-    let mut value_symbols = HashSet::new();
-    let mut input_symbols = HashSet::new();
-    let mut single_arm_reads = Vec::new();
-    let mut memory_reads = Vec::new();
-    for record in frame.region_merge_records.suffix(start) {
-        value_symbols.extend(record.value_symbols.iter().copied());
-        input_symbols.extend(record.input_symbols.iter().copied());
-        single_arm_reads.extend(record.single_arm_reads.iter().cloned());
-        memory_reads.extend(record.memory_reads.iter().cloned());
-    }
-    root.value_symbols = value_symbols.into();
-    root.input_symbols = input_symbols.into();
-    root.single_arm_reads = single_arm_reads.into();
-    root.memory_reads = memory_reads.into();
-    // 入口前缀可直接共享。从当前历史截取前缀会保活已汇总的旧后缀。
-    let mut retained = base.region_merge_records.clone();
-    retained.push(root);
-    frame.region_merge_records = retained;
-}
-
 fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     record_id: usize,
     condition: Sym,
@@ -1766,10 +1750,20 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             RegionPoint::FunctionExit => true,
             RegionPoint::Instruction(pc) => matches!(frame.instrs.get(pc), Some(Instr::End)),
         };
+    let expanded = iterative && crate::config::RegionOptions::current().loop_fold_shapes;
+    let back_edges = if expanded {
+        let summaries = state.region_effect_summaries.get().expect("循环分析必须已具有函数摘要");
+        with_function_regions(frame, shared, summaries, true, |analysis| {
+            loop_fold::back_edge_predecessors(analysis.cfg(), &region)
+        })
+    } else {
+        HashSet::new()
+    };
     let mut first_pmp_fold =
         super::stats::region_progress::enabled() && shared.symtab.to_str(frame.function_name) == "zpmpCheck";
     let mut exit_prefix = Vec::new();
     let mut exit_ids = None;
+    let arm_start = solver.loop_arm_count();
     let root_branch = region.branch_pc;
     let root_region = region.clone();
     let remaining = base.region_execution.as_ref().unwrap().remaining.clone();
@@ -1808,6 +1802,9 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         super::stats::memory_stats::poll(frame, solver);
         if pending.work(frontier).completed == 2 {
             let (mut work, parent) = pending.complete(frontier);
+            if back_edges.contains(&work.target) && !back_edges.contains(&(work.original.pc + 1)) {
+                work.arms.swap(0, 1);
+            }
             let segmented_root = parent.is_none() && continuation.is_some();
             if segmented_root {
                 // 暂保留退出组的访问记录，交由根分组出口统一投影。
@@ -1965,13 +1962,13 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             && continuation.is_none()
             && pending.ancestors(frontier).all(|work| {
                 work.completed == 1
+                    && work.continuations.len() == 0
+                    && work.arms[1].is_empty()
                     && work.arms[0].len() == 1
                     && work.arms[0].first().is_some_and(|arm| {
                         matches!(arm.instrs.get(arm.pc), Some(Instr::End)) && {
                             let access = arm.local_state.speculative_access.as_ref().unwrap();
-                            (!access.ordered_events || access.global_state || access.writes.modified_regs.is_empty())
-                                && (!crate::config::RegionOptions::current().prefix_compact
-                                    || access.writes.modified_regs.is_empty())
+                            !access.ordered_events || access.global_state || access.writes.modified_regs.is_empty()
                         }
                     })
             });
@@ -1979,7 +1976,8 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         assert!(work.active_arm.is_none(), "前一逻辑臂必须先收尾");
         let owner = solver.new_logical_arm(work.parent_arm);
         work.active_arm = Some(owner);
-        let first = work.completed == 0;
+        let reversed = back_edges.contains(&work.target) && !back_edges.contains(&(work.original.pc + 1));
+        let first = (work.completed == 0) != reversed;
         let guard = if first { Var(work.condition) } else { Not(Box::new(Var(work.condition))) };
         let mut arm = branch_arm(&work.base, if first { work.target } else { work.original.pc + 1 }, guard, owner);
         let guard = arm.local_state.speculative_access.as_ref().unwrap().guard.clone().unwrap();
@@ -2023,20 +2021,39 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 let access = arm.local_state.speculative_access.as_ref().unwrap();
                 let fold_writes =
                     !access.ordered_events || access.global_state || access.writes.modified_regs.is_empty();
-                let compact_history =
-                    crate::config::RegionOptions::current().prefix_compact && access.writes.modified_regs.is_empty();
                 if iterative
-                    && single_work
+                    && (single_work || expanded)
                     && exit_spine
                     && region.branch_pc == root_branch
                     && fold_writes
-                    && (!crate::config::RegionOptions::current().prefix_compact || compact_history)
-                    && !solver.transaction_has_memory_writes()
+                    && ((expanded && arm.memory.ram_version().is_some()) || !solver.transaction_has_memory_writes())
                 {
-                    let exit = work.arms[0].pop().expect("退出脊柱必须已有存活前沿");
-                    append_loop_exit(&mut exit_prefix, &mut exit_ids, exit, solver, |previous, next, ids, solver| {
-                        fold_loop_exit(previous, next, ids, &original_base, &root_region, state, shared, solver, info)
-                    })?;
+                    let children = pending.drain_spine(&mut frontier);
+                    let work = pending.work_mut(frontier);
+                    let exits = std::iter::once(work.arms[0].pop().expect("根退出前沿必须存活")).chain(
+                        children.into_iter().map(|mut child| child.arms[0].pop().expect("退出脊柱必须已有存活前沿")),
+                    );
+                    for exit in exits {
+                        append_loop_exit(
+                            &mut exit_prefix,
+                            &mut exit_ids,
+                            exit,
+                            solver,
+                            |previous, next, ids, solver| {
+                                fold_loop_exit(
+                                    previous,
+                                    next,
+                                    ids,
+                                    &original_base,
+                                    &root_region,
+                                    state,
+                                    shared,
+                                    solver,
+                                    info,
+                                )
+                            },
+                        )?;
+                    }
                     let guard = arm
                         .local_state
                         .speculative_access
@@ -2077,19 +2094,19 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         })
                     })?;
                     assert!(matches!(result, RegionResult::Merged));
-                    if compact_history {
-                        compact_completed_loop_history(&mut next, &original_base);
-                        if let [exit] = exit_prefix.as_mut_slice() {
-                            compact_completed_loop_history(exit, &original_base);
-                            // 下一次折叠的 previous_ids 只索引累计出口的可见后缀。
-                            exit_ids = Some(
-                                exit.region_merge_records
-                                    .suffix(original_base.region_merge_records.len())
-                                    .map(|record| record.record_id)
-                                    .collect(),
-                            );
-                        }
+                    if crate::config::RegionOptions::current().prefix_compact {
+                        loop_fold::compact_frontiers(
+                            &mut exit_prefix,
+                            &mut next,
+                            &mut exit_ids,
+                            &original_base,
+                            arm_start,
+                            solver,
+                            info,
+                        );
                     }
+                    #[cfg(test)]
+                    loop_fold::sample_frontiers(&exit_prefix, &next, &exit_ids, solver);
                     solver.compact_region_query_prefix();
                     // 返回选择器已保存完整到达条件。下一轮引用它的补集，避免每个事件
                     // 复制前面所有轮次的守卫树。
@@ -2110,7 +2127,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             serde_json::json!({"kind":"loop_iteration_fold","task":task_id.as_usize(),"root_attempt":diagnostics::root_attempt(),
                             "function":diagnostics::name_string(original_frame.function_name,&shared.symtab),
                             "pc":root_branch,"call_instance":original_frame.local_state.call_instance,
-                            "steps_since_budget_renewal":used,"step_budget_unlimited":remaining.is_none(),"logical_frontiers":2,
+                            "steps_since_budget_renewal":used,"step_budget_unlimited":remaining.is_none(),"logical_frontiers":exit_prefix.len() + 1,
                             "returned_records":exit_prefix.iter().map(|exit| exit.region_merge_records.len()).sum::<usize>(),
                             "continuation_records":next.region_merge_records.len(),
                             "savepoint_depth":solver.transaction_depth()})
@@ -2122,6 +2139,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             remaining.store(budget, Ordering::Relaxed);
                         }
                     }
+                    let parent_arm = next.region_arm;
                     *work = LoopWork {
                         original: next.clone(),
                         base: next,
@@ -2133,7 +2151,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         arms: [Vec::new(), Vec::new()],
                         completed: 0,
                         continuations: ReadyFragments::new(state),
-                        parent_arm: Some(owner),
+                        parent_arm,
                         active_arm: None,
                     };
                     // 预算由实际回边更新；此处只收敛前沿，避免半轮重复授予预算。
@@ -2141,10 +2159,11 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     largest_round = 0;
                     continue;
                 }
-                if !exit_prefix.is_empty() {
+                if !exit_prefix.is_empty() && !(expanded && region.branch_pc != root_branch) {
                     return Err(reject(&arm, SpeculativeRejectReason::StateEffect));
                 }
                 if eligible
+                    && exit_prefix.is_empty()
                     && exit_spine
                     && region.branch_pc == root_branch
                     && fold_writes

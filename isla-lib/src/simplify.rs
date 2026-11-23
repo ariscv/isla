@@ -982,7 +982,7 @@ pub fn eval_carefully_part<B: BV, E: BorrowMut<Event<B>>>(
                 *exp = e.clone().eval();
                 match solver.check_sat_with(&Exp::Neq(Box::new(exp.clone()), Box::new(e.clone())), *info) {
                     Sat => panic!("Bad eval {:?} to {:?}", e, exp),
-                    Unknown => panic!("Difficult to check eval (!) {:?} to {:?}", e, exp),
+                    Unproven(cause) => panic!("无法检查 {e:?} 到 {exp:?} 的求值：{cause}"),
                     SmtResult::Error(error) => panic!("{}", crate::error::ExecError::Smt(error)),
                     Unsat => (),
                 };
@@ -995,7 +995,7 @@ pub fn eval_carefully_part<B: BV, E: BorrowMut<Event<B>>>(
                 *exp = e.clone().eval();
                 match solver.check_sat_with(&Exp::Neq(Box::new(exp.clone()), Box::new(e.clone())), *info) {
                     Sat => panic!("Bad eval {:?} to {:?}", e, exp),
-                    Unknown => panic!("Difficult to check eval (!) {:?} to {:?}", e, exp),
+                    Unproven(cause) => panic!("无法检查 {e:?} 到 {exp:?} 的求值：{cause}"),
                     SmtResult::Error(error) => panic!("{}", crate::error::ExecError::Smt(error)),
                     Unsat => (),
                 }

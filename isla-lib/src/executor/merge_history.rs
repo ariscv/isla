@@ -79,7 +79,29 @@ impl<B> MergeHistory<B> {
     }
     #[cfg(test)]
     pub(super) fn retained_storage(&self) -> (usize, usize) {
-        let mut pending = vec![self];
+        let (nodes, slots, _) = Self::frontier_storage([self]);
+        (nodes, slots)
+    }
+    #[cfg(test)]
+    pub(super) fn frontier_storage<'a>(frontiers: impl IntoIterator<Item = &'a Self>) -> (usize, usize, usize)
+    where
+        B: 'a,
+    {
+        let mut pending: Vec<_> = frontiers.into_iter().collect();
+        let mut payloads = std::collections::HashSet::new();
+        let mut reads = 0;
+        let mut count_reads = |records: &[RegionMergeRecord<B>]| {
+            for record in records {
+                for (ptr, len) in [
+                    (record.single_arm_reads.as_ptr().cast::<()>(), record.single_arm_reads.len()),
+                    (record.memory_reads.as_ptr().cast::<()>(), record.memory_reads.len()),
+                ] {
+                    if len != 0 && payloads.insert(ptr) {
+                        reads += len;
+                    }
+                }
+            }
+        };
         let mut seen = std::collections::HashSet::new();
         let mut slots = 0;
         while let Some(history) = pending.pop() {
@@ -87,13 +109,19 @@ impl<B> MergeHistory<B> {
                 continue;
             }
             slots += history.0.flat.get().map_or(0, Vec::capacity);
+            if let Some(flat) = history.0.flat.get() {
+                count_reads(flat);
+            }
             match history.0.items.as_ref().unwrap() {
-                Items::Leaf(items) => slots += items.capacity(),
+                Items::Leaf(items) => {
+                    slots += items.capacity();
+                    count_reads(items);
+                }
                 Items::Concat(left, right) => pending.extend([left, right]),
                 Items::Range(source, _) => pending.push(source),
             }
         }
-        (seen.len(), slots)
+        (seen.len(), slots, reads)
     }
     pub fn clear(&mut self) {
         *self = Self::default();
@@ -152,6 +180,89 @@ impl<B> MergeHistory<B> {
         HistoryIter { pending: vec![(self, start, self.len())], current: [].iter() }
     }
 }
+impl<B: crate::bitvector::BV> MergeHistory<B> {
+    /// 入口段常作为最左子树共享。被拆段时逐条核对载荷和父臂元数据。
+    fn has_prefix(&self, prefix: &Self) -> bool {
+        if self.len() < prefix.len() {
+            return false;
+        }
+        if prefix.is_empty() {
+            return true;
+        }
+        let mut part = self;
+        loop {
+            if Arc::ptr_eq(&part.0, &prefix.0) {
+                return true;
+            }
+            match part.0.items.as_ref().unwrap() {
+                Items::Concat(left, _) if left.len() >= prefix.len() => part = left,
+                Items::Range(source, 0) => part = source,
+                _ => return part.iter().zip(prefix.iter()).all(|(a, b)| a.same_occurrence(b)),
+            }
+        }
+    }
+
+    /// 直接引用原入口，避免短 Range 保活已淘汰的后缀。寄存器足迹可按同值
+    /// 合并守卫；有序访问保留每次读取，执行迹与 RAM 版本由原事务维护。
+    pub(super) fn compact_loop_suffix(
+        &mut self,
+        entry: &Self,
+        footprint: bool,
+        solver: &mut crate::smt::Solver<B>,
+        info: crate::source_loc::SourceLoc,
+    ) {
+        use crate::smt::smtlib::Exp;
+        use std::collections::{HashMap, HashSet};
+        if !self.has_prefix(entry) {
+            return;
+        }
+        let start = entry.len();
+        let Some(mut root) = self.suffix(start).last().cloned() else {
+            *self = entry.clone();
+            return;
+        };
+        if root.parent_record.is_some() || root.arm != "root" {
+            return;
+        }
+        if self.len() > start + 1 {
+            let mut values = HashSet::new();
+            let mut inputs = HashSet::new();
+            let mut reads: Vec<super::GuardedRegisterRead<B>> = Vec::new();
+            let mut memory = Vec::new();
+            let mut by_register = HashMap::<_, Vec<usize>>::new();
+            for record in self.suffix(start) {
+                values.extend(record.value_symbols.iter().copied());
+                inputs.extend(record.input_symbols.iter().copied());
+                for read in record.single_arm_reads.iter() {
+                    if footprint {
+                        let indices = by_register.entry((read.register, read.accessor.as_slice())).or_default();
+                        if let Some(old) = indices.iter().copied().find(|&i| reads[i].value == read.value) {
+                            if reads[old].guard != read.guard {
+                                reads[old].guard = Exp::Var(solver.define_const(
+                                    Exp::Or(Box::new(reads[old].guard.clone()), Box::new(read.guard.clone())),
+                                    info,
+                                ));
+                            }
+                            continue;
+                        }
+                        indices.push(reads.len());
+                    }
+                    reads.push(read.clone());
+                }
+                memory.extend(record.memory_reads.iter().cloned());
+            }
+            root.value_symbols = values.into();
+            root.input_symbols = inputs.into();
+            root.single_arm_reads = reads.into();
+            root.memory_reads = memory.into();
+        }
+        let mut compact = entry.clone();
+        compact.push(root);
+        compact.mark_closed(start);
+        *self = compact;
+    }
+}
+
 impl<B: Clone> MergeHistory<B> {
     pub(super) fn mark_closed(&mut self, start: usize) {
         assert!(start < self.len(), "汇合后缀必须包含新的根记录");

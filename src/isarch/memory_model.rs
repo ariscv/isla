@@ -217,8 +217,7 @@ mod tests {
         match solver.check_sat_with(&prop, SourceLoc::unknown()) {
             SmtResult::Unsat => (),
             SmtResult::Sat => panic!("期望 {} 时 Unsat，实际 Sat", what),
-            SmtResult::Unknown => panic!("期望 {} 时 Unsat，实际 Unknown", what),
-            SmtResult::Error(_) => panic!("期望 {} 时 Unsat，实际 Error", what),
+            SmtResult::Unproven(cause) | SmtResult::Error(cause) => panic!("{what} 期望 Unsat，实际 {cause}"),
         }
     }
 
@@ -226,8 +225,7 @@ mod tests {
         match solver.check_sat_with(&prop, SourceLoc::unknown()) {
             SmtResult::Sat => (),
             SmtResult::Unsat => panic!("期望 {} 时 Sat，实际 Unsat", what),
-            SmtResult::Unknown => panic!("期望 {} 时 Sat，实际 Unknown", what),
-            SmtResult::Error(_) => panic!("期望 {} 时 Sat，实际 Error", what),
+            SmtResult::Unproven(cause) | SmtResult::Error(cause) => panic!("{what} 期望 Sat，实际 {cause}"),
         }
     }
 

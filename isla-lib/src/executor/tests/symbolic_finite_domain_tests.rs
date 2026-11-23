@@ -153,7 +153,11 @@ fn symbolic_finite_domain_unknown_reports_error_and_does_not_certify() {
                 four_lengths(solver, symbol);
             }
         });
-        assert!(matches!(results.as_slice(), [Err(ExecError::Smt(crate::error::SmtError::NoSmt { .. }))]));
+        assert!(matches!(results.as_slice(), [Err(ExecError::Smt(cause))] if cause.reject_reason() == if enabled {
+            SpeculativeRejectReason::UnknownFiniteDomain
+        } else { SpeculativeRejectReason::UnknownDeferredMode }));
+        let label = if enabled { "unknown_finite_domain" } else { "unknown_deferred_mode" };
+        assert!(results[0].as_ref().unwrap_err().to_string().contains(label));
         assert_eq!(queries, 0);
     }
     let (results, queries) = lengths(true, true, |solver, symbol| {
@@ -162,7 +166,7 @@ fn symbolic_finite_domain_unknown_reports_error_and_does_not_certify() {
         let expr = Formula::Bvadd(Box::new(Formula::Var(symbol)), Box::new(Formula::Var(dependent)));
         solver.assert_eq(expr, smtlib::bits64(9, 64));
     });
-    assert!(matches!(results.as_slice(), [Err(ExecError::Smt(crate::error::SmtError::NoSmt { .. }))]));
+    assert!(matches!(results.as_slice(), [Err(ExecError::Smt(crate::error::SmtError::FiniteDomain { .. }))]));
     assert_eq!(queries, 0);
 }
 
@@ -222,6 +226,23 @@ fn symbolic_finite_domain_region_preserves_retry_and_rollback() {
         )
     };
 
+    // 同一个消费者在有 Z3 的延后区域内也能区分推导不足与普通必需查询。
+    let mut config = Config::new();
+    config.solver_options.finite_domain_enumeration = true;
+    let query_context = Context::new(config);
+    let mut query_solver = Solver::<B64>::new(&query_context);
+    assert_eq!(query_solver.declare_bitvector(64, info()), symbol);
+    let tx = query_solver.start_transaction();
+    let before = crate::smt::test_query_count();
+    query_solver.with_deferred_region_queries(|solver| {
+        let Err(missing) = retry(solver) else { panic!("无有限域的延后枚举必须拒绝") };
+        assert_eq!(missing.rejection_reason(), Some(SpeculativeRejectReason::UnknownFiniteDomain));
+        assert_eq!(missing.query_failure().unwrap().diagnostic()["symbol"], symbol.as_u32());
+        let mandatory = solver.check_sat(info()).is_sat().unwrap_err();
+        assert_eq!(mandatory.rejection_reason(), Some(SpeculativeRejectReason::UnknownDeferredMode));
+    });
+    query_solver.rollback_transaction(tx);
+    assert_eq!(crate::smt::test_query_count(), before);
     let tx = solver.start_transaction();
     four_lengths(&mut solver, symbol);
     let start = crate::smt::test_query_count();
@@ -400,7 +421,13 @@ fn symbolic_finite_domain_zero_extend_with_bounded_width() {
             concrete.sort();
             assert_eq!(concrete, expected);
         } else {
-            assert!(matches!(results.as_slice(), [Err(ExecError::Smt(crate::error::SmtError::NoSmt { .. }))]));
+            let [Err(ExecError::Smt(crate::error::SmtError::FiniteDomain { width, candidates: Some(values), .. }))] =
+                results.as_slice()
+            else {
+                panic!("位宽上界不足时必须报告原候选，实际 {results:?}")
+            };
+            assert_eq!(*width, 128);
+            assert_eq!(values.len(), 2);
         }
         if no_smt {
             assert_eq!(queries, 0);

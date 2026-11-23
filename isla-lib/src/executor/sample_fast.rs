@@ -182,7 +182,7 @@ impl FastFacts {
                 Exp::Bool(value) => Ok(value),
                 condition => match solver.check_sat_with(&Exp::Not(Box::new(condition)), SourceLoc::unknown()) {
                     SmtResult::Unsat => Ok(true),
-                    SmtResult::Sat | SmtResult::Unknown => Ok(false),
+                    SmtResult::Sat | SmtResult::Unproven(_) => Ok(false),
                     SmtResult::Error(error) => Err(ExecError::Smt(error)),
                 },
             }
@@ -327,7 +327,7 @@ impl<B: BV> SamplePath<B> {
                 Ok(Some(self.concretize_judged(solver, shared, input.sample_id, records, signature, consume)?.0))
             }
             SmtResult::Unsat => Ok(None),
-            SmtResult::Unknown => Err(ExecError::Z3Unknown),
+            SmtResult::Unproven(error) => Err(ExecError::Unproven(error)),
             SmtResult::Error(error) => Err(ExecError::Smt(error)),
         }
     }

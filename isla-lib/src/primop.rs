@@ -150,14 +150,14 @@ fn try_concretize_bool_exp<B: BV>(exp: Exp<Sym>, solver: &mut Solver<B>, info: S
                 both = true;
                 solver.define_const(exp, info)
             }
-            SmtResult::Unknown => solver.define_const(exp, info),
+            SmtResult::Unproven(_) => solver.define_const(exp, info),
             SmtResult::Error(error) => return Err(ExecError::Smt(error)),
         }
     } else {
         match solver.check_sat_with_for_bool(&Exp::Not(Box::new(exp.clone())), info) {
             SmtResult::Unsat => return Ok(Val::Bool(true)),
             SmtResult::Sat => (),
-            SmtResult::Unknown => {
+            SmtResult::Unproven(_) => {
                 let sym = solver.define_const(exp, info);
                 solver.note_bool_proof(sym, false);
                 return Ok(Val::Symbolic(sym));
@@ -170,7 +170,7 @@ fn try_concretize_bool_exp<B: BV>(exp: Exp<Sym>, solver: &mut Solver<B>, info: S
                 both = true;
                 solver.define_const(exp, info)
             }
-            SmtResult::Unknown => solver.define_const(exp, info),
+            SmtResult::Unproven(_) => solver.define_const(exp, info),
             SmtResult::Error(error) => return Err(ExecError::Smt(error)),
         }
     };
@@ -1379,7 +1379,7 @@ pub(crate) fn proven_symbolic_i128<B: BV>(
                 // 单值上界只证明取值。可查询的普通路径仍沿用前缀可行性检查。
                 match solver.check_candidate_sat(info) {
                     None | Some(SmtResult::Sat) => (),
-                    Some(SmtResult::Unsat | SmtResult::Unknown) => return Ok(None),
+                    Some(SmtResult::Unsat | SmtResult::Unproven(_)) => return Ok(None),
                     Some(SmtResult::Error(error)) => return Err(ExecError::Smt(error)),
                 }
             }
@@ -1407,7 +1407,7 @@ pub(crate) fn proven_symbolic_i128<B: BV>(
     // 取模型前必须先 check-sat；路径已经不可满足时没有模型可取，保持符号量交给调用方。
     match solver.check_sat(info) {
         SmtResult::Sat => (),
-        SmtResult::Unsat | SmtResult::Unknown => return Ok(None),
+        SmtResult::Unsat | SmtResult::Unproven(_) => return Ok(None),
         SmtResult::Error(error) => return Err(ExecError::Smt(error)),
     }
 
@@ -1431,7 +1431,7 @@ pub(crate) fn proven_symbolic_i128<B: BV>(
     // Unsat 表示 sym 不可能取别的值；Sat 表示还有别的取值，Unknown 同样不能安全具体化。
     match solver.check_sat_with(&Exp::Neq(Box::new(Exp::Var(sym)), Box::new(candidate_exp)), info) {
         SmtResult::Unsat => Ok(Some(candidate)),
-        SmtResult::Sat | SmtResult::Unknown => Ok(None),
+        SmtResult::Sat | SmtResult::Unproven(_) => Ok(None),
         SmtResult::Error(error) => Err(ExecError::Smt(error)),
     }
 }

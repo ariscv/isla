@@ -1094,9 +1094,8 @@ fn eval_address_constraints<B: BV>(
 fn address_constraints_require_sat(result: SmtResult) -> Result<(), SetupError> {
     match result {
         SmtResult::Sat => Ok(()),
-        SmtResult::Unsat | SmtResult::Unknown => {
-            Err(SetupError::AddressError("No satisfiable set of addresses".to_string()))
-        }
+        SmtResult::Unproven(cause) => Err(SetupError::Exec(ExecError::Unproven(cause))),
+        SmtResult::Unsat => Err(SetupError::AddressError("No satisfiable set of addresses".to_string())),
         SmtResult::Error(error) => Err(SetupError::Exec(ExecError::Smt(error))),
     }
 }

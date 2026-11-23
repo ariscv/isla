@@ -341,7 +341,7 @@ impl<'ir, B: BV> JoinPlan<'ir, B> {
                 info,
                 fold.prepared,
             );
-            if let Err(ExecError::SpeculativeReject { reason, function, pc, location }) = &result {
+            if let Err(ExecError::SpeculativeReject { reason, function, pc, location, .. }) = &result {
                 panic!("已批准的汇合拒绝：成员 {left_source:?}、{right_source:?}，站点 {function:?} @{pc} {location:?}，{reason:?}");
             }
             builds += 1;

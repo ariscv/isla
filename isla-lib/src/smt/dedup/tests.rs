@@ -183,9 +183,18 @@ fn deferred_exit_queries_never_publish_sat_and_restore_after_error() {
     reset_path_smt_stats();
     s.with_deferred_region_queries(|s| {
         assert!(s.region_queries_deferred());
-        assert_eq!(s.check_sat_with_for_bool(&Var(x), info), Unknown);
-        assert_eq!(s.check_sat_with_for_range(&Var(x), info), Unknown);
-        assert_eq!(s.check_sat(info), Unknown);
+        assert_eq!(
+            s.check_sat_with_for_bool(&Var(x), info),
+            Unproven(SmtError::DeferredQuery { source_loc: info, purpose: "boolean_proof" })
+        );
+        assert_eq!(
+            s.check_sat_with_for_range(&Var(x), info),
+            Unproven(SmtError::DeferredQuery { source_loc: info, purpose: "range_proof" })
+        );
+        assert_eq!(
+            s.check_sat(info),
+            Unproven(SmtError::DeferredQuery { source_loc: info, purpose: "model_or_general" })
+        );
         s.note_jump_results(x, true, true);
         assert!(s.knowledge.both.is_none());
         assert!(!s.knowledge.sat);
@@ -391,7 +400,7 @@ fn region_util_defer_range_obligation_preserves_error_domain() {
             if enabled || safe {
                 assert!(matches!(result, Ok(Val::Symbolic(_))));
             } else {
-                assert!(matches!(result, Err(ExecError::Z3Unknown)));
+                assert!(matches!(result, Err(ExecError::Unproven(SmtError::DeferredQuery { .. }))));
             }
             assert_eq!(s.deferred_assertions.as_ref().unwrap().arm.obligations.len(), usize::from(enabled && !safe));
             assert_eq!(path_smt_stats().calls, 0, "出口前不查 SMT");
@@ -440,14 +449,24 @@ fn no_smt_stage1_switches_are_independent_and_never_certify_branches() {
                 assert!(!s.knowledge.sat);
             }
             reset_path_smt_stats();
-            assert_eq!(s.check_sat_with_for_bool(&Not(Box::new(Var(x))), info), if booleans { Unknown } else { Unsat });
+            assert_eq!(
+                s.check_sat_with_for_bool(&Not(Box::new(Var(x))), info),
+                if booleans {
+                    Unproven(SmtError::DeferredQuery { source_loc: info, purpose: "boolean_proof" })
+                } else {
+                    Unsat
+                }
+            );
             if booleans {
                 assert_eq!(path_smt_stats().calls, 0);
             }
             assert_eq!(s.check_sat_with_for_range(&Not(Box::new(Var(x))), info), Unsat);
             assert_eq!(s.check_sat_with(&Not(Box::new(Var(x))), info), Unsat);
             s.with_deferred_region_queries(|s| {
-                assert_eq!(s.check_sat_with_for_range(&Var(x), info), Unknown);
+                assert_eq!(
+                    s.check_sat_with_for_range(&Var(x), info),
+                    Unproven(SmtError::DeferredQuery { source_loc: info, purpose: "range_proof" })
+                );
             });
         }
     }
@@ -467,7 +486,10 @@ fn no_smt_global_zero_checks_and_explicit_safety_assumptions() {
     assert!(s.no_smt_safety(&Bvult(Box::new(Var(index)), Box::new(bits64(32, 128))), info));
     let unknown = s.declare_const(Ty::Bool, info);
     assert!(s.no_smt_safety(&Var(unknown), info));
-    assert_eq!(s.check_sat_with_for_bool(&Var(unknown), info), Unknown);
+    assert_eq!(
+        s.check_sat_with_for_bool(&Var(unknown), info),
+        Unproven(SmtError::DeferredQuery { source_loc: info, purpose: "boolean_proof" })
+    );
     assert!(matches!(s.check_sat(info), Error(SmtError::NoSmt { .. })));
     assert_eq!(path_smt_stats().calls, 0);
     assert!(!s.knowledge.sat);
@@ -534,13 +556,22 @@ fn unify_characterization_assertions_and_mandatory_queries() {
                 assert!(matches!(result, Ok(Val::Unit)));
                 assert_eq!(s.deferred_assertions.as_ref().unwrap().arm.obligations.len(), 1);
                 assert_eq!(s.check_sat_with_for_branch(&Var(x), info, true), None);
-                assert_eq!(s.check_sat_with_for_bool(&Var(x), info), Unknown);
+                assert_eq!(
+                    s.check_sat_with_for_bool(&Var(x), info),
+                    Unproven(SmtError::DeferredQuery { source_loc: info, purpose: "boolean_proof" })
+                );
                 if no_smt {
                     assert!(matches!(s.check_sat(info), Error(SmtError::NoSmt { .. })));
                     assert!(matches!(s.check_sat_with_for_range(&Var(x), info), Error(SmtError::NoSmt { .. })));
                 } else {
-                    assert_eq!(s.check_sat(info), Unknown);
-                    assert_eq!(s.check_sat_with_for_range(&Var(x), info), Unknown);
+                    assert_eq!(
+                        s.check_sat(info),
+                        Unproven(SmtError::DeferredQuery { source_loc: info, purpose: "model_or_general" })
+                    );
+                    assert_eq!(
+                        s.check_sat_with_for_range(&Var(x), info),
+                        Unproven(SmtError::DeferredQuery { source_loc: info, purpose: "range_proof" })
+                    );
                 }
                 assert_eq!(path_smt_stats().calls, 0);
                 assert!(!s.knowledge.sat);
@@ -595,8 +626,22 @@ fn unify_optional_candidate_checks_keep_real_unknown_and_obligations() {
         s.with_deferred_region_queries(|s| {
             s.defer_assertion(Var(x), info);
             reset_path_smt_stats();
-            assert_eq!(s.check_candidate_sat(info), if no_smt { None } else { Some(Unknown) });
-            assert_eq!(s.check_candidate_sat_with(&Var(x), info), if no_smt { None } else { Some(Unknown) });
+            assert_eq!(
+                s.check_candidate_sat(info),
+                if no_smt {
+                    None
+                } else {
+                    Some(Unproven(SmtError::DeferredQuery { source_loc: info, purpose: "model_or_general" }))
+                }
+            );
+            assert_eq!(
+                s.check_candidate_sat_with(&Var(x), info),
+                if no_smt {
+                    None
+                } else {
+                    Some(Unproven(SmtError::DeferredQuery { source_loc: info, purpose: "general" }))
+                }
+            );
             assert_eq!(s.check_sat_for_arm(info), None);
             assert_eq!(path_smt_stats().calls, 0);
             assert_eq!(s.check_deferred_assertions(info), if no_smt { None } else { Some(Unsat) });

@@ -402,8 +402,8 @@ fn model_collector<'ir, B: BV>(
                 };
                 collected.push(Ok((task_id, val, events, enumeration)))
             }
-            SmtResult::Error(error) => collected.push(Err((ExecError::Smt(error).to_string(), events))),
-            SmtResult::Unsat | SmtResult::Unknown => {
+            SmtResult::Unproven(error) | SmtResult::Error(error) => collected.push(Err((error.to_string(), events))),
+            SmtResult::Unsat => {
                 collected.push(Err((format!("Got value {} but unsat?", val.to_string(shared_state)), events)))
             }
         },
@@ -420,12 +420,10 @@ fn model_collector<'ir, B: BV>(
                     let model = Model::new(&solver);
                     collected.push(Err((format!("Error {:?}\n{:?}", err, model), events)))
                 }
-                SmtResult::Error(error) => {
-                    collected.push(Err((format!("Error {:?}\n{}", err, ExecError::Smt(error)), events)))
+                SmtResult::Unproven(error) | SmtResult::Error(error) => {
+                    collected.push(Err((format!("Error {:?}\n{}", err, error), events)))
                 }
-                SmtResult::Unsat | SmtResult::Unknown => {
-                    collected.push(Err((format!("Error {:?}\nno model", err), events)))
-                }
+                SmtResult::Unsat => collected.push(Err((format!("Error {:?}\nno model", err), events))),
             }
         }
     }

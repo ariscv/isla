@@ -56,12 +56,23 @@ impl IslaError for VoidError {
 
 #[derive(Clone, Debug)]
 pub enum SmtError {
+    FiniteDomain {
+        source_loc: SourceLoc,
+        symbol: crate::smt::Sym,
+        width: u32,
+        candidates: Option<Vec<String>>,
+    },
+    DeferredQuery {
+        source_loc: SourceLoc,
+        purpose: &'static str,
+    },
     NoSmt {
         reason: &'static str,
         source_loc: SourceLoc,
     },
     Timeout(Arc<SmtTimeout>),
-    Unknown {
+    SolverUnknown {
+        reason: String,
         source_loc: SourceLoc,
         purpose: &'static str,
         wall: std::time::Duration,
@@ -70,10 +81,41 @@ pub enum SmtError {
 }
 
 impl SmtError {
+    pub fn reject_reason(&self) -> crate::executor::SpeculativeRejectReason {
+        use crate::executor::SpeculativeRejectReason::*;
+        match self {
+            Self::FiniteDomain { .. } => UnknownFiniteDomain,
+            Self::Timeout(_) | Self::SolverUnknown { .. } => UnknownSolver,
+            Self::DeferredQuery { .. } | Self::NoSmt { .. } => UnknownDeferredMode,
+        }
+    }
+
+    pub fn diagnostic(&self) -> serde_json::Value {
+        use serde_json::json;
+        match self {
+            Self::FiniteDomain { symbol, width, candidates, .. } => {
+                json!({"purpose":"symbolic_value_enumeration","symbol":symbol.as_u32(),"width":width,"candidates":candidates})
+            }
+            Self::DeferredQuery { purpose, .. } => json!({"purpose":purpose}),
+            Self::NoSmt { reason, .. } => json!({"purpose":reason,"no_smt":true}),
+            Self::SolverUnknown { reason, purpose, wall, limit, .. } => json!({
+                "purpose":purpose,"reason_unknown":reason,"seconds":wall.as_secs_f64(),
+                "limit_seconds":limit.map(|duration| duration.as_secs_f64())
+            }),
+            Self::Timeout(timeout) => {
+                json!({"purpose":timeout.query_purpose,"operation":format!("{:?}",timeout.operation),
+                "seconds":timeout.operation_wall.as_secs_f64(),"limit_seconds":timeout.limit.as_secs_f64()})
+            }
+        }
+    }
+
     pub fn source_loc(&self) -> SourceLoc {
         match self {
             SmtError::Timeout(timeout) => timeout.source_loc(),
-            SmtError::NoSmt { source_loc, .. } | SmtError::Unknown { source_loc, .. } => *source_loc,
+            Self::FiniteDomain { source_loc, .. }
+            | Self::DeferredQuery { source_loc, .. }
+            | SmtError::NoSmt { source_loc, .. }
+            | SmtError::SolverUnknown { source_loc, .. } => *source_loc,
         }
     }
 }
@@ -81,14 +123,21 @@ impl SmtError {
 impl PartialEq for SmtError {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
+            (
+                Self::FiniteDomain { source_loc: a, symbol: x, width: w, candidates: c },
+                Self::FiniteDomain { source_loc: b, symbol: y, width: v, candidates: d },
+            ) => (a, x, w, c) == (b, y, v, d),
+            (Self::DeferredQuery { source_loc: a, purpose: x }, Self::DeferredQuery { source_loc: b, purpose: y }) => {
+                (a, x) == (b, y)
+            }
             (SmtError::Timeout(lhs), SmtError::Timeout(rhs)) => Arc::ptr_eq(lhs, rhs),
             (SmtError::NoSmt { reason: a, source_loc: x }, SmtError::NoSmt { reason: b, source_loc: y }) => {
                 a == b && x == y
             }
             (
-                SmtError::Unknown { source_loc: a, purpose: p, wall: x, limit: l },
-                SmtError::Unknown { source_loc: b, purpose: q, wall: y, limit: m },
-            ) => a == b && p == q && x == y && l == m,
+                SmtError::SolverUnknown { source_loc: a, purpose: p, wall: x, limit: l, reason: r },
+                SmtError::SolverUnknown { source_loc: b, purpose: q, wall: y, limit: m, reason: s },
+            ) => a == b && p == q && x == y && l == m && r == s,
             _ => false,
         }
     }
@@ -99,13 +148,26 @@ impl Eq for SmtError {}
 impl fmt::Display for SmtError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SmtError::NoSmt { reason, source_loc } => write!(f, "无 SMT 无法继续：{reason}，位置{source_loc:?}"),
-            SmtError::Unknown { source_loc, purpose, wall, .. } => {
-                write!(f, "Z3 Unknown during {purpose} at {source_loc:?} (operation wall {wall:?})")
+            Self::FiniteDomain { source_loc, symbol, width, candidates } => write!(
+                f,
+                "unknown_finite_domain: v{} ({} 位)，候选 {:?}，位置 {:?}",
+                symbol.as_u32(),
+                width,
+                candidates,
+                source_loc
+            ),
+            Self::DeferredQuery { source_loc, purpose } => {
+                write!(f, "unknown_deferred_mode: {purpose}，位置 {source_loc:?}")
+            }
+            SmtError::NoSmt { reason, source_loc } => {
+                write!(f, "unknown_deferred_mode: 无 SMT 无法继续：{reason}，位置{source_loc:?}")
+            }
+            SmtError::SolverUnknown { source_loc, purpose, wall, reason, .. } => {
+                write!(f, "unknown_solver: Z3 Unknown ({reason}) during {purpose} at {source_loc:?} (operation wall {wall:?})")
             }
             SmtError::Timeout(timeout) => write!(
                 f,
-                "SMT timeout during {:?} at {:?} after {:?} (operation wall {:?})",
+                "unknown_solver: SMT timeout during {:?} at {:?} after {:?} (operation wall {:?})",
                 timeout.operation, timeout.source_loc, timeout.limit, timeout.operation_wall
             ),
         }
@@ -119,6 +181,7 @@ pub enum ExecError {
     /// 推演控制信号，区别于正常返回和异常终止；不是普通路径错误。
     /// 后续集成的推演边界必须捕获并回滚，禁止交给普通调度器或路径收尾。
     SpeculativeReject {
+        cause: Option<Box<SmtError>>,
         reason: crate::executor::SpeculativeRejectReason,
         function: Name,
         pc: usize,
@@ -170,7 +233,7 @@ pub enum ExecError {
     Smt(SmtError),
     NoModel,
     Z3Error(String),
-    Z3Unknown,
+    Unproven(SmtError),
     /// 候选与剩余约束均不可继续，由探索循环转为 Run::Dead。
     SolverDroppedPath,
     /// Execution stopped because this function is in the stop_functions set
@@ -202,7 +265,7 @@ impl IslaError for ExecError {
             | SymbolicLength(_, info)
             | VariableNotFound(_, info)
             | MatchFailure(info) => *info,
-            Smt(error) => error.source_loc(),
+            Smt(error) | Unproven(error) => error.source_loc(),
             BranchLimitReached(_, _) | LoopLimitReached(_, _) | DepthLimitReached => SourceLoc::unknown(),
             Unimplemented
             | Overflow
@@ -216,7 +279,6 @@ impl IslaError for ExecError {
             | Timeout
             | NoModel
             | Z3Error(_)
-            | Z3Unknown
             | SolverDroppedPath
             | SampleOutputStopped(_)
             | Stopped(_)
@@ -231,6 +293,23 @@ impl IslaError for ExecError {
 }
 
 impl ExecError {
+    pub fn query_failure(&self) -> Option<&SmtError> {
+        match self {
+            Self::SpeculativeReject { cause, .. } => cause.as_deref(),
+            Self::Smt(cause) | Self::Unproven(cause) => Some(cause),
+            _ => None,
+        }
+    }
+
+    pub fn rejection_reason(&self) -> Option<crate::executor::SpeculativeRejectReason> {
+        match self {
+            Self::SpeculativeReject { reason, .. } => Some(*reason),
+            Self::Smt(error) | Self::Unproven(error) => Some(error.reject_reason()),
+            Self::Timeout => Some(crate::executor::SpeculativeRejectReason::PathTimeout),
+            _ => None,
+        }
+    }
+
     /// 远端区域臂到达汇合者前，重写错误载荷中的符号。
     pub(crate) fn remap_symbols(&self, remap: &crate::smt::SymRemap) -> Self {
         match self {
@@ -244,7 +323,18 @@ impl ExecError {
                 operation,
                 location: *location,
             },
-            _ => self.clone(),
+            _ => {
+                let mut error = self.clone();
+                let cause = match &mut error {
+                    Self::SpeculativeReject { cause, .. } => cause.as_deref_mut(),
+                    Self::Smt(cause) | Self::Unproven(cause) => Some(cause),
+                    _ => None,
+                };
+                if let Some(SmtError::FiniteDomain { symbol, .. }) = cause {
+                    *symbol = remap.get(*symbol);
+                }
+                error
+            }
         }
     }
 
@@ -263,8 +353,12 @@ impl fmt::Display for ExecError {
             Type(msg, _) => write!(f, "Type error: {}", msg),
             VariableNotFound(v, _) => write!(f, "Variable {} not found", v),
             Unimplemented => write!(f, "Unimplemented"),
-            SpeculativeReject { reason, function, pc, location } => {
-                write!(f, "拒绝推演: {}，函数 {:?}，pc {}，位置 {:?}", reason, function, pc, location)
+            SpeculativeReject { reason, function, pc, location, cause } => {
+                write!(f, "拒绝推演: {}，函数 {:?}，pc {}，位置 {:?}", reason, function, pc, location)?;
+                if let Some(cause) = cause {
+                    write!(f, "，{cause}")?;
+                }
+                Ok(())
             }
             AssertionFailure(None, _) => write!(f, "Assertion failure"),
             AssertionFailure(Some(msg), _) => write!(f, "Assertion failure: {}", msg),
@@ -285,11 +379,11 @@ impl fmt::Display for ExecError {
             NoElfEntry => write!(f, "No entry point specified"),
             OutOfBounds(func) => write!(f, "Out of bounds error in {}", func),
             MatchFailure(_) => write!(f, "Pattern match failure"),
-            Timeout => write!(f, "Timeout"),
+            Timeout => write!(f, "path_timeout"),
             Smt(error) => write!(f, "{}", error),
             NoModel => write!(f, "No SMT model found"),
             Z3Error(msg) => write!(f, "SMT solver error: {}", msg),
-            Z3Unknown => write!(f, "SMT solver returned unknown"),
+            Unproven(error) => write!(f, "{error}"),
             SolverDroppedPath => write!(f, "求解器未判定，路径已丢弃"),
             SampleOutputStopped(reason) => write!(f, "样本输出会话正常停止：{reason}"),
             Stopped(func) => write!(f, "Execution stopped at {}", func),

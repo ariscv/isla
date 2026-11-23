@@ -413,9 +413,8 @@ fn collect_path<'ir, B: BV>(
                 collected.paths.lock().unwrap().push(summary);
             }
             SmtResult::Unsat => (),
-            SmtResult::Unknown => collected.incomplete.store(true, Ordering::Release),
-            SmtResult::Error(error) => {
-                eprintln!("路径求解失败：{error:?}");
+            SmtResult::Unproven(error) | SmtResult::Error(error) => {
+                eprintln!("路径求解失败：{error}");
                 collected.incomplete.store(true, Ordering::Release);
             }
         },
@@ -439,7 +438,10 @@ fn collect_path<'ir, B: BV>(
                     }
                 }
                 SmtResult::Unsat => (),
-                SmtResult::Unknown | SmtResult::Error(_) => collected.incomplete.store(true, Ordering::Release),
+                SmtResult::Unproven(error) | SmtResult::Error(error) => {
+                    eprintln!("断言路径求解失败：{error}");
+                    collected.incomplete.store(true, Ordering::Release);
+                }
             }
             return;
         }

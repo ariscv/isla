@@ -511,6 +511,7 @@ struct Attempt {
     root_started: Option<Instant>,
     trace_start: Option<(Instant, SourceLoc)>,
     outcome: &'static str,
+    rejection_reason: Option<super::SpeculativeRejectReason>,
     failure: Option<Value>,
     nested_failure: Option<Value>,
     first_unknown: Option<Value>,
@@ -558,6 +559,7 @@ impl AttemptGuard {
                 failure: None,
                 nested_failure: None,
                 first_unknown: None,
+                rejection_reason: None,
                 phase_at: None,
             });
         });
@@ -603,11 +605,20 @@ impl AttemptGuard {
         ATTEMPTS.with(|stack| {
             let mut stack = stack.borrow_mut();
             let depth = stack.len();
+            if reason.is_indeterminate() {
+                let root = stack.first_mut().unwrap();
+                root.first_unknown.get_or_insert_with(|| {
+                    let detail = error.query_failure().map(|cause| cause.diagnostic());
+                    json!({"reason":reason, "function":site["function"], "pc":pc, "location":location,
+                        "purpose":detail.as_ref().and_then(|value|value.get("purpose")).cloned().unwrap_or(json!(phase)), "depth":depth})
+                });
+            }
             let attempt = stack.last_mut().unwrap();
             let phase = attempt
                 .phase_at
                 .filter(|(r, name, at, _)| (r, name, at) == (reason, function, pc))
                 .map_or(phase, |(_, _, _, phase)| phase);
+            attempt.rejection_reason = Some(*reason);
             let reason = json!(reason);
             attempt.outcome = "rejected";
             // 只沿同一次拒绝向外关联，已处理的子区域失败不能覆盖外层的退出认证。
@@ -617,7 +628,7 @@ impl AttemptGuard {
                 .filter(|failure| failure["reason"] == reason && failure["at"] == site)
                 .or_else(|| {
                     Some(json!({"attempt":attempt.id,"origin":attempt.origin,
-                    "depth":depth,"stage":phase,"reason":reason,"at":site,"error":bounded_debug(error,256)}))
+                    "depth":depth,"stage":phase,"reason":reason,"at":site,"cause":error.query_failure().map(|cause|cause.diagnostic()),"error":bounded_debug(error,256)}))
                 });
         });
     }
@@ -649,9 +660,13 @@ impl Drop for AttemptGuard {
                 }
                 return;
             }
-            let solver_unknown = attempt.outcome == "rejected"
-                && attempt.failure.as_ref().is_some_and(|failure| failure["reason"] == "solver_unknown");
-            let first_unknown = solver_unknown.then(|| attempt.first_unknown.clone()).flatten();
+            let first_unknown = if attempt.outcome == "rejected"
+                && attempt.rejection_reason.is_some_and(super::SpeculativeRejectReason::is_indeterminate)
+            {
+                attempt.first_unknown.clone()
+            } else {
+                None
+            };
             if let Some((started, location)) = attempt.trace_start {
                 eprintln!(
                     "{}",
@@ -664,6 +679,7 @@ impl Drop for AttemptGuard {
             if let (Some(first_unknown), Some(started)) = (first_unknown, attempt.root_started) {
                 COUNTS.get().unwrap().lock().unwrap().record_first_unknown_root(
                     &attempt.origin,
+                    attempt.rejection_reason.unwrap(),
                     &first_unknown,
                     started.elapsed().as_secs_f64(),
                 );
@@ -775,7 +791,7 @@ pub(crate) fn record_deferred_query(purpose: &str, info: crate::source_loc::Sour
             let depth = stack.len();
             if let Some(root) = stack.first_mut() {
                 root.first_unknown.get_or_insert_with(|| {
-                    json!({"purpose":purpose,"location":info,"function":site["function"],"pc":site["pc"],"depth":depth})
+                    json!({"reason":super::SpeculativeRejectReason::UnknownDeferredMode,"purpose":purpose,"location":info,"function":site["function"],"pc":site["pc"],"depth":depth})
                 });
             }
         });
@@ -822,7 +838,7 @@ pub(crate) fn execute_arm_error(function: Name, pc: usize, error: &ExecError, sy
     if !enabled()
         || matches!(
             error,
-            ExecError::SpeculativeReject { .. } | ExecError::Smt(_) | ExecError::Timeout | ExecError::Z3Unknown
+            ExecError::SpeculativeReject { .. } | ExecError::Smt(_) | ExecError::Timeout | ExecError::Unproven(_)
         )
     {
         return;
@@ -867,8 +883,14 @@ impl DiagnosticCounts {
             oversized: 0,
         }
     }
-    fn record_first_unknown_root(&mut self, root: &Value, first_unknown: &Value, elapsed_seconds: f64) {
-        let key = json!({"root":root,"first_unknown":{"purpose":first_unknown["purpose"],"location":first_unknown["location"]}}).to_string();
+    fn record_first_unknown_root(
+        &mut self,
+        root: &Value,
+        reason: super::SpeculativeRejectReason,
+        first_unknown: &Value,
+        elapsed_seconds: f64,
+    ) {
+        let key = json!({"root":root,"reason":reason,"first_unknown":{"reason":first_unknown["reason"],"purpose":first_unknown["purpose"],"location":first_unknown["location"]}}).to_string();
         let entry = self.first_unknown_roots.entry(key).or_default();
         entry.0 += 1;
         entry.1 += elapsed_seconds;

@@ -197,12 +197,7 @@ pub struct SamplePath<B: BV> {
 }
 
 fn sat<B: BV>(solver: &mut Solver<B>) -> Result<bool, ExecError> {
-    match solver.check_sat(SourceLoc::unknown()) {
-        SmtResult::Sat => Ok(true),
-        SmtResult::Unsat => Ok(false),
-        SmtResult::Unknown => Err(ExecError::Z3Unknown),
-        SmtResult::Error(error) => Err(ExecError::Smt(error)),
-    }
+    solver.check_sat(SourceLoc::unknown()).is_sat()
 }
 
 fn equal<B: BV>(
@@ -553,7 +548,7 @@ impl<B: BV> SamplePath<B> {
                 SmtResult::Sat => {
                     return Err(ExecError::Type("类不唯一：前态未确定活动守卫".into(), SourceLoc::unknown()))
                 }
-                SmtResult::Unknown => return Err(ExecError::Z3Unknown),
+                SmtResult::Unproven(error) => return Err(ExecError::Unproven(error)),
                 SmtResult::Error(error) => return Err(ExecError::Smt(error)),
             }
             drop(timing);
@@ -644,7 +639,7 @@ impl<B: BV> SamplePath<B> {
                     // 后态取反查询保持原有逐字段顺序。
                     SmtResult::Unsat => (),
                     SmtResult::Sat => return Ok(Some(false)),
-                    SmtResult::Unknown => return Err(ExecError::Z3Unknown),
+                    SmtResult::Unproven(error) => return Err(ExecError::Unproven(error)),
                     SmtResult::Error(error) => return Err(ExecError::Smt(error)),
                 }
             }
@@ -1003,12 +998,12 @@ impl SampleChecker {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn solver_unknown_acceptance_is_an_error() {
+    fn unknown_solver_acceptance_is_an_error() {
         crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let context = crate::smt::Context::new(crate::smt::Config::new());
         let mut solver = Solver::<crate::bitvector::b64::B64>::new(&context);
         let result = crate::smt::test_queries::with_results([Some(z3_sys::Z3_L_UNDEF)], || super::sat(&mut solver));
-        assert!(matches!(result, Err(ExecError::Smt(crate::error::SmtError::Unknown { .. }))));
+        assert!(matches!(result, Err(ExecError::Smt(crate::error::SmtError::SolverUnknown { .. }))));
     }
 
     use super::*;

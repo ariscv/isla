@@ -541,7 +541,18 @@ progress = true
 
 `[execution_limits] on_path_timeout = "panic"` 是逐路径 `--timeout` 的缺省处置。`--on-path-timeout=panic|dead` 覆盖 TOML。显式选择 `dead` 时使用原来的逐路径到限记录并继续探索。两类 panic 都报告 IR 函数、PC、Sail 位置、用途、耗时、限额和路径深度。scheduler 将这类退出记为 `error`，诊断行保存在结果 JSON 的 `errors` 中。
 
-区域尝试超时、整体出口查询无法判定和延后查询的内部 Unknown 仍由区域推演处理，自动合并撤销尝试并在普通分叉上执行。路径策略只在结果可归属单条探索路径或执行最终到限时生效。样本绑定和验收的错误继续交给各自调用方。
+区域拒绝的 `reason` 分别为 `unknown_finite_domain`（有限候选不足）、`unknown_solver`（Z3 返回 unknown 或中断）、`unknown_deferred_mode`（延后或无 SMT 模式限制）及 `path_timeout`（路径墙钟到限）。当根出口已证 Unsat 且需要回滚时记 `exit_unsat`。自动合并撤销失败的尝试，在普通分叉上执行。路径策略只在结果可归属单条探索路径或执行最终到限时生效。样本绑定和验收的错误继续交给各自调用方。
+
+嵌套区域的三个开关分别控制是否保留外层区域，并把失败的内层分叉交回外层继续。以下示例只启用有限域一类，三项缺省均为 false。
+
+```toml
+[execution_limits.path_merge]
+partial_commit_finite_domain = true
+partial_commit_solver = false
+partial_commit_deferred_mode = false
+```
+
+对应的 CLI 为 `--partial-commit-finite-domain=true|false`、`--partial-commit-solver=true|false` 和 `--partial-commit-deferred-mode=true|false`。旧字段 `partial_commit_solver_unknown` 将触发配置错误。路径到限仍使用独立的 `on_path_timeout` 处置，保留片段不能延长这条路径的预算。
 
 使用线程中断功能构建时，`--smt-timeout` 设置单次 Z3 调用的软中断限时，省略时不限。终态查询的专用限时独立生效。直接调用构建没有这两种单次限时。
 

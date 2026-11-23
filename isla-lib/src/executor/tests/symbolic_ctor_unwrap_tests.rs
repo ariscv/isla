@@ -139,7 +139,7 @@ fn region_util_defer_ctor_obligation_checks_original_guard() {
                     if no_smt { None } else { Some(if safe { SmtResult::Unsat } else { SmtResult::Sat }) }
                 );
             } else {
-                assert!(matches!(result, Err(ExecError::Z3Unknown)));
+                assert!(matches!(result, Err(ExecError::Unproven(crate::error::SmtError::DeferredQuery { .. }))));
             }
         });
         solver.rollback_transaction(root);
