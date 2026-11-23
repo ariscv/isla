@@ -341,7 +341,7 @@ fn check_vector_update_error_rollback(symbolic_index: bool) {
         return;
     }
     assert!(matches!(outcome, region_merge::RegionResult::Rejected));
-    assert_eq!(report["failure_reasons"]["retry_operand"], 1);
+    assert_eq!(report["failure_reasons"]["SpeculativeRejectReason::RetryOperand"], 1);
 
     assert_eq!(solver.trace().to_vec().len(), before, "回滚不得泄漏定义和寄存器事件");
     assert_eq!(frame.pc, 0);
@@ -586,7 +586,12 @@ fn region_m2_read_footprint_topology_and_write_cycle() {
             });
         }
     }
-    assert!(shared.execution_stats.merge_json()["failure_reasons"]["register_sequence"].as_u64().unwrap() >= 2);
+    assert!(
+        shared.execution_stats.merge_json()["failure_reasons"]["SpeculativeRejectReason::RegisterSequence"]
+            .as_u64()
+            .unwrap()
+            >= 2
+    );
 }
 
 #[test]
@@ -707,7 +712,12 @@ fn region_m2_address_writes_remain_rejected_and_relaxed_obeys_event_policy() {
             });
         }
     }
-    assert!(shared.execution_stats.merge_json()["failure_reasons"]["relaxed_register"].as_u64().unwrap() > 0);
+    assert!(
+        shared.execution_stats.merge_json()["failure_reasons"]["SpeculativeRejectReason::RelaxedRegister"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
 }
 
 #[test]

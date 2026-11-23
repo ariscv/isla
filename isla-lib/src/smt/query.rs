@@ -480,31 +480,35 @@ mod tests {
     #[test]
     fn z3_failure_reason_classifies_native_results() {
         for (native_reason, expected) in [
-            ("timeout", "z3_timeout"),
-            ("interrupted", "z3_timeout"),
-            ("interrupted from keyboard", "z3_timeout"),
-            ("canceled", "z3_timeout"),
-            ("sat.canceled", "z3_timeout"),
-            ("max. resource limit exceeded", "z3_resource_exhausted"),
-            ("(resource limits reached)", "z3_resource_exhausted"),
-            ("max. memory exceeded", "z3_resource_exhausted"),
-            ("out of memory", "z3_resource_exhausted"),
-            ("memout", "z3_resource_exhausted"),
-            ("max-conflicts-reached", "z3_resource_exhausted"),
-            ("max. scopes exceeded", "z3_resource_exhausted"),
-            ("max. steps exceeded", "z3_resource_exhausted"),
-            ("max. frames exceeded", "z3_resource_exhausted"),
-            ("(incomplete (theory arithmetic))", "unknown_z3"),
-            ("", "unknown_z3"),
+            ("timeout", "SpeculativeRejectReason::Z3Timeout"),
+            ("interrupted", "SpeculativeRejectReason::Z3Timeout"),
+            ("interrupted from keyboard", "SpeculativeRejectReason::Z3Timeout"),
+            ("canceled", "SpeculativeRejectReason::Z3Timeout"),
+            ("sat.canceled", "SpeculativeRejectReason::Z3Timeout"),
+            ("max. resource limit exceeded", "SpeculativeRejectReason::Z3ResourceExhausted"),
+            ("(resource limits reached)", "SpeculativeRejectReason::Z3ResourceExhausted"),
+            ("max. memory exceeded", "SpeculativeRejectReason::Z3ResourceExhausted"),
+            ("out of memory", "SpeculativeRejectReason::Z3ResourceExhausted"),
+            ("memout", "SpeculativeRejectReason::Z3ResourceExhausted"),
+            ("max-conflicts-reached", "SpeculativeRejectReason::Z3ResourceExhausted"),
+            ("max. scopes exceeded", "SpeculativeRejectReason::Z3ResourceExhausted"),
+            ("max. steps exceeded", "SpeculativeRejectReason::Z3ResourceExhausted"),
+            ("max. frames exceeded", "SpeculativeRejectReason::Z3ResourceExhausted"),
+            ("(incomplete (theory arithmetic))", "SpeculativeRejectReason::UnknownZ3"),
+            ("", "SpeculativeRejectReason::UnknownZ3"),
         ] {
             let error = z3_query_error(SourceLoc::unknown(), Duration::ZERO, None, native_reason.into(), false);
             assert_eq!(error.reject_reason().to_string(), expected, "{native_reason:?}");
             assert_eq!(error.diagnostic()["reason_unknown"], native_reason);
-            assert_eq!(Error(error).is_unknown(), expected == "unknown_z3");
+            assert_eq!(Error(error).is_unknown(), expected == "SpeculativeRejectReason::UnknownZ3");
         }
         for native_reason in ["canceled", "sat.canceled"] {
             let error = z3_query_error(SourceLoc::unknown(), Duration::ZERO, None, native_reason.into(), true);
-            assert_eq!(error.reject_reason().to_string(), "z3_resource_exhausted", "{native_reason}");
+            assert_eq!(
+                error.reject_reason().to_string(),
+                "SpeculativeRejectReason::Z3ResourceExhausted",
+                "{native_reason}"
+            );
         }
     }
 

@@ -1067,7 +1067,7 @@ pub(super) fn check_region_effect_rejection_and_negative_cache() {
     let report = shared.execution_stats.merge_json();
     assert_eq!(report["negative_cache_hits"], 1);
     let detail = shared.execution_stats.arm_unsupported_json(&shared.symtab);
-    assert_eq!(detail["top"][0]["reason"], "state_effect");
+    assert_eq!(detail["top"][0]["reason"], "SpeculativeRejectReason::StateEffect");
     assert_eq!(detail["top"][0]["target_pc"], 3);
     assert_eq!(detail["top"][0]["location"], "region.sail 17:1 - 17:8");
 }
@@ -1140,7 +1140,7 @@ pub(super) fn check_region_read_after_write_location() {
         .unwrap()
         .is_none());
     let report = shared.execution_stats.arm_unsupported_json(&shared.symtab);
-    assert_eq!(report["top"][0]["reason"], "register_read_after_write");
+    assert_eq!(report["top"][0]["reason"], "SpeculativeRejectReason::RegisterReadAfterWrite");
     assert_eq!(report["top"][0]["source_loc"], serde_json::json!(source));
 }
 
@@ -1261,7 +1261,10 @@ fn region_merge_inner_commit_then_outer_rollback_with_assertion() {
         );
         assert_eq!(*output.lock().unwrap(), 2);
         assert!(
-            shared.execution_stats.merge_json()["failure_reasons"]["register_read_after_write"].as_u64().unwrap() > 0
+            shared.execution_stats.merge_json()["failure_reasons"]["SpeculativeRejectReason::RegisterReadAfterWrite"]
+                .as_u64()
+                .unwrap()
+                > 0
         );
     }
 }
@@ -1399,12 +1402,12 @@ fn region_merge_force_process_failure_and_off_conflict() {
             .map(|line| serde_json::from_str(line).unwrap())
             .expect("强退前必须报告规则统计");
         if case == "off" {
-            assert_eq!(stats["rules"]["0"]["failure_reasons"]["policy_off"], 1);
+            assert_eq!(stats["rules"]["0"]["failure_reasons"]["SpeculativeRejectReason::PolicyOff"], 1);
         }
         assert_eq!(diagnostic["kind"], "force_region_merge_failure");
         assert!(diagnostic["rule"].is_u64());
         if case == "off" {
-            assert_eq!(diagnostic["reason"], "policy_off");
+            assert_eq!(diagnostic["reason"], "SpeculativeRejectReason::PolicyOff");
             assert!(!diagnostic["force_origin"].is_null());
         }
     }
@@ -1502,7 +1505,7 @@ fn region_merge_callee_have_exception_write_rejects() {
     assert!(merge_region_for_test(condition, 3, &mut frame, &shared, &mut solver, info(), None, None)
         .unwrap()
         .is_none());
-    assert_eq!(shared.execution_stats.merge_json()["failure_reasons"]["callee_state_write"], 1);
+    assert_eq!(shared.execution_stats.merge_json()["failure_reasons"]["SpeculativeRejectReason::CalleeStateWrite"], 1);
 }
 
 #[test]
@@ -1573,7 +1576,7 @@ fn region_merge_non_returning_helper_exempts_effects_but_rejects_executed_exit()
         assert_eq!(result.is_some(), !execute_exception);
         if execute_exception {
             let stats = shared.execution_stats.arm_unsupported_json(&shared.symtab);
-            assert_eq!(stats["top"][0]["reason"], "region_escaped");
+            assert_eq!(stats["top"][0]["reason"], "SpeculativeRejectReason::RegionEscaped");
             assert_eq!(stats["top"][0]["rejected_function"], "region_pure_helper");
             assert_eq!(stats["top"][0]["target_pc"], 3);
             assert!(frame.region_merge_records().is_empty(), "拒绝后必须回滚合并记录");
@@ -2086,7 +2089,7 @@ fn region_merge_force_static_validation_before_execution() {
     assert_eq!(diagnostic["rule"], 0);
     assert_eq!(diagnostic["function"], "loop");
     assert_eq!(diagnostic["branch_pc"], 0);
-    assert_eq!(diagnostic["reason"], "has_back_edge");
+    assert_eq!(diagnostic["reason"], "SpeculativeRejectReason::HasBackEdge");
 }
 
 #[test]
@@ -2411,7 +2414,7 @@ fn region_merge_force_toml_exits_with_rule_stats() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     let diagnostic: serde_json::Value = stderr.lines().find_map(|line| serde_json::from_str(line).ok()).unwrap();
     assert_eq!(diagnostic["rule"], 0);
-    assert_eq!(diagnostic["reason"], "register_read_after_write");
+    assert_eq!(diagnostic["reason"], "SpeculativeRejectReason::RegisterReadAfterWrite");
     let report: serde_json::Value = stderr
         .lines()
         .find_map(|line| line.strip_prefix("[MERGE_STATS] "))
@@ -2419,7 +2422,7 @@ fn region_merge_force_toml_exits_with_rule_stats() {
         .expect("Force 强退前必须输出统计");
     assert_eq!(report["rules"]["0"]["attempts"], 1);
     assert_eq!(report["rules"]["0"]["successes"], 0);
-    assert_eq!(report["rules"]["0"]["failure_reasons"]["register_read_after_write"], 1);
+    assert_eq!(report["rules"]["0"]["failure_reasons"]["SpeculativeRejectReason::RegisterReadAfterWrite"], 1);
 }
 
 #[test]
@@ -2856,10 +2859,10 @@ fn region_merge_f2_force_and_adaptive_errors() {
                 let diagnostic: serde_json::Value =
                     stderr.lines().find_map(|line| serde_json::from_str(line).ok()).unwrap();
                 let reason = match case {
-                    "timeout" => "path_timeout",
-                    "smt" => "unknown_deferred_mode",
-                    "assertion" => "symbolic_assertion",
-                    _ => "step_budget",
+                    "timeout" => "SpeculativeRejectReason::PathTimeout",
+                    "smt" => "SpeculativeRejectReason::UnknownDeferredMode",
+                    "assertion" => "SpeculativeRejectReason::SymbolicAssertion",
+                    _ => "SpeculativeRejectReason::StepBudget",
                 };
                 assert_eq!(diagnostic["reason"], reason);
                 assert!(stderr.contains("[MERGE_STATS]"));
@@ -5060,7 +5063,11 @@ fn merge_diagnostics_execution_is_observational() {
     let exclusive_queries: u64 = outcomes.iter().map(|row| row["exclusive"]["queries"]["sum"].as_u64().unwrap()).sum();
     assert_eq!(root_queries, exclusive_queries);
     assert_eq!(root_queries + timing["outside_smt"]["queries"]["sum"].as_u64().unwrap(), on_queries as u64);
-    assert!(timing["outcomes"].as_array().unwrap().iter().any(|row| row["outcome"] == "incompatible_state"));
+    assert!(timing["outcomes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["outcome"] == "SpeculativeRejectReason::IncompatibleState"));
     assert_eq!(measured["differences"]["concrete_required"], 1);
     assert_eq!(measured["keys"][0]["key"]["slot"]["name"], "diagnostic_slot");
     diag::configure("off").unwrap();
@@ -5301,7 +5308,12 @@ fn deferred_assert_obligation_keeps_safe_and_rejects_failing_arms() {
     let forked = paths(failing.clone(), &shared, 2, false);
     let merged = paths(failing, &shared, 2, true);
     equivalent_paths(&forked, &merged, 2, false);
-    assert!(shared.execution_stats.merge_json()["failure_reasons"]["symbolic_assertion"].as_u64().unwrap() > 0);
+    assert!(
+        shared.execution_stats.merge_json()["failure_reasons"]["SpeculativeRejectReason::SymbolicAssertion"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
 }
 
 #[test]
@@ -5488,7 +5500,12 @@ fn deferred_dead_arm_three_rounds_equivalent() {
     equivalent_paths(&forked, &merged, 6, false);
     assert_eq!(merged.len(), 1, "三轮必须实际合并，不能靠普通枚举掩盖回退");
     assert!(!merged[0].records.is_empty(), "三轮的返回前沿必须包含已提交合并记录");
-    assert_eq!(shared.execution_stats.merge_json()["failure_reasons"]["symbolic_assertion"].as_u64().unwrap_or(0), 0);
+    assert_eq!(
+        shared.execution_stats.merge_json()["failure_reasons"]["SpeculativeRejectReason::SymbolicAssertion"]
+            .as_u64()
+            .unwrap_or(0),
+        0
+    );
 }
 
 #[test]
@@ -5545,7 +5562,12 @@ fn deferred_dead_arm_write_after_assertion_still_rejected() {
         assert_eq!(solver.transaction_depth(), 0);
         assert_eq!(solver.trace().to_vec().len(), before, "拒绝必须回滚，不能发布写出");
     }
-    assert!(shared.execution_stats.merge_json()["failure_reasons"]["state_effect"].as_u64().unwrap_or(0) > 0);
+    assert!(
+        shared.execution_stats.merge_json()["failure_reasons"]["SpeculativeRejectReason::StateEffect"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
+    );
 }
 
 #[test]
@@ -5622,7 +5644,10 @@ fn region_merge_configurable_budget_long_region_equivalence() {
         let enough = matches!(budget, None | Some(-1 | 32768));
         assert_eq!(merged.len(), if enough { 1 } else { 2 }, "budget={budget:?}");
         let report = shared.execution_stats.merge_json();
-        assert_eq!(report["failure_reasons"]["step_budget"].as_u64().unwrap_or(0), if enough { 0 } else { 1 });
+        assert_eq!(
+            report["failure_reasons"]["SpeculativeRejectReason::StepBudget"].as_u64().unwrap_or(0),
+            if enough { 0 } else { 1 }
+        );
         assert_eq!(report["successes"].as_u64().unwrap(), if enough { 1 } else { 0 });
         if enough {
             assert!(!merged[0].records.is_empty());
@@ -5991,7 +6016,7 @@ fn partial_commit_default_keeps_root_exit_rollback() {
     );
     assert!(matches!(result, Ok(region_merge::RegionResult::Rejected)), "必须拒绝推演");
     assert_eq!(
-        shared.execution_stats.merge_json()["failure_reasons"]["exit_unsat"].as_u64(),
+        shared.execution_stats.merge_json()["failure_reasons"]["SpeculativeRejectReason::ExitUnsat"].as_u64(),
         Some(1),
         "必须在不可满足出口处拒绝：{}",
         shared.execution_stats.merge_json()

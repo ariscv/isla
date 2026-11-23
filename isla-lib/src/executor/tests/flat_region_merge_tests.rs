@@ -97,7 +97,9 @@ fn flat_deep_nesting_records_logical_depth() {
                 assert_eq!(merged[0].records.iter().map(|record| record.depth).max(), Some(count));
             },
         );
-        assert!(shared.execution_stats.merge_json()["failure_reasons"].get("nesting_limit").is_none());
+        assert!(shared.execution_stats.merge_json()["failure_reasons"]
+            .get("SpeculativeRejectReason::NestingLimit")
+            .is_none());
     });
 }
 
@@ -160,7 +162,12 @@ fn flat_symbolic_assert_before_later_assume() {
     let forked = paths(program.clone(), &shared, 2, false);
     let merged = paths(program, &shared, 2, true);
     equivalent_paths(&forked, &merged, 2, false);
-    assert!(shared.execution_stats.merge_json()["failure_reasons"]["symbolic_assertion"].as_u64().unwrap() > 0);
+    assert!(
+        shared.execution_stats.merge_json()["failure_reasons"]["SpeculativeRejectReason::SymbolicAssertion"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
     assert!(merged.iter().all(|path| path.records.is_empty()), "拒绝不得泄漏候选记录");
 }
 
@@ -254,7 +261,12 @@ fn flat_ordered_events_opposite_register_orders() {
     let ordered = limits(true).ordered_events;
     assert_eq!(equivalent_paths(&forked, &merged, 1, true), (2, if ordered { 2 } else { 1 }));
     if ordered {
-        assert!(shared.execution_stats.merge_json()["failure_reasons"]["register_sequence"].as_u64().unwrap() > 0);
+        assert!(
+            shared.execution_stats.merge_json()["failure_reasons"]["SpeculativeRejectReason::RegisterSequence"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
     } else {
         assert_eq!(merged[0].records.len(), 1);
         assert_eq!(merged[0].events.iter().filter(|event| matches!(event, Event::WriteReg(..))).count(), 2);
@@ -368,7 +380,12 @@ fn assert_loop(early: bool, nested: bool) {
     let off = paths(loop_fixture(early, nested), &shared, 2, false);
     let on = paths(loop_fixture(early, nested), &shared, 2, true);
     equivalent_paths(&off, &on, 2, true);
-    assert_eq!(shared.execution_stats.merge_json()["failure_reasons"]["has_back_edge"].as_u64().unwrap_or(0), 0);
+    assert_eq!(
+        shared.execution_stats.merge_json()["failure_reasons"]["SpeculativeRejectReason::HasBackEdge"]
+            .as_u64()
+            .unwrap_or(0),
+        0
+    );
     assert_eq!(on.len(), 1, "循环必须实际合并为一条路径");
     assert!(on.iter().any(|p| !p.records.is_empty()), "循环必须实际合并");
 }
@@ -447,7 +464,12 @@ fn assert_independent_scan(wrapped: bool) {
     super::loop_segment_tests::equivalent_scalar_paths(&off, &on, inputs);
     assert_eq!(off.len(), if wrapped { 6 } else { 5 });
     assert_eq!(on.len(), 1, "{}", shared.execution_stats.merge_json());
-    assert_eq!(shared.execution_stats.merge_json()["failure_reasons"]["has_back_edge"].as_u64().unwrap_or(0), 0);
+    assert_eq!(
+        shared.execution_stats.merge_json()["failure_reasons"]["SpeculativeRejectReason::HasBackEdge"]
+            .as_u64()
+            .unwrap_or(0),
+        0
+    );
     assert!(on[0].records.len() >= 4);
 }
 

@@ -16,10 +16,10 @@ fn merge_timing_nested_costs_partition_without_double_counting() {
     counts.begin();
     counts.finish(&origin, "success", child, child, false);
     counts.begin();
-    counts.finish(&origin, "step_budget", parent, parent.subtract(child), true);
+    counts.finish(&origin, "SpeculativeRejectReason::StepBudget", parent, parent.subtract(child), true);
     let rows = counts.rows();
     let success = rows.iter().find(|r| r["outcome"] == "success").unwrap();
-    let reject = rows.iter().find(|r| r["outcome"] == "step_budget").unwrap();
+    let reject = rows.iter().find(|r| r["outcome"] == "SpeculativeRejectReason::StepBudget").unwrap();
     assert_eq!(success["exclusive"]["wall_seconds"]["sum"], 0.04);
     assert_eq!(reject["exclusive"]["wall_seconds"]["sum"], 0.06);
     assert_eq!(reject["inclusive"]["queries"]["sum"], 5);

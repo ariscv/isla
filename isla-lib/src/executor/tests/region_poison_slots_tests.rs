@@ -63,7 +63,11 @@ fn region_merge_poison_slots_live_local_rejects() {
         let results = paths_with_state(program.clone(), &shared, 1, limits, crate::memory::Memory::new(), |_| ());
         assert_eq!(results.len(), 2, "{strategy:?}");
         assert!(results.iter().all(|path| path.records.is_empty()), "{strategy:?}");
-        assert_eq!(shared.execution_stats.merge_json()["failure_reasons"]["incompatible_state"], 1, "{strategy:?}");
+        assert_eq!(
+            shared.execution_stats.merge_json()["failure_reasons"]["SpeculativeRejectReason::IncompatibleState"],
+            1,
+            "{strategy:?}"
+        );
         assert!(results.iter().any(|path| path.value == Val::Poison), "{strategy:?}");
     }
 }
@@ -141,7 +145,9 @@ fn union_case(
         merged,
         reference_errors,
         merged_errors,
-        shared.execution_stats.merge_json()["failure_reasons"]["union_payload"].as_u64().unwrap_or(0),
+        shared.execution_stats.merge_json()["failure_reasons"]["SpeculativeRejectReason::UnionPayload"]
+            .as_u64()
+            .unwrap_or(0),
     )
 }
 

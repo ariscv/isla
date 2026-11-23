@@ -170,7 +170,7 @@ fn default_snapshot_keeps_context_configuration_and_explicit_seed() {
             panic!("极小 rlimit 应耗尽")
         };
         assert_eq!(error.diagnostic()["reason_unknown"], "canceled");
-        assert_eq!(error.reject_reason().to_string(), "z3_resource_exhausted");
+        assert_eq!(error.reject_reason().to_string(), "SpeculativeRejectReason::Z3ResourceExhausted");
         assert!(!solver.has_stashed_model());
     });
 }
@@ -190,7 +190,7 @@ fn default_snapshot_interrupt_keeps_dump_and_restores_queries() {
             Error(error) => error,
             other => panic!("应中断真实求解，得到{other:?}"),
         };
-        assert_eq!(error.reject_reason().to_string(), "z3_timeout");
+        assert_eq!(error.reject_reason().to_string(), "SpeculativeRejectReason::Z3Timeout");
         // 实际中断错误携带的转储来自原执行保存点，仍保留全部乘法断言。
         let SmtError::Z3Timeout(Z3Timeout::Interrupted(timeout)) = error else { panic!("应为超时错误") };
         assert!(timeout.dump.materialize().unwrap().contains("bvmul"));

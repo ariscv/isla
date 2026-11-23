@@ -489,7 +489,7 @@ mod tests {
         });
         assert_eq!(stats.merge_json()["attempts"], 40);
         assert_eq!(stats.merge_json()["negative_cache_hits"], 40);
-        assert_eq!(stats.merge_json()["failure_reasons"]["state_effect"], 40);
+        assert_eq!(stats.merge_json()["failure_reasons"]["SpeculativeRejectReason::StateEffect"], 40);
         assert_eq!(stats.arm_unsupported_json(&symtab)["top"][0]["target_pc"], 2);
         stats.reset();
         assert_eq!(stats.merge_json()["attempts"], 0);
@@ -519,7 +519,7 @@ mod tests {
         }
         let snapshot = std::thread::spawn(move || stats.snapshot_json()).join().unwrap();
         assert_eq!(snapshot.1["top"][0]["function"], "function");
-        assert_eq!(snapshot.2["top"][0]["reason"], "state_effect");
+        assert_eq!(snapshot.2["top"][0]["reason"], "SpeculativeRejectReason::StateEffect");
         assert_eq!(snapshot.1["top"][0]["location"], "区域.sail 12:1 - 12:8");
         assert_eq!(snapshot.2["top"][0]["rejected_function"], "function");
     }

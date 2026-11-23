@@ -2127,11 +2127,11 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
 
             match &exec_result {
                 Ok((run, frame)) => match run {
-                    Run::Finished(Val::Poison) => {
+                    Run::Finished(value @ Val::Poison) => {
                         let reason = super::poison_diagnostic(frame, shared_state);
                         eprintln!("{} 未完成路径: {}", instruction_name, reason);
                         collected.lock().unwrap().diagnostics.push(serde_json::json!({
-                            "status": "incomplete", "reason": "sail-poison",
+                            "status": "incomplete", "reason": format!("{}::{value:?}", stringify!(Val)),
                             "path-signature": frame.path_signature(), "detail": reason,
                         }));
                     }
@@ -3075,7 +3075,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             .iter()
             .filter(|case| case.materialization_timed_out)
             .map(|case| {
-                serde_json::json!({"status":"incomplete", "reason":"z3_timeout",
+                serde_json::json!({"status":"incomplete", "reason":isla_lib::executor::SpeculativeRejectReason::Z3Timeout,
             "path-signature":case.path_signature, "symbolic-return-value":case.item.ret_val})
             })
             .collect::<Vec<_>>(),
@@ -3744,12 +3744,30 @@ mod tests {
             wall: Duration::from_millis(1),
             limit: None,
         };
-        for (error, reason) in [
-            (SmtError::Z3Unknown(query("(incomplete quantifiers)")), "unknown_z3"),
-            (SmtError::Z3ResourceExhausted(query("max. resource limit exceeded")), "z3_resource_exhausted"),
-            (SmtError::Z3Timeout(Z3Timeout::Native(query("timeout"))), "z3_timeout"),
-            (SmtError::Z3Timeout(Z3Timeout::Interrupted(timeout)), "z3_timeout"),
+        for (error, reason, error_name) in [
+            (
+                SmtError::Z3Unknown(query("(incomplete quantifiers)")),
+                "SpeculativeRejectReason::UnknownZ3",
+                "SmtError::Z3Unknown",
+            ),
+            (
+                SmtError::Z3ResourceExhausted(query("max. resource limit exceeded")),
+                "SpeculativeRejectReason::Z3ResourceExhausted",
+                "SmtError::Z3ResourceExhausted",
+            ),
+            (
+                SmtError::Z3Timeout(Z3Timeout::Native(query("timeout"))),
+                "SpeculativeRejectReason::Z3Timeout",
+                "SmtError::Z3Timeout",
+            ),
+            (
+                SmtError::Z3Timeout(Z3Timeout::Interrupted(timeout)),
+                "SpeculativeRejectReason::Z3Timeout",
+                "SmtError::Z3Timeout",
+            ),
         ] {
+            assert_eq!(error.diagnostic()["reason"], error_name);
+            assert!(error.to_string().starts_with(&format!("{error_name}:")));
             let is_timeout = matches!(error, SmtError::Z3Timeout(_));
             let collected = Mutex::new(SolveCollectorState::new());
             let reporter = TimeoutReporter::new(TimeoutReportConfig {
@@ -3842,18 +3860,31 @@ mod tests {
         assert_eq!(
             total.json()["failure-reasons"],
             serde_json::json!({
-                "unknown_finite_domain":1, "unknown_z3":1, "unknown_deferred_mode":1, "path_timeout":1,
-                "z3_timeout":1, "z3_resource_exhausted":1
+                "SpeculativeRejectReason::UnknownFiniteDomain":1, "SpeculativeRejectReason::UnknownZ3":1, "SpeculativeRejectReason::UnknownDeferredMode":1, "SpeculativeRejectReason::PathTimeout":1,
+                "SpeculativeRejectReason::Z3Timeout":1, "SpeculativeRejectReason::Z3ResourceExhausted":1
             })
         );
         let saved = serde_json::from_value(total.json()).unwrap();
         assert_eq!(super::super::path_cache::restored_summary(&saved).failure_reasons, total.failure_reasons);
         assert_eq!(total.errors, 6);
+    }
 
-        let mut saved = total.json();
-        saved["failure-reasons"]["older-diagnostic"] = serde_json::json!(1);
-        let saved = serde_json::from_value(saved).unwrap();
-        assert_eq!(super::super::path_cache::restored_summary(&saved).failure_reasons["older-diagnostic"], 1);
+    #[test]
+    fn restored_failure_reasons_keep_all_three_name_formats() {
+        let mut summary = SolveSummary::default().json();
+        let reasons = serde_json::json!({
+            "unknown_finite_domain": 2,
+            "UnknownFiniteDomain": 3,
+            "SpeculativeRejectReason::UnknownFiniteDomain": 1,
+        });
+        summary["failure-reasons"] = reasons.clone();
+        let cached = serde_json::from_value(summary).unwrap();
+        assert_eq!(super::super::path_cache::restored_summary(&cached).json()["failure-reasons"], reasons);
+
+        for reason in ["unknown_finite_domain", "UnknownFiniteDomain"] {
+            assert!(serde_json::from_value::<isla_lib::executor::SpeculativeRejectReason>(serde_json::json!(reason))
+                .is_err());
+        }
     }
 
     #[test]
