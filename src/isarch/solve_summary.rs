@@ -11,7 +11,7 @@ pub(super) struct SolveSummary {
     pub uncertified: bool,
     pub sampled_paths: usize,
     pub errors: usize,
-    pub failure_reasons: std::collections::BTreeMap<isla_lib::executor::SpeculativeRejectReason, usize>,
+    pub failure_reasons: std::collections::BTreeMap<String, usize>,
     pub execution_timeouts: usize,
     pub smt_timeouts: usize,
     pub unfinished_paths: usize,
@@ -94,7 +94,7 @@ impl SolveSummary {
         self.sampled_paths += other.sampled_paths;
         self.errors += other.errors;
         for (reason, count) in &other.failure_reasons {
-            *self.failure_reasons.entry(*reason).or_default() += count;
+            *self.failure_reasons.entry(reason.clone()).or_default() += count;
         }
         self.execution_timeouts += other.execution_timeouts;
         self.smt_timeouts += other.smt_timeouts;
@@ -187,7 +187,7 @@ mod tests {
                     sail_location: "test.sail:7".into(),
                     source_loc: isla_lib::source_loc::SourceLoc::new(0, 7, 0, 7, 3),
                     purpose: "range_proof".into(),
-                    reason: "unknown_solver".into(),
+                    reason: "unknown_z3".into(),
                     reason_unknown: None,
                     seconds: 5.0,
                     limit_seconds: Some(5.0),

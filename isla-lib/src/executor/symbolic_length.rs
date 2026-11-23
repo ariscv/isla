@@ -789,8 +789,8 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
                 crate::smt::SmtResult::Unproven(crate::error::SmtError::DeferredQuery { .. }) => {
                     return Err(super::region_merge::reject_query(frame, missing_domain()))
                 }
-                crate::smt::SmtResult::Unproven(cause)
-                | crate::smt::SmtResult::Error(cause @ crate::error::SmtError::SolverUnknown { .. }) => {
+                crate::smt::SmtResult::Unproven(cause) => return Err(super::region_merge::reject_query(frame, cause)),
+                crate::smt::SmtResult::Error(cause) if cause.z3_query_failure().is_some() => {
                     return Err(super::region_merge::reject_query(frame, cause))
                 }
                 _ => (),

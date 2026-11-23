@@ -1201,7 +1201,9 @@ mod tests {
             operation_wall: Duration::from_secs(1),
             dump: Arc::new(TimeoutSmtDump::new(Arc::new(NamesTimeoutDump))),
         });
-        let error = ExecError::Smt(isla_lib::error::SmtError::Timeout(timeout.clone()));
+        let error = ExecError::Smt(isla_lib::error::SmtError::Z3Timeout(isla_lib::error::Z3Timeout::Interrupted(
+            timeout.clone(),
+        )));
 
         configure_nested_timeout_smt_dump(&error, &nested_frame, &shared_state);
 

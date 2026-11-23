@@ -4989,7 +4989,7 @@ fn default_complex_feasibility_keeps_three_results_and_rollback() {
         let tx = solver.start_transaction_with_guard(Some(condition.clone()));
         if limited {
             let result = solver.check_sat_with_for_branch(&condition, info(), true).unwrap();
-            assert!(matches!(result, SmtResult::Error(crate::error::SmtError::SolverUnknown { .. })));
+            assert!(matches!(result, SmtResult::Error(crate::error::SmtError::Z3ResourceExhausted(_))));
             assert!(!region_merge::path_is_feasible(result, &frame, &solver, &shared).unwrap());
             assert_eq!(shared.execution_stats.solver_path_drop_count(), 1);
         } else {

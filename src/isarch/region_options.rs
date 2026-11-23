@@ -2,7 +2,13 @@
 use isla_lib::config::ExecutionLimitsConfig;
 
 const BOOL_OPTIONS: &[(&str, &str, &str)] = &[
-    ("partial_commit_solver", "partial-commit-solver", "嵌套区域遇到Z3 查询失败时在外层保留两个片段；默认关闭"),
+    ("partial_commit_unknown_z3", "partial-commit-unknown-z3", "嵌套区域遇到 Z3 未判定时在外层保留两个片段；默认关闭"),
+    ("partial_commit_z3_timeout", "partial-commit-z3-timeout", "嵌套区域遇到 Z3 超时时在外层保留两个片段；默认关闭"),
+    (
+        "partial_commit_z3_resource_exhausted",
+        "partial-commit-z3-resource-exhausted",
+        "嵌套区域遇到 Z3 资源耗尽时在外层保留两个片段；默认关闭",
+    ),
     (
         "partial_commit_finite_domain",
         "partial-commit-finite-domain",
@@ -51,7 +57,7 @@ pub fn add_cli(opts: &mut getopts::Options) {
     for (_, flag, help) in BOOL_OPTIONS {
         opts.optopt("", flag, help, "true|false");
     }
-    opts.optopt("", "solver-on-unknown", "路径求解未判定或超时的处置，缺省 panic", "panic|dead");
+    opts.optopt("", "solver-on-unknown", "路径的 Z3 未判定、超时或资源耗尽的处置，缺省 panic", "panic|dead");
     opts.optopt("", "on-path-timeout", "逐路径 --timeout 到限的处置，缺省 panic", "panic|dead");
     opts.optopt("", "region-max-merge-depth", "区域嵌套上限，默认不限；-1不限", "正整数|-1");
     opts.optopt("", "region-bool-proof-rlimit", "可选布尔证明资源上限，0 不限；默认 0", "u32");
@@ -85,7 +91,11 @@ pub fn apply_cli(matches: &getopts::Matches, limits: &mut ExecutionLimitsConfig)
                 "merge_concrete_values" => updated.path_merge.merge_concrete_values = value,
                 "defer_call_effect_checks" => updated.path_merge.defer_call_effect_checks = value,
                 "defer_exit_check" => updated.path_merge.defer_exit_check = value,
-                "partial_commit_solver" => updated.path_merge.partial_commit_solver = value,
+                "partial_commit_unknown_z3" => updated.path_merge.partial_commit_unknown_z3 = value,
+                "partial_commit_z3_timeout" => updated.path_merge.partial_commit_z3_timeout = value,
+                "partial_commit_z3_resource_exhausted" => {
+                    updated.path_merge.partial_commit_z3_resource_exhausted = value
+                }
                 "partial_commit_finite_domain" => updated.path_merge.partial_commit_finite_domain = value,
                 "partial_commit_deferred_mode" => updated.path_merge.partial_commit_deferred_mode = value,
                 "finite_domain_enumeration" => updated.path_merge.finite_domain_enumeration = value,
@@ -208,7 +218,9 @@ mod tests {
         for (field, flag, _) in BOOL_OPTIONS {
             let section = if [
                 "partial_commit_finite_domain",
-                "partial_commit_solver",
+                "partial_commit_unknown_z3",
+                "partial_commit_z3_timeout",
+                "partial_commit_z3_resource_exhausted",
                 "partial_commit_deferred_mode",
                 "prune_constant_branches",
                 "arm_error_leaf",
@@ -240,6 +252,15 @@ mod tests {
             assert_eq!(limits, config(true), "{flag}");
             cli(&mut limits, &[&format!("--{flag}=false")]).unwrap();
             assert_eq!(limits, config(false), "{flag}");
+        }
+    }
+
+    #[test]
+    fn region_options_reject_removed_partial_commit_flags() {
+        let mut opts = getopts::Options::new();
+        add_cli(&mut opts);
+        for flag in ["--partial-commit-solver=true", "--partial-commit-solver-unknown=true"] {
+            assert!(opts.parse([flag]).is_err(), "{flag}");
         }
     }
 
@@ -345,7 +366,7 @@ mod no_smt_port_tests {
     }
 
     #[test]
-    fn unknown_solver_policy_uses_only_solver_table_and_cli() {
+    fn z3_failure_policy_uses_only_solver_table_and_cli() {
         use isla_lib::config::PathFailureAction;
         let mut limits = ExecutionLimitsConfig::default();
         assert_eq!(limits.solver.on_unknown, PathFailureAction::Panic);

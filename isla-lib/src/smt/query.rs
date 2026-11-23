@@ -118,7 +118,29 @@ impl<B: BV> ArmErrorQueries<'_, B> {
     }
 }
 
+pub(super) struct ResourceBudget {
+    limit: u32,
+    before: u64,
+}
+
 impl QuerySolver<'_> {
+    pub(super) fn resource_budget(&self, override_limit: Option<u32>) -> Option<ResourceBudget> {
+        let limit = override_limit.or(self.ctx.rlimit)?;
+        let before = unsafe { proof_budget::resource_count(self.ctx, self.z3_solver).unwrap_or(0) };
+        Some(ResourceBudget { limit, before })
+    }
+
+    pub(super) fn failure(&self, info: SourceLoc, elapsed: Duration, budget: Option<ResourceBudget>) -> SmtError {
+        let reason = z3_reason_unknown(self.ctx, self.z3_solver);
+        // 策略型查询耗尽 rlimit 时也可能只返回 canceled。只有计数触及限额才归到资源耗尽。
+        let rlimit_exhausted = matches!(reason.trim(), "canceled" | "sat.canceled")
+            && budget.is_some_and(|budget| unsafe {
+                proof_budget::resource_count(self.ctx, self.z3_solver)
+                    .is_some_and(|after| after.saturating_sub(budget.before) >= u64::from(budget.limit))
+            });
+        z3_query_error(info, elapsed, self.ctx.native_timeout, reason, rlimit_exhausted)
+    }
+
     /// 每个选择器只启用自己冻结的完整公式。其它选择器可以全为假，因此两条错误域无需相容。
     fn check_arm_error<B: BV>(&self, verifier: &Solver<B>, target: &Exp<Sym>, info: SourceLoc) -> SmtResult {
         let native = self.z3_solver;
@@ -138,6 +160,7 @@ impl QuerySolver<'_> {
             selector
         };
         let slow = verifier.slow_query_begin(native);
+        let resource_budget = self.resource_budget(None);
         let started = Instant::now();
         let result = match timeout_Z3_solver_check_assumptions(ctx.z3_ctx, native, &[selector.z3_ast], info) {
             Ok(result) => result,
@@ -154,7 +177,7 @@ impl QuerySolver<'_> {
         match result {
             Z3_L_TRUE => Sat,
             Z3_L_FALSE => Unsat,
-            _ => Error(z3_unknown_error(info, elapsed, None, z3_reason_unknown(ctx, native))),
+            _ => Error(self.failure(info, elapsed, resource_budget)),
         }
     }
 }
@@ -455,6 +478,37 @@ mod tests {
     }
 
     #[test]
+    fn z3_failure_reason_classifies_native_results() {
+        for (native_reason, expected) in [
+            ("timeout", "z3_timeout"),
+            ("interrupted", "z3_timeout"),
+            ("interrupted from keyboard", "z3_timeout"),
+            ("canceled", "z3_timeout"),
+            ("sat.canceled", "z3_timeout"),
+            ("max. resource limit exceeded", "z3_resource_exhausted"),
+            ("(resource limits reached)", "z3_resource_exhausted"),
+            ("max. memory exceeded", "z3_resource_exhausted"),
+            ("out of memory", "z3_resource_exhausted"),
+            ("memout", "z3_resource_exhausted"),
+            ("max-conflicts-reached", "z3_resource_exhausted"),
+            ("max. scopes exceeded", "z3_resource_exhausted"),
+            ("max. steps exceeded", "z3_resource_exhausted"),
+            ("max. frames exceeded", "z3_resource_exhausted"),
+            ("(incomplete (theory arithmetic))", "unknown_z3"),
+            ("", "unknown_z3"),
+        ] {
+            let error = z3_query_error(SourceLoc::unknown(), Duration::ZERO, None, native_reason.into(), false);
+            assert_eq!(error.reject_reason().to_string(), expected, "{native_reason:?}");
+            assert_eq!(error.diagnostic()["reason_unknown"], native_reason);
+            assert_eq!(Error(error).is_unknown(), expected == "unknown_z3");
+        }
+        for native_reason in ["canceled", "sat.canceled"] {
+            let error = z3_query_error(SourceLoc::unknown(), Duration::ZERO, None, native_reason.into(), true);
+            assert_eq!(error.reject_reason().to_string(), "z3_resource_exhausted", "{native_reason}");
+        }
+    }
+
+    #[test]
     fn boolean_proof_rlimit_unknown_does_not_limit_range_branch_or_terminal() {
         if !default_tactic_child(
             "smt::query::tests::boolean_proof_rlimit_unknown_does_not_limit_range_branch_or_terminal",
@@ -473,7 +527,7 @@ mod tests {
         );
         let tx = solver.start_transaction();
         assert!(
-            matches!(solver.check_sat_with_for_bool(&goal, info), Unproven(SmtError::SolverUnknown { reason, .. }) if !reason.is_empty()),
+            matches!(solver.check_sat_with_for_bool(&goal, info), Unproven(SmtError::Z3ResourceExhausted(query)) if !query.reason.is_empty()),
             "只限制可选的布尔证明"
         );
         assert!(

@@ -1,7 +1,7 @@
 //! 路径丢弃与判定失败共享执行统计，验收调用不经过此入口。
 use super::*;
 use crate::config::PathFailureAction;
-use crate::error::{ExecError, SmtError};
+use crate::error::{ExecError, SmtError, Z3Timeout};
 use crate::executor::LocalFrame;
 use crate::ir::SharedState;
 use crate::timeout::SmtOperation;
@@ -55,7 +55,7 @@ impl ExecutionStats {
 }
 
 pub fn is_solver_failure(error: &ExecError) -> bool {
-    matches!(error, ExecError::Smt(SmtError::Timeout(_) | SmtError::SolverUnknown { .. }))
+    matches!(error, ExecError::Smt(SmtError::Z3Timeout(_) | SmtError::Z3ResourceExhausted(_) | SmtError::Z3Unknown(_)))
 }
 
 /// 仅在失败已归属到单条探索路径时调用。返回 true 表示该路径按显式 dead 策略作废。
@@ -66,21 +66,21 @@ pub fn handle_solver_path_failure<B: BV>(
     shared: &SharedState<'_, B>,
 ) -> bool {
     let Some(policy) = policy else { return false };
-    let (source, purpose, reason_unknown, wall, limit) = match error {
-        ExecError::Smt(SmtError::Timeout(timeout)) => (
+    let ExecError::Smt(cause) = error else { return false };
+    let (source, purpose, reason_unknown, wall, limit) = match cause {
+        SmtError::Z3Timeout(Z3Timeout::Interrupted(timeout)) => (
             timeout.source_loc,
             if timeout.operation == SmtOperation::ModelEval { "model_value" } else { timeout.query_purpose },
             None,
             timeout.operation_wall,
             Some(timeout.limit),
         ),
-        ExecError::Smt(SmtError::SolverUnknown { source_loc, purpose, wall, limit, reason }) => {
-            (*source_loc, *purpose, Some(reason.as_str()), *wall, *limit)
+        _ => {
+            let Some(query) = cause.z3_query_failure() else { return false };
+            (query.source_loc, query.purpose, Some(query.reason.as_str()), query.wall, query.limit)
         }
-        _ => return false,
     };
-    let failure =
-        PathFailureDiagnostic::new(frame, shared, source, purpose, SpeculativeRejectReason::UnknownSolver, wall, limit);
+    let failure = PathFailureDiagnostic::new(frame, shared, source, purpose, cause.reject_reason(), wall, limit);
     if policy == PathFailureAction::Panic {
         failure.panic(reason_unknown);
     }

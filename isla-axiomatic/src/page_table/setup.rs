@@ -1412,7 +1412,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use isla_lib::error::{ExecError, SmtError};
+    use isla_lib::error::{ExecError, SmtError, Z3Timeout};
     use isla_lib::smt::SmtResult;
     use isla_lib::source_loc::SourceLoc;
     use isla_lib::timeout::{SmtDumpSource, SmtOperation, SmtTimeout, TimeoutSmtDump};
@@ -1438,9 +1438,11 @@ mod tests {
             dump: Arc::new(TimeoutSmtDump::new(Arc::new(TestDump))),
         });
 
-        let error = address_constraints_require_sat(SmtResult::Error(SmtError::Timeout(timeout.clone())))
-            .expect_err("SMT timeout must not be reported as an unsatisfiable address set");
-        let SetupError::Exec(ExecError::Smt(SmtError::Timeout(actual))) = error else {
+        let error = address_constraints_require_sat(SmtResult::Error(SmtError::Z3Timeout(Z3Timeout::Interrupted(
+            timeout.clone(),
+        ))))
+        .expect_err("SMT timeout must not be reported as an unsatisfiable address set");
+        let SetupError::Exec(ExecError::Smt(SmtError::Z3Timeout(Z3Timeout::Interrupted(actual)))) = error else {
             panic!("SMT timeout lost its structured SetupError representation")
         };
         assert!(Arc::ptr_eq(&actual, &timeout));

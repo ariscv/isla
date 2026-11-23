@@ -15,6 +15,8 @@ use z3_sys::{
 };
 
 use crate::error::SmtError;
+#[cfg(feature = "smt-thread-interrupt")]
+use crate::error::Z3Timeout;
 use crate::executor::stats::path_account;
 use crate::log;
 use crate::source_loc::SourceLoc;
@@ -249,14 +251,14 @@ pub(super) fn timeout_error(
 ) -> SmtError {
     #[cfg(feature = "smt-thread-interrupt")]
     {
-        SmtError::Timeout(Arc::new(SmtTimeout {
+        SmtError::Z3Timeout(Z3Timeout::Interrupted(Arc::new(SmtTimeout {
             source_loc,
             operation,
             query_purpose: crate::executor::stats::region_progress::query_label(),
             limit,
             operation_wall,
             dump,
-        }))
+        })))
     }
     #[cfg(not(feature = "smt-thread-interrupt"))]
     {

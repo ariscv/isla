@@ -8,15 +8,19 @@ pub(super) fn limit() -> Option<u32> {
 fn profiling() -> bool {
     crate::config::RegionOptions::current().bool_proof_profile
 }
-unsafe fn resource_count(ctx: &Context, solver: Z3_solver) -> Option<u64> {
+pub(super) unsafe fn resource_count(ctx: &Context, solver: Z3_solver) -> Option<u64> {
     let stats = Z3_solver_get_statistics(ctx.z3_ctx, solver);
     Z3_stats_inc_ref(ctx.z3_ctx, stats);
     let mut result = None;
     for i in 0..Z3_stats_size(ctx.z3_ctx, stats) {
         let key = CStr::from_ptr(Z3_stats_get_key(ctx.z3_ctx, stats, i)).to_bytes();
         if key == b"rlimit count" || key == b"rlimit-count" {
-            assert!(Z3_stats_is_uint(ctx.z3_ctx, stats, i), "Z3资源计数必须为整数");
-            result = Some(u64::from(Z3_stats_get_uint_value(ctx.z3_ctx, stats, i)));
+            // Z3 超过 u32::MAX 后用 double 存放计数。
+            result = Some(if Z3_stats_is_uint(ctx.z3_ctx, stats, i) {
+                u64::from(Z3_stats_get_uint_value(ctx.z3_ctx, stats, i))
+            } else {
+                Z3_stats_get_double_value(ctx.z3_ctx, stats, i) as u64
+            });
             break;
         }
     }

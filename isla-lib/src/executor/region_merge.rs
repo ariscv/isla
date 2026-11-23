@@ -791,8 +791,8 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                                 return Err(reject(frame, SpeculativeRejectReason::SymbolicAssertion))
                             }
                             Some(SmtResult::Unproven(cause)) => return Err(reject_query(frame, cause)),
-                            Some(SmtResult::Error(cause @ crate::error::SmtError::SolverUnknown { .. }))
-                                if solver.exploration_on_unknown().is_some() =>
+                            Some(SmtResult::Error(cause))
+                                if cause.z3_query_failure().is_some() && solver.exploration_on_unknown().is_some() =>
                             {
                                 return Err(reject_query(frame, cause));
                             }
@@ -821,8 +821,8 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                             }
                             Some(SmtResult::Unsat) => Err(reject(frame, SpeculativeRejectReason::ExitUnsat)),
                             Some(SmtResult::Unproven(cause)) => Err(reject_query(frame, cause)),
-                            Some(SmtResult::Error(cause @ crate::error::SmtError::SolverUnknown { .. }))
-                                if solver.exploration_on_unknown().is_some() =>
+                            Some(SmtResult::Error(cause))
+                                if cause.z3_query_failure().is_some() && solver.exploration_on_unknown().is_some() =>
                             {
                                 Err(reject_query(frame, cause))
                             }

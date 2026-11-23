@@ -112,7 +112,9 @@ pub struct PathMergeConfig {
     pub defer_exit_check: bool,
     /// 嵌套区域遇到相应拒绝时，保留外层区域并继续两个普通片段。
     pub partial_commit_finite_domain: bool,
-    pub partial_commit_solver: bool,
+    pub partial_commit_unknown_z3: bool,
+    pub partial_commit_z3_timeout: bool,
+    pub partial_commit_z3_resource_exhausted: bool,
     pub partial_commit_deferred_mode: bool,
     /// 分支入口识别布尔恒值；默认开启。
     pub prune_constant_branches: bool,
@@ -152,7 +154,9 @@ impl Default for PathMergeConfig {
             step_budget: None,
             defer_exit_check: false,
             partial_commit_finite_domain: false,
-            partial_commit_solver: false,
+            partial_commit_unknown_z3: false,
+            partial_commit_z3_timeout: false,
+            partial_commit_z3_resource_exhausted: false,
             partial_commit_deferred_mode: false,
             prune_constant_branches: true,
             arm_error_leaf: false,

@@ -25,7 +25,9 @@ pub struct RegionOptions {
     pub defer_exit_check: bool,
     /// 嵌套区域遇到相应拒绝时，保留外层区域并继续两个普通片段。
     pub partial_commit_finite_domain: bool,
-    pub partial_commit_solver: bool,
+    pub partial_commit_unknown_z3: bool,
+    pub partial_commit_z3_timeout: bool,
+    pub partial_commit_z3_resource_exhausted: bool,
     pub partial_commit_deferred_mode: bool,
     /// 分支入口识别布尔恒值；默认开启。
     pub prune_constant_branches: bool,
@@ -94,7 +96,9 @@ impl RegionOptions {
             no_smt_keep_bool_proofs: limits.solver.no_smt_keep_bool_proofs,
             defer_exit_check: merge.defer_exit_check,
             partial_commit_finite_domain: merge.partial_commit_finite_domain,
-            partial_commit_solver: merge.partial_commit_solver,
+            partial_commit_unknown_z3: merge.partial_commit_unknown_z3,
+            partial_commit_z3_timeout: merge.partial_commit_z3_timeout,
+            partial_commit_z3_resource_exhausted: merge.partial_commit_z3_resource_exhausted,
             partial_commit_deferred_mode: merge.partial_commit_deferred_mode,
             prune_constant_branches: merge.prune_constant_branches,
             arm_error_leaf: merge.arm_error_leaf,

@@ -37,7 +37,7 @@ use std::mem;
 use std::sync::Arc;
 
 use crate::bitvector::BV;
-use crate::error::{ExecError, SmtError};
+use crate::error::{ExecError, SmtError, Z3Timeout};
 use crate::executor::execution_limits::ExecutionLimitPathState;
 use crate::executor::path_timing::{PathTimeTotals, PathTiming};
 use crate::executor::stats::path_account;
@@ -478,7 +478,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
 
     pub fn configure_timeout_smt_dump(&self, error: &ExecError, shared_state: &SharedState<'ir, B>) {
         let dump = match error {
-            ExecError::Smt(SmtError::Timeout(timeout)) => &timeout.dump,
+            ExecError::Smt(SmtError::Z3Timeout(Z3Timeout::Interrupted(timeout))) => &timeout.dump,
             _ => return,
         };
         dump.configure_names(self.smt_dump_names(shared_state));
