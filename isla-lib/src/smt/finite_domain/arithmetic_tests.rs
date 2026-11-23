@@ -111,3 +111,36 @@ fn finite_domain_arithmetic_keeps_all_combinations_and_folds_comparisons() {
     assert_eq!(numeric(domain), [0]);
     assert_eq!(test_query_count() - start, 0);
 }
+
+#[test]
+fn i128_to_i64_roundtrip_skips_finite_search() {
+    use crate::{ir::Val, primop::unary_primops};
+
+    configure_tastic(Tactic::Qfaufbv);
+    let mut config = Config::new();
+    config.solver_options.finite_domain_enumeration = true;
+    let context = Context::new(config);
+    let mut solver = Solver::<B64>::new(&context);
+    let info = SourceLoc::unknown();
+    let ops = unary_primops();
+    let a = solver.declare_const(Ty::Bool, info);
+    let b = solver.declare_const(Ty::Bool, info);
+    let choose = |g, x, y| Ite(Box::new(Var(g)), Box::new(x), Box::new(y));
+    let width = solver.define_const(
+        choose(a, bits64(i64::MIN as u64, 64), choose(b, bits64(i64::MAX as u64, 64), bits64(8, 64))),
+        info,
+    );
+    solver.assert(Or(Box::new(Var(a)), Box::new(Var(b))));
+    let wide = ops["%i64->%i"](Val::Symbolic(width), &mut solver, info).unwrap();
+    BOUND_SEARCHES.set(0);
+    AST_SIMPLIFY_CALLS.set(0);
+    let before = test_query_count();
+    let Val::Symbolic(result) = ops["%i->%i64"](wide, &mut solver, info).unwrap() else {
+        panic!("宽度往返转换必须保留符号结果")
+    };
+    let searches = BOUND_SEARCHES.get();
+    eprintln!("有符号往返转换的上界搜索 {} 次、化简 {} 次", searches, AST_SIMPLIFY_CALLS.get());
+    assert_eq!(test_query_count(), before);
+    assert_eq!(solver.check_sat_with(&Neq(Box::new(Var(result)), Box::new(Var(width))), info), SmtResult::Unsat);
+    assert_eq!(searches, 0, "符号扩展后窄回原宽度，无需推导候选");
+}

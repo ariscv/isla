@@ -431,6 +431,9 @@ pub(crate) fn integer_conversion_in_range<B: BV>(
     let value = replace_mixed_bits(value.clone(), solver, info)?;
     let Val::Symbolic(sym) = value else { return Ok(None) };
     let Some(width) = solver.length(sym) else { return Ok(None) };
+    if narrow && width == 128 && solver.is_widened_i64(sym) {
+        return Ok(None);
+    }
     if narrow
         && matches!(solver.finite_domain(sym), crate::smt::FiniteDomain::Known(values) if values.iter().all(|value| match value {
             Exp::Bits64(_) => true,
@@ -7073,6 +7076,45 @@ mod tests {
                 .is_sat()?);
             let count = isla_count_ones(Val::Symbolic(input), &mut solver, SourceLoc::unknown())?;
             i128_to_i64(count, &mut solver, SourceLoc::unknown())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn i128_to_i64_keeps_previous_range_decisions() -> Result<(), ExecError> {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let info = SourceLoc::unknown();
+        for finite in [false, true] {
+            let mut config = Config::new();
+            config.solver_options.finite_domain_enumeration = finite;
+            let ctx = Context::new(config);
+            for values in [
+                vec![],
+                vec![i64::MIN as i128, i64::MAX as i128],
+                vec![8, i64::MAX as i128 + 1],
+                vec![i64::MIN as i128 - 1],
+                vec![i128::MAX, i128::MIN],
+            ] {
+                let mut solver = Solver::<B64>::new(&ctx);
+                let sym = solver.declare_bitvector(128, info);
+                if let Some(domain) = values
+                    .iter()
+                    .map(|value| Exp::Eq(Box::new(Exp::Var(sym)), Box::new(smt_i128(*value))))
+                    .reduce(|a, b| Exp::Or(Box::new(a), Box::new(b)))
+                {
+                    solver.assert(domain);
+                }
+                // 当前输入是自由的 128 位声明，位宽本身不能排除溢出。
+                // 原判定仅在精确有限域已证明全体可表示时省去守卫。
+                let expected_guard =
+                    !(finite && !values.is_empty() && values.iter().all(|v| i64::try_from(*v).is_ok()));
+                let guard = integer_conversion_in_range(i128_to_i64::<B64>, &Val::Symbolic(sym), &mut solver, info)?;
+                assert_eq!(guard.is_some(), expected_guard, "finite={finite}, values={values:?}");
+                if let Some(guard) = guard {
+                    let signed_roundtrip = Exp::SignExtend(64, Box::new(Exp::Extract(63, 0, Box::new(Exp::Var(sym)))));
+                    assert_eq!(guard, Exp::Eq(Box::new(Exp::Var(sym)), Box::new(signed_roundtrip)));
+                }
+            }
         }
         Ok(())
     }

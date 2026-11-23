@@ -436,6 +436,12 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         Some(FiniteDomain::Bounded(bound.values.clone()))
     }
 
+    /// 调用处已确认结果为 128 位。符号扩展 64 位后窄回 i64，所有输入都可表示。
+    pub(crate) fn is_widened_i64(&self, sym: Sym) -> bool {
+        let Some(prefix) = PathConditions::new(self) else { return false };
+        matches!(resolve(&Exp::Var(sym), &prefix), Exp::SignExtend(64, _))
+    }
+
     pub(crate) fn finite_domain(&self, sym: Sym) -> FiniteDomain {
         let Some(prefix) = PathConditions::new(self) else { return FiniteDomain::Unknown };
         let key = (sym, self.has_stashed_model(), self.region_queries_deferred());
