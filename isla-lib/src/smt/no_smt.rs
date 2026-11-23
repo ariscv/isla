@@ -354,27 +354,49 @@ unsafe fn bitvector_range(ctx: &Context, root: Z3_ast) -> Option<BitvectorRange>
 }
 
 unsafe fn structural_comparison(ctx: &Context, ast: Z3_ast) -> Option<bool> {
-    if Z3_get_ast_kind(ctx.z3_ctx, ast) != AstKind::App {
+    let z3 = ctx.z3_ctx;
+    let mut ast = ast;
+    let mut negated = false;
+    let (app, kind) = loop {
+        let (app, decl) = bv_application(z3, ast)?;
+        let kind = rewrite::decl_kind_raw(z3, decl);
+        if kind != DeclKind::NOT as u32 {
+            break (app, kind);
+        }
+        negated = !negated;
+        ast = Z3_get_app_arg(z3, app, 0);
+    };
+    if Z3_get_app_num_args(z3, app) != 2 {
         return None;
     }
-    let app = Z3_to_app(ctx.z3_ctx, ast);
-    let decl = Z3_get_app_decl(ctx.z3_ctx, app);
-    if Z3_get_app_num_args(ctx.z3_ctx, app) != 2 {
-        return None;
-    }
-    let kind = rewrite::decl_kind_raw(ctx.z3_ctx, decl);
-    if kind != DeclKind::ULT as u32 && kind != DeclKind::ULEQ as u32 {
-        return None;
-    }
-    let left = Z3_get_app_arg(ctx.z3_ctx, app, 0);
-    let right = Z3_get_app_arg(ctx.z3_ctx, app, 1);
-    let limit = numeral(ctx, right)?;
-    let bound = bitvector_range(ctx, left)?.unsigned_upper;
-    match kind {
-        k if k == DeclKind::ULT as u32 && bound < limit => Some(true),
-        k if k == DeclKind::ULEQ as u32 && bound <= limit => Some(true),
+    let left = Z3_get_app_arg(z3, app, 0);
+    let right = Z3_get_app_arg(z3, app, 1);
+    let result = match kind {
+        k if k == DeclKind::ULT as u32 || k == DeclKind::ULEQ as u32 => {
+            let limit = numeral(ctx, right)?;
+            let bound = bitvector_range(ctx, left)?.unsigned_upper;
+            (bound < limit || (k == DeclKind::ULEQ as u32 && bound == limit)).then_some(true)
+        }
+        k if [DeclKind::SLT, DeclKind::SLEQ, DeclKind::SGT, DeclKind::SGEQ].map(|d| d as u32).contains(&k) => {
+            // 常量阈值与有符号区间比较。区间跨过阈值或运算可能回绕时保留未决分支。
+            if !Z3_is_numeral_ast(z3, left) && !Z3_is_numeral_ast(z3, right) {
+                return None;
+            }
+            let (a, b) =
+                if k == DeclKind::SGT as u32 || k == DeclKind::SGEQ as u32 { (right, left) } else { (left, right) };
+            let (a, b) = (bitvector_range(ctx, a)?, bitvector_range(ctx, b)?);
+            let inclusive = k == DeclKind::SLEQ as u32 || k == DeclKind::SGEQ as u32;
+            if a.max < b.min || (inclusive && a.max == b.min) {
+                Some(true)
+            } else if a.min > b.max || (!inclusive && a.min == b.max) {
+                Some(false)
+            } else {
+                None
+            }
+        }
         _ => None,
-    }
+    };
+    result.map(|value| value != negated)
 }
 
 #[cfg(test)]

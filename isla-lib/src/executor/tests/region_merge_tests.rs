@@ -2,6 +2,9 @@
 use super::*;
 use std::collections::BTreeMap;
 
+#[path = "ptwalk_bound_tests.rs"]
+mod ptwalk_bound_tests;
+
 #[path = "region_loop_merge_tests.rs"]
 mod loop_merge_tests;
 
