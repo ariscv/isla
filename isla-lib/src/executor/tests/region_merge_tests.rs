@@ -2856,8 +2856,8 @@ fn region_merge_f2_force_and_adaptive_errors() {
                 let diagnostic: serde_json::Value =
                     stderr.lines().find_map(|line| serde_json::from_str(line).ok()).unwrap();
                 let reason = match case {
-                    "timeout" => "timeout",
-                    "smt" => "smt_error",
+                    "timeout" => "path_timeout",
+                    "smt" => "unknown_deferred_mode",
                     "assertion" => "symbolic_assertion",
                     _ => "step_budget",
                 };
@@ -3192,9 +3192,9 @@ fn merge_enumeration_coupled_slices_caps_and_failure_result() {
     let rollback_state = TaskState::new().with_execution_limits(rollback_limits);
     let before = solver.trace().to_vec().len();
     let error = frame.enumerate_merges_with(&mut solver, &rollback_state, &shared, &Val::Unit, &mut |_, _, _| {
-        Err(ExecError::Z3Unknown)
+        Err(ExecError::Unproven(crate::error::SmtError::DeferredQuery { source_loc: info(), purpose: "enumeration" }))
     });
-    assert!(matches!(error, Err(ExecError::Z3Unknown)));
+    assert!(matches!(error, Err(ExecError::Unproven(crate::error::SmtError::DeferredQuery { .. }))));
     assert_eq!(solver.transaction_depth(), 0);
     assert_eq!(solver.trace().to_vec().len(), before);
     for (class_cap, path_cap, count, truncated) in
@@ -4989,7 +4989,7 @@ fn default_complex_feasibility_keeps_three_results_and_rollback() {
         let tx = solver.start_transaction_with_guard(Some(condition.clone()));
         if limited {
             let result = solver.check_sat_with_for_branch(&condition, info(), true).unwrap();
-            assert!(result.is_unknown());
+            assert!(matches!(result, SmtResult::Error(crate::error::SmtError::SolverUnknown { .. })));
             assert!(!region_merge::path_is_feasible(result, &frame, &solver, &shared).unwrap());
             assert_eq!(shared.execution_stats.solver_path_drop_count(), 1);
         } else {
@@ -5697,7 +5697,14 @@ fn lazy_scope_t3_query_exit_materialization() {
             "延迟路径不应创建 native scope"
         );
         solver.assert(Formula::Var(b));
-        assert_eq!(solver.check_sat(info()), crate::smt::SmtResult::Unknown, "defer 必需查询仍拒绝");
+        assert_eq!(
+            solver.check_sat(info()),
+            crate::smt::SmtResult::Unproven(crate::error::SmtError::DeferredQuery {
+                source_loc: info(),
+                purpose: "model_or_general"
+            }),
+            "defer 必需查询仍拒绝"
+        );
     });
     // 离开 defer，臂仍活跃：差异检查必须同时看到创建时的 a 与缓冲的 b。
     let expected = Formula::And(Box::new(Formula::Var(a)), Box::new(Formula::Var(b)));
@@ -5984,7 +5991,7 @@ fn partial_commit_default_keeps_root_exit_rollback() {
     );
     assert!(matches!(result, Ok(region_merge::RegionResult::Rejected)), "必须拒绝推演");
     assert_eq!(
-        shared.execution_stats.merge_json()["failure_reasons"]["solver_unknown"].as_u64(),
+        shared.execution_stats.merge_json()["failure_reasons"]["exit_unsat"].as_u64(),
         Some(1),
         "必须在不可满足出口处拒绝：{}",
         shared.execution_stats.merge_json()

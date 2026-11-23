@@ -458,7 +458,7 @@ fn nested_failure_defer_and_immediate_control() {
 }
 
 #[test]
-fn solver_unknown_nested_arm_keeps_root_and_survivor() {
+fn unknown_solver_nested_arm_keeps_root_and_survivor() {
     for strategy in strategies() {
         let mut shared = empty_shared_state();
         shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
@@ -487,7 +487,7 @@ fn solver_unknown_nested_arm_keeps_root_and_survivor() {
 }
 
 #[test]
-fn solver_unknown_nested_arm_panics_in_both_organizers() {
+fn unknown_solver_nested_arm_panics_in_both_organizers() {
     for strategy in strategies() {
         let mut shared = empty_shared_state();
         shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
@@ -512,8 +512,8 @@ fn solver_unknown_nested_arm_panics_in_both_organizers() {
 }
 
 #[test]
-fn partial_commit_solver_unknown_keeps_outer_merge() {
-    const TEST: &str = "executor::tests::nested_merge_failure_tests::partial_commit_solver_unknown_keeps_outer_merge";
+fn partial_commit_unknown_solver_keeps_outer_merge() {
+    const TEST: &str = "executor::tests::nested_merge_failure_tests::partial_commit_unknown_solver_keeps_outer_merge";
     let args = ["--exact", TEST, "--nocapture", "--test-threads=1"];
     if !std::env::args().skip(1).eq(args) {
         let result = std::process::Command::new(std::env::current_exe().unwrap()).args(args).output().unwrap();
@@ -525,7 +525,7 @@ fn partial_commit_solver_unknown_keeps_outer_merge() {
         );
         return;
     }
-    RegionOptions { partial_commit_solver_unknown: true, ..Default::default() }.configure();
+    RegionOptions { partial_commit_solver: true, ..Default::default() }.configure();
     for strategy in strategies() {
         let program = vec![
             Instr::Jump(input(0), 3, info()),
@@ -554,14 +554,14 @@ fn partial_commit_solver_unknown_keeps_outer_merge() {
         });
         assert_eq!(equivalent_paths(&plain, &merged, 2, true), (3, 1));
         assert!(merged[0].records.iter().any(|record| record.branch_pc == 0 && record.parent_record.is_none()));
-        assert_eq!(shared.execution_stats.merge_json()["failure_reasons"]["solver_unknown"], 1);
+        assert_eq!(shared.execution_stats.merge_json()["failure_reasons"]["unknown_solver"], 1);
     }
 }
 
 #[test]
-fn solver_unknown_exit_obligation_replays_and_drops_per_path() {
+fn unknown_solver_exit_obligation_replays_and_drops_per_path() {
     const TEST: &str =
-        "executor::tests::nested_merge_failure_tests::solver_unknown_exit_obligation_replays_and_drops_per_path";
+        "executor::tests::nested_merge_failure_tests::unknown_solver_exit_obligation_replays_and_drops_per_path";
     let args = ["--exact", TEST, "--nocapture", "--test-threads=1"];
     if !std::env::args().skip(1).eq(args) {
         let result = std::process::Command::new(std::env::current_exe().unwrap()).args(args).output().unwrap();
@@ -594,7 +594,7 @@ fn solver_unknown_exit_obligation_replays_and_drops_per_path() {
         });
         assert_eq!(paths.len(), 2, "区域出口 Unknown 须回放两条路径");
         assert_eq!(replay.execution_stats.solver_path_drop_count(), 0);
-        assert_eq!(replay.execution_stats.merge_json()["failure_reasons"]["solver_unknown"], 1);
+        assert_eq!(replay.execution_stats.merge_json()["failure_reasons"]["unknown_solver"], 1);
         let paths = super::path_failure_policy_tests::with_solver_dead(|| {
             crate::smt::test_queries::with_unknown_purposes(&["exit_obligations", "assertion", "assertion"], || {
                 paths_with_state(program, &shared, 2, strategy.limits(), crate::memory::Memory::new(), |_| ())
@@ -603,7 +603,7 @@ fn solver_unknown_exit_obligation_replays_and_drops_per_path() {
         assert!(paths.is_empty());
         let diagnostics = shared.execution_stats.merge_json();
         assert_eq!(diagnostics["solver_timeout_dropped_paths"], 2);
-        assert_eq!(diagnostics["failure_reasons"]["solver_unknown"], 1);
+        assert_eq!(diagnostics["failure_reasons"]["unknown_solver"], 1);
         let drops = shared.execution_stats.solver_path_drops_since(0);
         assert!(drops.first_locations.iter().all(|drop| drop.purpose == "assertion"));
     }

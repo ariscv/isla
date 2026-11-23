@@ -110,8 +110,10 @@ pub struct PathMergeConfig {
     /// None 沿用运行时关闭（-1）；-1关闭；其余合法值为正数。
     pub step_budget: Option<i64>,
     pub defer_exit_check: bool,
-    /// 嵌套区域遇到 solver_unknown 时，保留外层区域并在其中退化为普通分叉；默认关闭。
-    pub partial_commit_solver_unknown: bool,
+    /// 嵌套区域遇到相应拒绝时，保留外层区域并继续两个普通片段。
+    pub partial_commit_finite_domain: bool,
+    pub partial_commit_solver: bool,
+    pub partial_commit_deferred_mode: bool,
     /// 分支入口识别布尔恒值；默认开启。
     pub prune_constant_branches: bool,
     /// 保留独立执行错误叶，默认关闭。
@@ -147,7 +149,9 @@ impl Default for PathMergeConfig {
             merge_poison_slots: true,
             step_budget: None,
             defer_exit_check: false,
-            partial_commit_solver_unknown: false,
+            partial_commit_finite_domain: false,
+            partial_commit_solver: false,
+            partial_commit_deferred_mode: false,
             prune_constant_branches: true,
             arm_error_leaf: false,
             merge_concrete_values: true,

@@ -5,7 +5,7 @@ use std::sync::Mutex;
 
 static COUNTS: OnceLock<Mutex<BTreeMap<(String, String), u64>>> = OnceLock::new();
 
-pub(super) fn record(kind: &str, info: SourceLoc) {
+pub(crate) fn record(kind: &str, info: SourceLoc) {
     let source = serde_json::to_string(&info).unwrap();
     let count = {
         let mut counts = COUNTS.get_or_init(Default::default).lock().unwrap();
@@ -36,7 +36,7 @@ impl<B: BV> Solver<'_, B> {
         self.ctx.solver_options.no_smt
     }
 
-    /// 候选验证返回 None 表示未查询、未认证；Some(Unknown) 仍是真实查询失败。
+    /// 候选验证返回 None 表示未查询、未认证；Some 保留实际判定或未完成查询的原因。
     /// 复用 SmtResult，不把未判定候选伪装成 Sat，也不放行必需查询。
     pub fn check_candidate_sat(&mut self, info: SourceLoc) -> Option<SmtResult> {
         self.validates_candidates().then(|| self.check_sat(info))

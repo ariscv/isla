@@ -311,7 +311,8 @@ impl ExecutionStats {
         }
     }
     pub(super) fn merge_rejected(&self, function: Name, branch_pc: usize, error: &crate::error::ExecError) {
-        let crate::error::ExecError::SpeculativeReject { reason, function: rejected_function, pc, location } = error
+        let crate::error::ExecError::SpeculativeReject { reason, function: rejected_function, pc, location, .. } =
+            error
         else {
             panic!("统计必须记录推演拒绝");
         };
@@ -450,6 +451,7 @@ mod tests {
     }
     fn rejection(function: Name, pc: usize) -> crate::error::ExecError {
         crate::error::ExecError::SpeculativeReject {
+            cause: None,
             reason: SpeculativeRejectReason::StateEffect,
             function,
             pc,
@@ -506,6 +508,7 @@ mod tests {
             let location = SourceLoc::new(0, 12, 1, 12, 8);
             stats.record_fork(name, location);
             let rejection = crate::error::ExecError::SpeculativeReject {
+                cause: None,
                 reason: SpeculativeRejectReason::StateEffect,
                 function: name,
                 pc: 2,

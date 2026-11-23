@@ -145,9 +145,9 @@ pub(super) fn close_arm<B: BV>(
                     solver.commit_dead_transaction();
                     Ok(false)
                 }
-                Some(SmtResult::Unknown) => {
+                Some(SmtResult::Unproven(cause)) => {
                     solver.rollback_transaction(tx);
-                    Err(reject(arm, SpeculativeRejectReason::SolverUnknown))
+                    Err(region_merge::reject_query(arm, cause))
                 }
                 Some(SmtResult::Error(error)) => {
                     let error = ExecError::Smt(error);
@@ -190,7 +190,7 @@ pub(super) fn close_arm<B: BV>(
             solver.rollback_transaction(tx);
             Err(match error {
                 ExecError::SpeculativeReject { .. } | ExecError::Smt(_) | ExecError::Timeout => error,
-                ExecError::Z3Unknown => reject(arm, SpeculativeRejectReason::SolverUnknown),
+                ExecError::Unproven(cause) => region_merge::reject_query(arm, cause),
                 _ => reject(arm, SpeculativeRejectReason::IncompatibleState),
             })
         }
@@ -266,7 +266,7 @@ pub(super) fn append_loop_exit<'ir, B: BV>(
             {
                 return Err(error);
             }
-            if let ExecError::SpeculativeReject { reason, function, pc, location } = &error {
+            if let ExecError::SpeculativeReject { reason, function, pc, location, .. } = &error {
                 diagnostics::emit(serde_json::json!({"stage":"loop_fold_rejected","difference":"loop_fold_rejected",
                     "reason":reason,"at":{"function_id":function.as_u32(),"pc":pc,"location":location}}));
             }

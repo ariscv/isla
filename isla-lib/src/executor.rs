@@ -1985,11 +1985,11 @@ pub fn enforce_path_timeout<B: BV>(
             shared,
             SourceLoc::unknown(),
             purpose,
-            "path_timeout",
+            SpeculativeRejectReason::PathTimeout,
             elapsed,
             Some(limit),
         )
-        .panic();
+        .panic(None);
     }
 }
 
@@ -2131,7 +2131,13 @@ fn branch_decision<B: BV>(
                 | Instr::Exit(_, info) => *info,
                 Instr::Goto(_) | Instr::Arbitrary | Instr::End => SourceLoc::unknown(),
             };
-            Err(ExecError::SpeculativeReject { reason, function: frame.function_name, pc: frame.pc, location })
+            Err(ExecError::SpeculativeReject {
+                cause: None,
+                reason,
+                function: frame.function_name,
+                pc: frame.pc,
+                location,
+            })
         }
     }
 }
@@ -2492,19 +2498,15 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         let branch_queries = stats::region_progress::QueryScope::enter("branch_feasibility");
                         let can_be_true = match region_merge::feasible(frame, solver, &test_true, *info, shared_state) {
                             Ok(feasible) => feasible,
-                            Err(
-                                error @ ExecError::SpeculativeReject {
-                                    reason: SpeculativeRejectReason::SolverUnknown,
-                                    ..
-                                },
-                            ) if frame.region_execution.is_some()
-                                && crate::config::RegionOptions::current().partial_commit_solver_unknown =>
+                            Err(error @ ExecError::SpeculativeReject { reason, .. })
+                                if frame.region_execution.is_some()
+                                    && reason.partial_commit(crate::config::RegionOptions::current()) =>
                             {
                                 // 内层区域尚未创建自己的事务；当前臂事务保留此前的推演，
                                 // 两个片段从这个分叉继续，仍由外层区域的工作栈持有。
                                 shared_state.execution_stats.merge_rejected(frame.function_name, frame.pc, &error);
-                                task_state.speculation_stats.record_reject(SpeculativeRejectReason::SolverUnknown);
-                                region_merge::separate_nested_solver_unknown(v, *target, frame, solver)?;
+                                task_state.speculation_stats.record_reject(reason);
+                                region_merge::separate_nested_branch(v, *target, frame, solver)?;
                                 return Ok(Run::Suspended);
                             }
                             Err(error) => return Err(error),
@@ -2512,18 +2514,14 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         let can_be_false = match region_merge::feasible(frame, solver, &test_false, *info, shared_state)
                         {
                             Ok(feasible) => feasible,
-                            Err(
-                                error @ ExecError::SpeculativeReject {
-                                    reason: SpeculativeRejectReason::SolverUnknown,
-                                    ..
-                                },
-                            ) if frame.region_execution.is_some()
-                                && crate::config::RegionOptions::current().partial_commit_solver_unknown =>
+                            Err(error @ ExecError::SpeculativeReject { reason, .. })
+                                if frame.region_execution.is_some()
+                                    && reason.partial_commit(crate::config::RegionOptions::current()) =>
                             {
                                 // 同上：不可行性查询尚未进入内层区域事务，不能回滚外层臂。
                                 shared_state.execution_stats.merge_rejected(frame.function_name, frame.pc, &error);
-                                task_state.speculation_stats.record_reject(SpeculativeRejectReason::SolverUnknown);
-                                region_merge::separate_nested_solver_unknown(v, *target, frame, solver)?;
+                                task_state.speculation_stats.record_reject(reason);
+                                region_merge::separate_nested_branch(v, *target, frame, solver)?;
                                 return Ok(Run::Suspended);
                             }
                             Err(error) => return Err(error),
@@ -3221,7 +3219,7 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                             ) {
                                                 SmtResult::Unsat => true,
                                                 SmtResult::Error(error) => return Err(ExecError::Smt(error)),
-                                                SmtResult::Sat | SmtResult::Unknown => false,
+                                                SmtResult::Sat | SmtResult::Unproven(_) => false,
                                             },
                                             Val::Bool(matches) => matches,
                                             _ => panic!("TODO"),
@@ -4036,12 +4034,11 @@ pub fn all_unsat_collector<'ir, B: BV>(
                     solver.add(Assert(Not(Box::new(Var(v)))));
                     match solver.check_sat(SourceLoc::unknown()) {
                         SmtResult::Unsat => log_from!(tid, log::VERBOSE, "Got unsat"),
-                        SmtResult::Error(error) => {
-                            let error = ExecError::Smt(error);
+                        SmtResult::Unproven(error) | SmtResult::Error(error) => {
                             log_from!(tid, log::VERBOSE, format!("Got {}", error));
                             collected.store(false, Ordering::Release)
                         }
-                        SmtResult::Sat | SmtResult::Unknown => {
+                        SmtResult::Sat => {
                             log_from!(tid, log::VERBOSE, "Got sat");
                             collected.store(false, Ordering::Release)
                         }
@@ -4168,7 +4165,7 @@ pub fn trace_collector<'ir, B: BV>(
                     let error = ExecError::Smt(error);
                     collected.push(Err(TraceError::exec(error, backtrace)))
                 }
-                SmtResult::Unsat | SmtResult::Unknown => collected.push(Err(TraceError::exec(err, backtrace))),
+                SmtResult::Unsat | SmtResult::Unproven(_) => collected.push(Err(TraceError::exec(err, backtrace))),
             }
             submit_trace_for_local_frame(&frame, shared_state);
         }
@@ -4203,7 +4200,7 @@ pub fn trace_value_collector<'ir, B: BV>(
                     let error = ExecError::Smt(error);
                     collected.push(Err(TraceError::exec(error, backtrace)))
                 }
-                SmtResult::Unsat | SmtResult::Unknown => collected.push(Err(TraceError::exec(err, backtrace))),
+                SmtResult::Unsat | SmtResult::Unproven(_) => collected.push(Err(TraceError::exec(err, backtrace))),
             }
             submit_trace_for_local_frame(&frame, shared_state);
         }
@@ -13503,7 +13500,7 @@ fn zcaller(za, zb) {
     mod path_failure_policy_tests;
 
     #[test]
-    fn solver_unknown_jump_drops_only_the_indeterminate_side() {
+    fn unknown_solver_jump_drops_only_the_indeterminate_side() {
         let mut shared = empty_shared_state();
         shared.symtab.set_files(vec!["branch.sail"]);
         let source = SourceLoc::new(0, 7, 3, 7, 9);
@@ -13541,7 +13538,7 @@ fn zcaller(za, zb) {
     }
 
     #[test]
-    fn solver_unknown_assertion_drops_the_path() {
+    fn unknown_solver_assertion_drops_the_path() {
         let shared = empty_shared_state();
         let flag = test_name(100);
         let program = vec![
@@ -13573,7 +13570,7 @@ fn zcaller(za, zb) {
     }
 
     #[test]
-    fn solver_unknown_in_validation_reaches_the_collector() {
+    fn unknown_solver_in_validation_reaches_the_collector() {
         crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let shared = empty_shared_state();
         let flag = test_name(100);
@@ -13588,13 +13585,13 @@ fn zcaller(za, zb) {
         });
         assert!(matches!(
             results.into_inner().as_slice(),
-            [Err(ExecError::Smt(crate::error::SmtError::Unknown { .. }))]
+            [Err(ExecError::Smt(crate::error::SmtError::SolverUnknown { .. }))]
         ));
         assert_eq!(shared.execution_stats.solver_path_drop_count(), 0);
     }
 
     #[test]
-    fn solver_unknown_length_candidate_retains_the_remainder() {
+    fn unknown_solver_length_candidate_retains_the_remainder() {
         crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let shared = empty_shared_state();
         let mut config = Config::new();
@@ -13954,6 +13951,7 @@ fn zcaller(za, zb) {
             let mut frame = make_frame(vec![Instr::End]);
             frame.set_speculation_mode(SpeculationMode::On);
             let error = ExecError::SpeculativeReject {
+                cause: None,
                 reason: SpeculativeRejectReason::Exit,
                 function: frame.function_name,
                 pc: 0,
@@ -14083,7 +14081,7 @@ fn zcaller(za, zb) {
                     0,
                     TaskId::fresh(),
                     &mut fraction,
-                    PathTimeout::unlimited(),
+                    crate::executor::PathTimeout::unlimited(),
                     None,
                     &sink,
                     &mut frame,

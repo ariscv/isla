@@ -658,6 +658,7 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
     let domain = inherited.unwrap_or_else(|| solver.finite_domain(sym));
     let bounded = matches!(domain, FiniteDomain::Bounded(_));
     let mut restricted = false;
+    let mut rejected_candidates = None;
     let values = match (domain, bounds) {
         (FiniteDomain::Known(values), _) => Some(values),
         (FiniteDomain::Bounded(mut values), Some(OperandBounds::Established(range))) => {
@@ -674,9 +675,18 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
                 restricted = values.len() != previous;
                 pass_bound |= restricted;
             }
-            values.iter().all(|v| candidate_in_bounds(v, &range)).then_some(values)
+            if values.iter().all(|v| candidate_in_bounds(v, &range)) {
+                Some(values)
+            } else {
+                rejected_candidates = Some(values);
+                None
+            }
         }
-        _ => None,
+        (FiniteDomain::Bounded(values), None) => {
+            rejected_candidates = Some(values);
+            None
+        }
+        (FiniteDomain::Unknown, _) => None,
     };
     if let Some(values) = values {
         let Some(candidate) = values.first() else { return Ok(ValueRetry::Dead) };
@@ -748,14 +758,43 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
         );
     }
     if solver.finite_domain_enabled() {
-        let result = solver
-            .check_candidate_sat(info)
-            .ok_or_else(|| ExecError::Smt(solver.no_smt_cannot_continue("symbolic_value_enumeration", info)))?;
+        let missing_domain = || crate::error::SmtError::FiniteDomain {
+            source_loc: info,
+            symbol: sym,
+            width,
+            candidates: rejected_candidates.map(|values| {
+                values
+                    .iter()
+                    .map(|value| match value {
+                        Bits64(bits) => bits.to_string(),
+                        Bits(bits) => {
+                            let mut text = Vec::new();
+                            crate::simplify::write_bits(&mut text, bits).unwrap();
+                            String::from_utf8(text).unwrap()
+                        }
+                        _ => unreachable!("有限域候选必须是位向量常量"),
+                    })
+                    .collect()
+            }),
+        };
+        let Some(result) = solver.check_candidate_sat(info) else {
+            crate::smt::no_smt::record("unknown_finite_domain", info);
+            return Err(ExecError::Smt(missing_domain()));
+        };
         if result == crate::smt::SmtResult::Unsat {
             return Ok(ValueRetry::Dead);
         }
-        if frame.region_execution.is_some() && result.is_unknown() {
-            return Err(super::region_merge::reject(frame, SpeculativeRejectReason::SolverUnknown));
+        if frame.region_execution.is_some() {
+            match result {
+                crate::smt::SmtResult::Unproven(crate::error::SmtError::DeferredQuery { .. }) => {
+                    return Err(super::region_merge::reject_query(frame, missing_domain()))
+                }
+                crate::smt::SmtResult::Unproven(cause)
+                | crate::smt::SmtResult::Error(cause @ crate::error::SmtError::SolverUnknown { .. }) => {
+                    return Err(super::region_merge::reject_query(frame, cause))
+                }
+                _ => (),
+            }
         }
         if !super::region_merge::path_is_feasible(result, frame, solver, shared)? {
             return Err(ExecError::SolverDroppedPath);

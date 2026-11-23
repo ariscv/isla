@@ -274,7 +274,7 @@ fn region_arm_worker_failures() {
         assert!(log.iter().all(|(s, _)| s != "imported"));
         assert_eq!(stats["runtime"]["submitted_tasks"], stats["runtime"]["completed_tasks"]);
         if failure == "timeout" {
-            assert_eq!(stats["failure_reasons"]["timeout"], 1);
+            assert_eq!(stats["failure_reasons"]["path_timeout"], 1);
         }
         assert_eq!(out.len(), 2);
         assert_eq!(

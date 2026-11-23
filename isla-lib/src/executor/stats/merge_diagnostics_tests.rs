@@ -200,6 +200,7 @@ fn merge_diagnostics_root_preserves_nested_rejection() {
         let function = symtab.intern("zcaller");
         let info = SourceLoc::unknown();
         let rejection = ExecError::SpeculativeReject {
+            cause: None,
             reason: SpeculativeRejectReason::StateEffect,
             function,
             pc: 20,
@@ -239,7 +240,8 @@ fn merge_diagnostics_root_records_first_unknown_query() {
         let function = symtab.intern("zcaller");
         let info = SourceLoc::unknown();
         let rejection = ExecError::SpeculativeReject {
-            reason: SpeculativeRejectReason::SolverUnknown,
+            cause: None,
+            reason: SpeculativeRejectReason::UnknownDeferredMode,
             function,
             pc: 20,
             location: info,
@@ -258,6 +260,8 @@ fn merge_diagnostics_root_records_first_unknown_query() {
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .find(|row| row["kind"] == "merge_root_end")
         .expect(&text);
+    assert_eq!(ended["failure"]["reason"], "unknown_deferred_mode");
+    assert_eq!(ended["first_unknown"]["reason"], "unknown_deferred_mode");
     assert_eq!(ended["first_unknown"]["purpose"], "general");
     assert_eq!(ended["first_unknown"]["function"], "caller");
     assert_eq!(ended["first_unknown"]["pc"], 17);

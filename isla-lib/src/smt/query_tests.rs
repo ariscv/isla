@@ -167,7 +167,7 @@ fn default_snapshot_keeps_context_configuration_and_explicit_seed() {
         let value = solver.declare_bitvector(64, info);
         assert!(matches!(
             solver.check_sat_with(&Eq(Box::new(Var(value)), Box::new(smtlib::bits64(12, 64))), info),
-            Error(SmtError::Unknown { .. })
+            Error(SmtError::SolverUnknown { .. })
         ));
         assert!(!solver.has_stashed_model());
     });
@@ -280,7 +280,10 @@ fn default_integer_range_proof_preserves_incremental_scope_and_limits() {
         let mut solver = Solver::<B64>::new(&limited);
         let wide = solver.declare_bitvector(128, info);
         assert!(
-            matches!(narrow(Val::Symbolic(wide), &mut solver, info), Err(ExecError::Smt(SmtError::Unknown { .. }))),
+            matches!(
+                narrow(Val::Symbolic(wide), &mut solver, info),
+                Err(ExecError::Smt(SmtError::SolverUnknown { .. }))
+            ),
             "显式资源限制返回Unknown，不能被当作无溢出"
         );
     });
@@ -501,7 +504,7 @@ fn default_vector_bounds_keep_errors_limits_and_incremental_scope() {
         let index = solver.declare_bitvector(128, info);
         assert!(matches!(
             crate::primop::vector_access(values, Val::Symbolic(index), &mut solver, info),
-            Err(ExecError::Smt(SmtError::Unknown { .. }))
+            Err(ExecError::Smt(SmtError::SolverUnknown { .. }))
         ));
     });
 }
@@ -662,7 +665,7 @@ fn default_boolean_proofs_keep_small_incremental_and_unknown_behavior() {
         assert!(
             matches!(
                 lt(Val::Symbolic(complex), Val::I128(64), &mut solver, info),
-                Err(ExecError::Smt(SmtError::Unknown { purpose: "boolean_proof", .. }))
+                Err(ExecError::Smt(SmtError::SolverUnknown { purpose: "boolean_proof", .. }))
             ),
             "真实查询未判定必须作为带来源的求解错误返回"
         );

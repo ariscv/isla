@@ -192,7 +192,7 @@ fn run_mapping<B: BV>(
                     let concrete = match solver.check_sat(SourceLoc::unknown()) {
                         isla_lib::smt::SmtResult::Sat => Model::new(&solver).get_val(&ret_val),
                         isla_lib::smt::SmtResult::Unsat => Err(ExecError::NoModel),
-                        isla_lib::smt::SmtResult::Unknown => Err(ExecError::Z3Unknown),
+                        isla_lib::smt::SmtResult::Unproven(error) => Err(ExecError::Unproven(error)),
                         isla_lib::smt::SmtResult::Error(error) => Err(ExecError::Smt(error)),
                     };
                     concrete.and_then(|value| {
@@ -358,7 +358,7 @@ fn print_frame_args<B: BV>(
             return Err(ExecError::Smt(error));
         }
         isla_lib::smt::SmtResult::Unsat => return Err(ExecError::NoModel),
-        isla_lib::smt::SmtResult::Unknown => return Err(ExecError::Z3Unknown),
+        isla_lib::smt::SmtResult::Unproven(error) => return Err(ExecError::Unproven(error)),
     }
 
     let mut model = Model::new(&solver);

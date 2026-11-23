@@ -180,7 +180,13 @@ impl<B: BV> AccessLog<B> {
     }
 
     pub fn reject(&self, reason: SpeculativeRejectReason) -> ExecError {
-        ExecError::SpeculativeReject { reason, function: self.function, pc: self.pc, location: self.location }
+        ExecError::SpeculativeReject {
+            cause: None,
+            reason,
+            function: self.function,
+            pc: self.pc,
+            location: self.location,
+        }
     }
 }
 
@@ -215,10 +221,21 @@ fn assert_initial_type<B: BV>(value: &Val<B>, solver: &mut Solver<B>) {
 
 pub(super) fn reject<B: BV>(frame: &LocalFrame<B>, reason: SpeculativeRejectReason) -> ExecError {
     ExecError::SpeculativeReject {
+        cause: None,
         reason,
         function: frame.function_name,
         pc: frame.pc,
         location: frame.instrs.get(frame.pc).and_then(stats::instr_source_loc).unwrap_or(SourceLoc::unknown()),
+    }
+}
+
+pub(super) fn reject_query<B: BV>(frame: &LocalFrame<B>, cause: crate::error::SmtError) -> ExecError {
+    ExecError::SpeculativeReject {
+        reason: cause.reject_reason(),
+        location: cause.source_loc(),
+        function: frame.function_name,
+        pc: frame.pc,
+        cause: Some(Box::new(cause)),
     }
 }
 
@@ -233,11 +250,11 @@ pub(super) fn feasible<B: BV>(
     let speculative = frame.region_execution.is_some();
     match solver.check_sat_with_for_branch(exp, info, speculative) {
         None => Ok(true),
-        Some(SmtResult::Unknown) if speculative => Err(reject(frame, SpeculativeRejectReason::SolverUnknown)),
-        Some(SmtResult::Error(crate::error::SmtError::Unknown { .. }))
-            if speculative && crate::config::RegionOptions::current().partial_commit_solver_unknown =>
+        Some(SmtResult::Unproven(cause)) if speculative => Err(reject_query(frame, cause)),
+        Some(SmtResult::Error(cause))
+            if speculative && cause.reject_reason().partial_commit(crate::config::RegionOptions::current()) =>
         {
-            Err(reject(frame, SpeculativeRejectReason::SolverUnknown))
+            Err(reject_query(frame, cause))
         }
         Some(result) => path_is_feasible(result, frame, solver, shared),
     }
@@ -541,7 +558,7 @@ pub(super) enum RegionResult {
 /// 内层 Unknown 后把原分叉作为祖先区域里的两个待执行片段。调用方若已回滚
 /// 内层事务，片段会重建它；若尚未创建内层事务，则保留当前外层臂事务。绝不能交给
 /// 全局 sink；祖先的组织者会在自己的工作栈中继续它们。
-pub(super) fn separate_nested_solver_unknown<'ir, B: BV>(
+pub(super) fn separate_nested_branch<'ir, B: BV>(
     condition: Sym,
     target: usize,
     frame: &mut LocalFrame<'ir, B>,
@@ -683,7 +700,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
     let mut arm_execution_rolled_back = false;
     let result = match candidate {
         Err(error) => {
-            if let ExecError::SpeculativeReject { reason, function, pc, location } = error {
+            if let ExecError::SpeculativeReject { reason, function, pc, location, .. } = error {
                 if !matches!(
                     reason,
                     SpeculativeRejectReason::SamplingState | SpeculativeRejectReason::SymbolicAssertion
@@ -772,13 +789,11 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                             Some(SmtResult::Sat) => {
                                 return Err(reject(frame, SpeculativeRejectReason::SymbolicAssertion))
                             }
-                            Some(SmtResult::Unknown) => {
-                                return Err(reject(frame, SpeculativeRejectReason::SolverUnknown))
-                            }
-                            Some(SmtResult::Error(crate::error::SmtError::Unknown { .. }))
+                            Some(SmtResult::Unproven(cause)) => return Err(reject_query(frame, cause)),
+                            Some(SmtResult::Error(cause @ crate::error::SmtError::SolverUnknown { .. }))
                                 if solver.exploration_on_unknown().is_some() =>
                             {
-                                return Err(reject(frame, SpeculativeRejectReason::SolverUnknown));
+                                return Err(reject_query(frame, cause));
                             }
                             Some(SmtResult::Error(error)) => return Err(ExecError::Smt(error)),
                         }
@@ -803,13 +818,12 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                             {
                                 Ok(RegionResult::Dead)
                             }
-                            Some(SmtResult::Unsat | SmtResult::Unknown) => {
-                                Err(reject(frame, SpeculativeRejectReason::SolverUnknown))
-                            }
-                            Some(SmtResult::Error(crate::error::SmtError::Unknown { .. }))
+                            Some(SmtResult::Unsat) => Err(reject(frame, SpeculativeRejectReason::ExitUnsat)),
+                            Some(SmtResult::Unproven(cause)) => Err(reject_query(frame, cause)),
+                            Some(SmtResult::Error(cause @ crate::error::SmtError::SolverUnknown { .. }))
                                 if solver.exploration_on_unknown().is_some() =>
                             {
-                                Err(reject(frame, SpeculativeRejectReason::SolverUnknown))
+                                Err(reject_query(frame, cause))
                             }
                             Some(SmtResult::Error(error)) => Err(ExecError::Smt(error)),
                         }
@@ -877,29 +891,35 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
         Err(error)
             if nested
                 && arm_execution_rolled_back
-                && crate::config::RegionOptions::current().partial_commit_solver_unknown
-                && matches!(
-                    error,
-                    ExecError::SpeculativeReject { reason: SpeculativeRejectReason::SolverUnknown, .. }
-                ) =>
+                && error
+                    .rejection_reason()
+                    .is_some_and(|cause| cause.partial_commit(crate::config::RegionOptions::current())) =>
         {
+            let reason = error.rejection_reason().unwrap();
             // 事务撤销了内层的义务、事件和定义；错误叶也不能越过这次撤销。
             // 两个片段会从本分叉的后继重新建立它们，再由祖先的出口认证。
-            match separate_nested_solver_unknown(condition, target, frame, solver) {
+            match separate_nested_branch(condition, target, frame, solver) {
                 Ok(()) => {
                     pending_errors.discard();
-                    shared.execution_stats.merge_rejected(key.0, key.1, &error);
-                    state.speculation_stats.record_reject(SpeculativeRejectReason::SolverUnknown);
+                    let site;
+                    let rejection = if matches!(&error, ExecError::SpeculativeReject { .. }) {
+                        &error
+                    } else {
+                        site = reject(frame, reason);
+                        &site
+                    };
+                    shared.execution_stats.merge_rejected(key.0, key.1, rejection);
+                    state.speculation_stats.record_reject(reason);
                     if diagnostics_active {
                         diagnostics::emit(serde_json::json!({
                             "stage":"local_arm_rejected",
                             "difference":"local_arm_rejected",
-                            "reason":"solver_unknown",
+                            "reason":reason,"cause":error.query_failure().map(|cause|cause.diagnostic()),"error":error.to_string(),
                             "at":{"function":diagnostics::name_string(frame.function_name, &shared.symtab),
                                 "pc":frame.pc,"location":error.source_loc()}
                         }));
                     }
-                    Ok(RegionResult::Separate { reason: SpeculativeRejectReason::SolverUnknown, merged_groups: false })
+                    Ok(RegionResult::Separate { reason, merged_groups: false })
                 }
                 Err(error) => Err(error),
             }
@@ -945,17 +965,12 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         serde_json::json!({
                             "function": zencode::decode(shared.symtab.to_str(frame.function_name)),
                             "branch_pc": frame.pc, "nested": nested,
-                            "error": error.to_string(), "source_loc": error.source_loc(),
+                            "reason":error.reject_reason(), "error": error.to_string(), "source_loc": error.source_loc(),
                         })
                     );
                 }
             }
-            let reason = match &error {
-                ExecError::SpeculativeReject { reason, .. } => *reason,
-                ExecError::Smt(_) => SpeculativeRejectReason::SmtError,
-                ExecError::Timeout => SpeculativeRejectReason::Timeout,
-                _ => SpeculativeRejectReason::IncompatibleState,
-            };
+            let reason = error.rejection_reason().unwrap_or(SpeculativeRejectReason::IncompatibleState);
             let site;
             let rejection = if matches!(&error, ExecError::SpeculativeReject { .. }) {
                 &error
@@ -1467,8 +1482,13 @@ pub fn validate_force_regions<B: BV>(shared: &SharedState<B>, limits: &Execution
                                     panic!("Force 结构校验的候选必须是普通 Jump")
                                 }
                             };
-                            let error =
-                                ExecError::SpeculativeReject { reason, function: *function, pc, location: *info };
+                            let error = ExecError::SpeculativeReject {
+                                cause: None,
+                                reason,
+                                function: *function,
+                                pc,
+                                location: *info,
+                            };
                             shared.execution_stats.print(shared);
                             return Err(speculation::force_diagnostic(
                                 limits.merge_rule(*function, *info).map(|(rule, _)| rule),

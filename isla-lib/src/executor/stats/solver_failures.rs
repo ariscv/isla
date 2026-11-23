@@ -17,6 +17,8 @@ pub struct SolverPathDrop {
     pub source_loc: SourceLoc,
     pub purpose: String,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_unknown: Option<String>,
     pub seconds: f64,
     pub limit_seconds: Option<f64>,
 }
@@ -53,7 +55,7 @@ impl ExecutionStats {
 }
 
 pub fn is_solver_failure(error: &ExecError) -> bool {
-    matches!(error, ExecError::Smt(SmtError::Timeout(_) | SmtError::Unknown { .. }))
+    matches!(error, ExecError::Smt(SmtError::Timeout(_) | SmtError::SolverUnknown { .. }))
 }
 
 /// 仅在失败已归属到单条探索路径时调用。返回 true 表示该路径按显式 dead 策略作废。
@@ -64,22 +66,23 @@ pub fn handle_solver_path_failure<B: BV>(
     shared: &SharedState<'_, B>,
 ) -> bool {
     let Some(policy) = policy else { return false };
-    let (source, purpose, reason, wall, limit) = match error {
+    let (source, purpose, reason_unknown, wall, limit) = match error {
         ExecError::Smt(SmtError::Timeout(timeout)) => (
             timeout.source_loc,
             if timeout.operation == SmtOperation::ModelEval { "model_value" } else { timeout.query_purpose },
-            "timeout",
+            None,
             timeout.operation_wall,
             Some(timeout.limit),
         ),
-        ExecError::Smt(SmtError::Unknown { source_loc, purpose, wall, limit }) => {
-            (*source_loc, *purpose, "unknown", *wall, *limit)
+        ExecError::Smt(SmtError::SolverUnknown { source_loc, purpose, wall, limit, reason }) => {
+            (*source_loc, *purpose, Some(reason.as_str()), *wall, *limit)
         }
         _ => return false,
     };
-    let failure = PathFailureDiagnostic::new(frame, shared, source, purpose, reason, wall, limit);
+    let failure =
+        PathFailureDiagnostic::new(frame, shared, source, purpose, SpeculativeRejectReason::UnknownSolver, wall, limit);
     if policy == PathFailureAction::Panic {
-        failure.panic();
+        failure.panic(reason_unknown);
     }
     let mut drops = shared.execution_stats.solver_path_drops.lock().unwrap();
     let drop = SolverPathDrop {
@@ -90,7 +93,8 @@ pub fn handle_solver_path_failure<B: BV>(
         sail_location: failure.sail_location,
         source_loc: failure.source_loc,
         purpose: purpose.into(),
-        reason: reason.into(),
+        reason: failure.reason.to_string(),
+        reason_unknown: reason_unknown.map(str::to_owned),
         seconds: wall.as_secs_f64(),
         limit_seconds: limit.map(|limit| limit.as_secs_f64()),
     };
@@ -109,7 +113,7 @@ pub(crate) struct PathFailureDiagnostic {
     sail_location: String,
     source_loc: SourceLoc,
     purpose: &'static str,
-    reason: &'static str,
+    reason: SpeculativeRejectReason,
     wall: std::time::Duration,
     limit: Option<std::time::Duration>,
     path_depth: u64,
@@ -121,7 +125,7 @@ impl PathFailureDiagnostic {
         shared: &SharedState<'_, B>,
         source_loc: SourceLoc,
         purpose: &'static str,
-        reason: &'static str,
+        reason: SpeculativeRejectReason,
         wall: std::time::Duration,
         limit: Option<std::time::Duration>,
     ) -> Self {
@@ -149,11 +153,11 @@ impl PathFailureDiagnostic {
     }
 
     #[cold]
-    pub(crate) fn panic(&self) -> ! {
+    pub(crate) fn panic(&self, reason_unknown: Option<&str>) -> ! {
         let limit = self.limit.map_or_else(|| "unlimited".to_string(), |limit| format!("{limit:?}"));
         panic!(
-            "{PATH_LIMIT_PANIC_PREFIX} reason={} function={} pc={} sail={} purpose={} elapsed={:?} limit={} path_depth={}",
-            self.reason, self.function, self.pc, self.sail_location, self.purpose, self.wall, limit, self.path_depth,
+            "{PATH_LIMIT_PANIC_PREFIX} reason={} function={} pc={} sail={} purpose={} elapsed={:?} limit={} path_depth={} reason_unknown={:?}",
+            self.reason, self.function, self.pc, self.sail_location, self.purpose, self.wall, limit, self.path_depth, reason_unknown,
         );
     }
 }

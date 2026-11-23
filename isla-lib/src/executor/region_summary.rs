@@ -330,6 +330,7 @@ pub(super) struct CachedReject {
 impl CachedReject {
     pub(super) fn error(self) -> ExecError {
         ExecError::SpeculativeReject {
+            cause: None,
             reason: self.reason,
             function: self.function,
             pc: self.pc,

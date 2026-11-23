@@ -80,7 +80,7 @@ impl<B: BV> Solver<'_, B> {
                 }
                 SmtResult::Unsat => keep /= 2,
                 // 这是对代表值的可选偏好。当前求解器始终持有满足原路径的模型。
-                SmtResult::Unknown | SmtResult::Error(_) => break,
+                SmtResult::Unproven(_) | SmtResult::Error(_) => break,
             }
         }
         assert!(self.has_stashed_model(), "随机偏好不应丢弃已认证的模型");

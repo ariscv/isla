@@ -70,7 +70,7 @@ fn query<B: BV>(solver: &mut Solver<B>, condition: &Exp<Sym>) -> Result<bool, Ex
     match result {
         SmtResult::Sat => Ok(true),
         SmtResult::Unsat => Ok(false),
-        SmtResult::Unknown => Err(ExecError::Z3Unknown),
+        SmtResult::Unproven(error) => Err(ExecError::Unproven(error)),
         SmtResult::Error(error) => Err(ExecError::Smt(error)),
     }
 }

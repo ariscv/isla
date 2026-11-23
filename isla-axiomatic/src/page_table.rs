@@ -41,7 +41,7 @@ use isla_lib::memory::{CustomRegion, Memory};
 use isla_lib::primop_util::{length_bits, smt_sbits};
 use isla_lib::smt::{
     smtlib::{bits64, Exp, Ty},
-    Event, ReadOpts, SmtResult, Solver, Sym, WriteOpts,
+    Event, ReadOpts, Solver, Sym, WriteOpts,
 };
 use isla_lib::source_loc::SourceLoc;
 
@@ -989,15 +989,7 @@ impl<B: BV> CustomRegion<B> for ImmutablePageTables<B> {
             (_, _) => return Err(ExecError::BadWrite("ill-typed descriptor")),
         };
 
-        let satisfiable = if skip_sat_check {
-            true
-        } else {
-            match solver.check_sat_with(&query, SourceLoc::unknown()) {
-                SmtResult::Sat => true,
-                SmtResult::Unsat | SmtResult::Unknown => false,
-                SmtResult::Error(error) => return Err(ExecError::Smt(error)),
-            }
-        };
+        let satisfiable = skip_sat_check || solver.check_sat_with(&query, SourceLoc::unknown()).is_sat()?;
 
         if satisfiable {
             let value = solver.declare_const(Ty::Bool, SourceLoc::unknown());
@@ -1258,9 +1250,9 @@ mod tests {
     #[test]
     fn test_translate() {
         isla_lib::smt::configure_tastic(isla_lib::smt::Tactic::Qfaufbv);
+        use isla_lib::smt::SmtResult::*;
         use Def::*;
         use Exp::*;
-        use SmtResult::*;
 
         let mut cfg = Config::new();
         cfg.set_param_value("model", "true");

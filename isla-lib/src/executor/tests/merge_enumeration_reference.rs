@@ -5,7 +5,7 @@ fn blocking_satisfiable<B: BV>(solver: &mut Solver<B>) -> Result<bool, ExecError
     match solver.check_sat(SourceLoc::unknown()) {
         SmtResult::Sat => Ok(true),
         SmtResult::Unsat => Ok(false),
-        SmtResult::Unknown => Err(ExecError::Z3Unknown),
+        SmtResult::Unproven(error) => Err(ExecError::Unproven(error)),
         SmtResult::Error(error) => Err(ExecError::Smt(error)),
     }
 }

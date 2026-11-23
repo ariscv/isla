@@ -156,7 +156,7 @@ impl QuerySolver<'_> {
         match result {
             Z3_L_TRUE => Sat,
             Z3_L_FALSE => Unsat,
-            _ => unknown_result(info, elapsed, None),
+            _ => Error(z3_unknown_error(info, elapsed, None, z3_reason_unknown(ctx, native))),
         }
     }
 }
@@ -474,7 +474,10 @@ mod tests {
             Box::new(Exp::Bits64(B64::new(9, 64))),
         );
         let tx = solver.start_transaction();
-        assert_eq!(solver.check_sat_with_for_bool(&goal, info), Unknown, "只限制可选的布尔证明");
+        assert!(
+            matches!(solver.check_sat_with_for_bool(&goal, info), Unproven(SmtError::SolverUnknown { reason, .. }) if !reason.is_empty()),
+            "只限制可选的布尔证明"
+        );
         assert!(
             solver.check_sat_with_for_branch(&goal, info, true).unwrap().is_sat().unwrap(),
             "区域分支不是可选布尔化简，不能继承预算"

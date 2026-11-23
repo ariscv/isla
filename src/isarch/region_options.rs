@@ -2,6 +2,17 @@
 use isla_lib::config::ExecutionLimitsConfig;
 
 const BOOL_OPTIONS: &[(&str, &str, &str)] = &[
+    ("partial_commit_solver", "partial-commit-solver", "嵌套区域遇到Z3 查询失败时在外层保留两个片段；默认关闭"),
+    (
+        "partial_commit_finite_domain",
+        "partial-commit-finite-domain",
+        "嵌套区域遇到有限域推导不足时在外层保留两个片段；默认关闭",
+    ),
+    (
+        "partial_commit_deferred_mode",
+        "partial-commit-deferred-mode",
+        "嵌套区域遇到延后模式限制时在外层保留两个片段；默认关闭",
+    ),
     ("finite_domain_enumeration", "finite-domain-enumeration", "先按可确认的有限域枚举具体值；默认开启"),
     ("merge_poison_slots", "merge-poison-slots", "只消除已证明不可观察的局部未初始化槽位或载荷；默认开启"),
     ("defer_ctor_checks", "region-defer-ctor-checks", "延后推演时，构造子解包标签转为出口待证义务；默认开启"),
@@ -73,6 +84,9 @@ pub fn apply_cli(matches: &getopts::Matches, limits: &mut ExecutionLimitsConfig)
                 "merge_concrete_values" => updated.path_merge.merge_concrete_values = value,
                 "defer_call_effect_checks" => updated.path_merge.defer_call_effect_checks = value,
                 "defer_exit_check" => updated.path_merge.defer_exit_check = value,
+                "partial_commit_solver" => updated.path_merge.partial_commit_solver = value,
+                "partial_commit_finite_domain" => updated.path_merge.partial_commit_finite_domain = value,
+                "partial_commit_deferred_mode" => updated.path_merge.partial_commit_deferred_mode = value,
                 "finite_domain_enumeration" => updated.path_merge.finite_domain_enumeration = value,
                 "lazy_z3_scope" => updated.path_merge.lazy_z3_scope = value,
                 "witness_eval" => updated.path_merge.witness_eval = value,
@@ -191,6 +205,9 @@ mod tests {
         assert!(limits.path_merge.defer_range_proofs && limits.path_merge.defer_ctor_checks);
         for (field, flag, _) in BOOL_OPTIONS {
             let section = if [
+                "partial_commit_finite_domain",
+                "partial_commit_solver",
+                "partial_commit_deferred_mode",
                 "prune_constant_branches",
                 "arm_error_leaf",
                 "merge_concrete_values",
@@ -325,7 +342,7 @@ mod no_smt_port_tests {
     }
 
     #[test]
-    fn solver_unknown_policy_uses_only_solver_table_and_cli() {
+    fn unknown_solver_policy_uses_only_solver_table_and_cli() {
         use isla_lib::config::PathFailureAction;
         let mut limits = ExecutionLimitsConfig::default();
         assert_eq!(limits.solver.on_unknown, PathFailureAction::Panic);
