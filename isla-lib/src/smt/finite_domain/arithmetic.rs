@@ -108,13 +108,20 @@ impl<'a, 'ctx, B: BV> Graph<'a, '_, 'ctx, B> {
     fn visit(
         &self,
         root: &Expression<'a, 'ctx>,
+        compared: Option<&Expression<'a, 'ctx>>,
         mut accept: impl FnMut(Ast<'ctx>, &[(usize, usize)], &[Option<Ast<'ctx>>], &Evaluated<'a, 'ctx>) -> bool,
     ) -> bool {
         let mut assignments = vec![None; self.inputs.len()];
         let mut stack: Vec<(usize, usize)> = Vec::new();
         loop {
             let mut evaluated = HashMap::new();
-            match root.evaluate(&assignments, &mut evaluated) {
+            let result = root.evaluate(&assignments, &mut evaluated).and_then(|value| {
+                if let Some(compared) = compared {
+                    compared.evaluate(&assignments, &mut evaluated)?;
+                }
+                Ok(value)
+            });
+            match result {
                 Err(index) => stack.push((index, 0)),
                 Ok(value) => {
                     if !accept(value, &stack, &assignments, &evaluated) {
@@ -135,6 +142,67 @@ impl<'a, 'ctx, B: BV> Graph<'a, '_, 'ctx, B> {
                 return true;
             }
         }
+    }
+
+    fn retain_guarded(
+        &self,
+        target: Sym,
+        root: &Expression<'a, 'ctx>,
+        compared: Option<(Sym, &Expression<'a, 'ctx>)>,
+        values: &mut Vec<Formula>,
+    ) {
+        let mut possible = vec![false; values.len()];
+        // 选择条件可以先由枚举值或算术表达式算出。保留本组合已求值的布尔符号，
+        // 返回标签使用同一条件时可直接复用，无需从枚举构造子再次推导。
+        let predicates: Vec<_> = self
+            .symbols
+            .iter()
+            .filter_map(|(&sym, node)| {
+                let node = node.as_ref()?;
+                self.solver.is_bool(sym).then_some((sym, Rc::as_ptr(node)))
+            })
+            .collect();
+        self.visit(root, compared.map(|(_, expr)| expr), |mut ast, stack, _, evaluated| {
+            let value = ast.finite_bits().expect("长度候选必须为位向量常量");
+            let Some(index) = values.iter().position(|v| v == &value) else {
+                return true;
+            };
+            if possible[index] {
+                return true;
+            }
+            let mut projected = HashMap::from([(target, Some(value))]);
+            if let Some((sym, expr)) = compared {
+                let mut ast = evaluated[&std::ptr::from_ref(expr)].clone();
+                projected.insert(sym, Some(ast.finite_bits().expect("比较操作数必须为位向量常量")));
+            }
+            for &(input, next) in stack {
+                let input = &self.inputs[input];
+                if let Some(sym) = input.symbol.or(input.guard_symbol) {
+                    projected.insert(sym, Some(input.choices[next - 1].clone()));
+                }
+            }
+            for &(sym, node) in &predicates {
+                if let Some(value) = evaluated.get(&node) {
+                    let truth = value.clone().structural_bool().expect("已求值的布尔节点必须为常量");
+                    projected.insert(sym, Some(Exp::Bool(truth)));
+                }
+            }
+            possible[index] = !self.solver.transaction_conditions.iter().rev().any(|guard| {
+                let reduced = guard
+                    .map_var(&mut |sym| {
+                        Ok::<_, std::convert::Infallible>(
+                            self.solver
+                                .project_finite_definition(*sym, self.prefix, &mut projected)
+                                .unwrap_or(Exp::Var(*sym)),
+                        )
+                    })
+                    .unwrap();
+                self.solver.translate_exp(&reduced).structural_bool() == Some(false)
+            });
+            !possible.iter().all(|&v| v)
+        });
+        let mut possible = possible.into_iter();
+        values.retain(|_| possible.next().unwrap());
     }
 }
 
@@ -198,10 +266,13 @@ impl<'ctx> Expression<'_, 'ctx> {
 
 impl<'ctx, B: BV> Solver<'ctx, B> {
     /// 按产生目标值的输入重算活动守卫。只要一组赋值尚未被排除，就保留该值。
-    pub(crate) fn refine_guarded_values(&self, target: Sym, values: &mut Vec<Formula>) {
-        if self.transaction_conditions.is_empty() {
-            return;
-        }
+    pub(crate) fn refine_guarded_values(
+        &self,
+        target: Sym,
+        values: &mut Vec<Formula>,
+        in_bounds: impl Fn(&Formula) -> bool,
+    ) {
+        let Some(last_guard) = self.transaction_conditions.last() else { return };
         let Some(prefix) = PathConditions::new(self) else {
             return;
         };
@@ -216,52 +287,25 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let Some(root) = graph.build(&exp) else {
             return;
         };
-        let mut possible = vec![false; values.len()];
-        // 选择条件可以先由枚举值或算术表达式算出。保留本组合已求值的布尔符号，
-        // 返回标签使用同一条件时可直接复用，无需从枚举构造子再次推导。
-        let predicates: Vec<_> = graph
-            .symbols
-            .iter()
-            .filter_map(|(&sym, node)| {
-                let node = node.as_ref()?;
-                self.is_bool(sym).then_some((sym, Rc::as_ptr(node)))
-            })
-            .collect();
-        graph.visit(&root, |mut ast, stack, _, evaluated| {
-            let value = ast.finite_bits().expect("长度候选必须为位向量常量");
-            let Some(index) = values.iter().position(|v| v == &value) else {
-                return true;
-            };
-            if possible[index] {
-                return true;
+        graph.retain_guarded(target, &root, None, values);
+        if values.iter().all(&in_bounds) {
+            return;
+        }
+        // 最近的选择守卫可能比较另一个有限操作数。两者共用输入赋值，
+        // 逐个补算比较操作数，避免把多个独立守卫展开为笛卡尔积。
+        let mut subjects = Vec::new();
+        prefix.comparison_subjects(last_guard, &mut subjects);
+        for subject in subjects {
+            let Exp::Var(sym) = subject else { continue };
+            if *sym == target {
+                continue;
             }
-            let mut projected = HashMap::from([(target, Some(value))]);
-            for &(input, next) in stack {
-                let input = &graph.inputs[input];
-                if let Some(sym) = input.symbol.or(input.guard_symbol) {
-                    projected.insert(sym, Some(input.choices[next - 1].clone()));
-                }
+            let Some(node) = graph.build(subject) else { continue };
+            graph.retain_guarded(target, &root, Some((*sym, &node)), values);
+            if values.iter().all(&in_bounds) {
+                break;
             }
-            for &(sym, node) in &predicates {
-                if let Some(value) = evaluated.get(&node) {
-                    let truth = value.clone().structural_bool().expect("已求值的布尔节点必须为常量");
-                    projected.insert(sym, Some(Exp::Bool(truth)));
-                }
-            }
-            possible[index] = !self.transaction_conditions.iter().rev().any(|guard| {
-                let reduced = guard
-                    .map_var(&mut |sym| {
-                        Ok::<_, std::convert::Infallible>(
-                            self.project_finite_definition(*sym, &prefix, &mut projected).unwrap_or(Exp::Var(*sym)),
-                        )
-                    })
-                    .unwrap();
-                self.translate_exp(&reduced).structural_bool() == Some(false)
-            });
-            !possible.iter().all(|&v| v)
-        });
-        let mut possible = possible.into_iter();
-        values.retain(|_| possible.next().unwrap());
+        }
     }
 
     pub(super) fn combined_values(
@@ -286,7 +330,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             literals.insert(negative.z3_ast, (sym, false));
             negative_atoms.push(negative);
         }
-        graph.visit(&root, |value, stack, assignments, _| {
+        graph.visit(&root, None, |value, stack, assignments, _| {
             let mut projected = HashMap::new();
             let mut anchors = Vec::new();
             let mut values = Vec::new();

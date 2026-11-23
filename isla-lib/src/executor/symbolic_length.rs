@@ -670,7 +670,7 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
         (FiniteDomain::Bounded(mut values), Some(OperandBounds::RequireWithin(range))) => {
             if values.iter().any(|v| !candidate_in_bounds(v, &range)) {
                 let previous = values.len();
-                solver.refine_guarded_values(sym, &mut values);
+                solver.refine_guarded_values(sym, &mut values, |v| candidate_in_bounds(v, &range));
                 restricted = values.len() != previous;
                 pass_bound |= restricted;
             }

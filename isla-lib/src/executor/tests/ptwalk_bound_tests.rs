@@ -360,7 +360,7 @@ fn ones_shift_guard_projection_matches_eager_solver() {
     for guard in [Some(Var(ok)), Some(Not(Box::new(Var(ok)))), None] {
         let tx = solver.start_transaction_with_guard(guard);
         let mut actual = all.clone();
-        solver.refine_guarded_values(width, &mut actual);
+        solver.refine_guarded_values(width, &mut actual, |_| false);
         let expected: Vec<_> = all
             .iter()
             .filter(|v| {

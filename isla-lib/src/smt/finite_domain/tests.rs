@@ -727,3 +727,49 @@ fn finite_domain_operand_bound_is_local_to_the_retry_arm() {
         solver.rollback_transaction(root);
     });
 }
+
+#[test]
+fn zero_extend_width_under_mask_choices_matches_eager_solver() {
+    use Exp::*;
+    configure_tastic(Tactic::Qfaufbv);
+    let mut config = Config::new();
+    config.solver_options.finite_domain_enumeration = true;
+    let context = Context::new(config);
+    let mut solver = Solver::<B64>::new(&context);
+    let loc = SourceLoc::unknown();
+    let short = solver.declare_const(Ty::Bool, loc);
+    let medium = solver.declare_const(Ty::Bool, loc);
+    let deep = solver.declare_const(Ty::Bool, loc);
+    let width = solver.define_const(
+        Ite(
+            Box::new(Var(short)),
+            Box::new(bits64(27, 8)),
+            Box::new(Ite(Box::new(Var(medium)), Box::new(bits64(36, 8)), Box::new(bits64(45, 8)))),
+        ),
+        loc,
+    );
+    // 同一模式决定扩展宽度和初始掩码。掩码还受另一选择条件控制。
+    let base = solver.define_const(Bvsub(Box::new(Var(width)), Box::new(bits64(9, 8))), loc);
+    let mask = solver.define_const(
+        Ite(Box::new(Var(deep)), Box::new(Bvsub(Box::new(Var(base)), Box::new(bits64(9, 8)))), Box::new(Var(base))),
+        loc,
+    );
+    let all: Vec<_> = [27, 36, 45].into_iter().map(|n| bits64(n, 8)).collect();
+    let unknown_mask = solver.declare_bitvector(8, loc);
+    let consumed = [9, 18, 27].map(|n| solver.define_const(equal(mask, n), loc));
+    let chosen = Or(Box::new(Var(consumed[0])), Box::new(Or(Box::new(Var(consumed[1])), Box::new(Var(consumed[2])))));
+    for guard in [Some(not(chosen)), Some(equal(mask, 27)), Some(equal(unknown_mask, 36)), None] {
+        let arm = solver.start_transaction_with_guard(guard.clone());
+        let mut actual = all.clone();
+        let checks = crate::smt::test_query_count();
+        solver.refine_guarded_values(width, &mut actual, |_| false);
+        assert_eq!(crate::smt::test_query_count(), checks);
+        let expected: Vec<_> = all
+            .iter()
+            .filter(|v| solver.check_sat_with(&Eq(Box::new(Var(width)), Box::new((*v).clone())), loc).is_sat().unwrap())
+            .cloned()
+            .collect();
+        assert_eq!(actual, expected, "掩码选择守卫 {guard:?}");
+        solver.rollback_transaction(arm);
+    }
+}
