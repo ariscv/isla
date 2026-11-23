@@ -101,6 +101,8 @@ pub struct PathMergeConfig {
     pub max_merge_depth: Option<i64>,
     /// 区域因局部汇合失败可保留的片段上限；缺省或 -1 不限。
     pub max_fragments: Option<i64>,
+    /// 按当前臂的定义和断言解析符号标量。默认关闭。
+    pub symbolic_scalar_resolver: bool,
     /// 延后推演时，范围证明转为出口待证义务；默认开启。
     pub defer_range_proofs: bool,
     /// 延后推演时，构造子解包标签转为出口待证义务；默认开启。
@@ -153,6 +155,7 @@ impl Default for PathMergeConfig {
             arms_as_tasks: false,
             max_merge_depth: None,
             max_fragments: None,
+            symbolic_scalar_resolver: false,
             defer_range_proofs: true,
             defer_ctor_checks: true,
             merge_poison_slots: true,

@@ -764,7 +764,7 @@ fn zero_extend_width_under_mask_choices_matches_eager_solver() {
         let arm = solver.start_transaction_with_guard(guard.clone());
         let mut actual = all.clone();
         let checks = crate::smt::test_query_count();
-        solver.refine_guarded_values(width, &mut actual, |_| false);
+        solver.refine_guarded_values(width, &mut actual, |_| false, true);
         assert_eq!(crate::smt::test_query_count(), checks);
         let expected: Vec<_> = all
             .iter()
@@ -851,4 +851,468 @@ fn joint_nested_anchors_match_reference_across_partial_assignments() {
     let mut new = Vec::new();
     s.combined_values(&prefix, &size, |v, c| collect(&mut new, v, c)).unwrap();
     assert_eq!(new, old);
+}
+
+fn resolver_test(name: &str) -> bool {
+    resolver_test_options(name, crate::config::RegionOptions { symbolic_scalar_resolver: true, ..Default::default() })
+}
+
+fn resolver_test_options(name: &str, options: crate::config::RegionOptions) -> bool {
+    let full = format!("smt::finite_domain::tests::{name}");
+    if !std::env::args().any(|arg| arg == "--exact") || !std::env::args().any(|arg| arg == full) {
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &full, "--nocapture"])
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+        return false;
+    }
+    options.configure();
+    true
+}
+
+fn guarded_width(solver: &mut Solver<B64>, ty_width: u32, yes: u64, no: u64) -> (Sym, Sym) {
+    let site = SourceLoc::unknown();
+    let level = solver.declare_const(Ty::Bool, site);
+    let input = solver.define_const(
+        Exp::Ite(Box::new(Exp::Var(level)), Box::new(bits64(yes, ty_width)), Box::new(bits64(no, ty_width))),
+        site,
+    );
+    let width = solver.define_const(Exp::Bvmul(Box::new(Exp::Var(input)), Box::new(bits64(3, ty_width))), site);
+    (level, width)
+}
+
+#[test]
+fn scalar_resolver_arm_scope() {
+    if !resolver_test("scalar_resolver_arm_scope") {
+        return;
+    }
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let loc = SourceLoc::unknown();
+    let next = SourceLoc::new(2, 8, 0, 8, 1);
+    let (level, width) = guarded_width(&mut solver, 8, 3, 253);
+    let nested = solver.declare_const(Ty::Bool, loc);
+    solver.with_deferred_region_queries(|s| {
+        let parent = s.start_transaction();
+        let valid = s.start_transaction_with_guard(Some(Exp::Var(level)));
+        s.set_operand_bound(width, loc, vec![bits64(9, 8)]);
+        let inner = s.start_transaction_with_guard(Some(Exp::Var(nested)));
+        assert_eq!(s.operand_bound(width, next), Some(FiniteDomain::Bounded(vec![bits64(9, 8)])));
+        s.rollback_transaction(inner);
+        s.rollback_transaction(valid);
+        assert!(s.operand_bound(width, next).is_none());
+        s.start_transaction_with_guard(Some(not(Exp::Var(level))));
+        s.commit_dead_transaction();
+        assert!(s.check_candidate_sat_with(&equal(width, 247), loc).is_some_and(|r| r != SmtResult::Sat));
+        s.rollback_transaction(parent);
+    });
+    assert!(solver.check_sat_with(&equal(width, 247), loc).is_sat().unwrap());
+}
+
+#[test]
+fn scalar_resolver_keeps_translated_assertions_on_guard_switch() {
+    if !resolver_test("scalar_resolver_keeps_translated_assertions_on_guard_switch") {
+        return;
+    }
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut s = Solver::<B64>::new(&ctx);
+    let loc = SourceLoc::unknown();
+    let x = s.declare_bitvector(8, loc);
+    let flag = s.declare_const(Ty::Bool, loc);
+    s.assert(Exp::Or(Box::new(equal(x, 1)), Box::new(equal(x, 2))));
+    values(&s, x, &[1, 2]);
+    let parent = s.start_transaction();
+    for g in [Exp::Var(flag), not(Exp::Var(flag))] {
+        let child = s.start_transaction_with_guard(Some(g));
+        PROJECT_TRANSLATIONS.set(0);
+        values(&s, x, &[1, 2]);
+        assert_eq!(PROJECT_TRANSLATIONS.get(), 1, "子臂只翻译新守卫");
+        s.rollback_transaction(child);
+    }
+    s.rollback_transaction(parent);
+}
+
+#[test]
+fn scalar_resolver_consumers_share_guarded_length() {
+    if !resolver_test("scalar_resolver_consumers_share_guarded_length") {
+        return;
+    }
+    use crate::ir::Val;
+    use crate::primop::{binary_primops, unary_primops};
+    use Exp::*;
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut s = Solver::<B64>::new(&ctx);
+    let loc = SourceLoc::unknown();
+    let (level, width) = guarded_width(&mut s, 128, 3, 1);
+    let other = s.declare_const(Ty::Bool, loc);
+    let unary = unary_primops();
+    let binary = binary_primops();
+    s.assert(Var(level));
+    // 移位原语允许保留符号量，用模型核对结果与具体移位完全一致。
+    for op in ["shiftl", "shiftr", "arith_shiftr"] {
+        let bits = Val::Bits(B64::ones(12));
+        let result = binary[op](bits.clone(), Val::Symbolic(width), &mut s, loc).unwrap();
+        let expected = binary[op](bits, Val::I128(9), &mut s, loc).unwrap();
+        let unequal = Neq(
+            Box::new(crate::primop_util::smt_value(&result, loc).unwrap()),
+            Box::new(crate::primop_util::smt_value(&expected, loc).unwrap()),
+        );
+        assert!(s.check_sat_with(&unequal, loc).is_unsat().unwrap(), "{op}");
+    }
+    s.with_deferred_region_queries(|s| {
+        let child = s.start_transaction_with_guard(Some(Var(other)));
+        for name in [
+            "zeros",
+            "ones",
+            "undefined_bitvector",
+            "zero_extend",
+            "sign_extend",
+            "replicate_bits",
+            "sail_truncate",
+            "sail_truncateLSB",
+            "pow_int",
+            "string_take",
+            "string_drop",
+            "vector_access",
+            "vector_init",
+            "undefined_vector",
+            "subrange_internal",
+            "%i->%i64",
+        ] {
+            PROJECT_TRANSLATIONS.set(0);
+            let mut call = |arg| match name {
+                "zeros" | "ones" | "undefined_bitvector" => unary[name](arg, s, loc),
+                "string_take" | "string_drop" => binary[name](Val::String("abcdefghijk".into()), arg, s, loc),
+                "vector_init" | "undefined_vector" => binary[name](arg, Val::Unit, s, loc),
+                "subrange_internal" => {
+                    crate::primop::subrange_internal(Val::Bits(B64::ones(12)), arg, Val::I128(2), s, loc)
+                }
+                "%i->%i64" => unary[name](arg, s, loc),
+                "vector_access" => {
+                    binary[name](Val::Vector((0..12).map(|i| Val::String(i.to_string())).collect()), arg, s, loc)
+                }
+                "pow_int" => binary[name](Val::I128(2), arg, s, loc),
+                "sail_truncate" | "sail_truncateLSB" => binary[name](Val::Bits(B64::ones(12)), arg, s, loc),
+                _ => binary[name](Val::Bits(B64::ones(3)), arg, s, loc),
+            };
+            let actual = call(Val::Symbolic(width)).unwrap();
+            let expected = call(Val::I128(9)).unwrap();
+            if name == "undefined_bitvector" {
+                assert_eq!(crate::primop_util::length_bits(&actual, s, loc).unwrap(), 9);
+            } else if let Val::Symbolic(sym) = actual {
+                let result = crate::primop::proven_symbolic_i128(sym, s, loc).unwrap().unwrap();
+                assert_eq!(expected, Val::I64(result.try_into().unwrap()), "{name}");
+            } else {
+                assert_eq!(actual, expected, "{name}");
+            }
+            assert_eq!(PROJECT_TRANSLATIONS.get(), 0, "{name} 的长度已由本臂唯一确定");
+        }
+        s.rollback_transaction(child);
+    });
+}
+
+#[test]
+fn scalar_resolver_matches_eager_values_and_reachability() {
+    if !resolver_test("scalar_resolver_matches_eager_values_and_reachability") {
+        return;
+    }
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let site = SourceLoc::unknown();
+    let (level, width) = guarded_width(&mut solver, 8, 3, 253);
+    for guard in [None, Some(true), Some(false)] {
+        let point = solver.start_transaction();
+        if let Some(positive) = guard {
+            solver.assert(if positive { Exp::Var(level) } else { not(Exp::Var(level)) });
+        }
+        let values = |domain| match domain {
+            FiniteDomain::Known(values) | FiniteDomain::Bounded(values) => values,
+            FiniteDomain::Unknown => panic!("有限夹具必须能得到候选"),
+        };
+        let baseline = values(solver.finite_domain(width));
+        let actual = values(solver.resolve_scalar(width, site));
+        assert!(actual.iter().all(|v| baseline.contains(v)));
+        for n in [0, 9, 247] {
+            let reachable = solver.check_sat_with(&equal(width, n), site).is_sat().unwrap();
+            assert_eq!(actual.contains(&bits64(n, 8)), reachable);
+        }
+        solver.rollback_transaction(point);
+    }
+}
+
+#[test]
+fn scalar_resolver_range_obligation_checks_original_read_domain() {
+    if !resolver_test("scalar_resolver_range_obligation_checks_original_read_domain") {
+        return;
+    }
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let site = SourceLoc::unknown();
+    for reachable_bad in [true, false] {
+        let mut s = Solver::<B64>::new(&ctx);
+        let input = s.declare_bitvector(64, site);
+        let level = s.declare_const(Ty::Bool, site);
+        let len =
+            s.define_const(Exp::Ite(Box::new(Exp::Var(level)), Box::new(bits64(4, 64)), Box::new(bits64(0, 64))), site);
+        // 一个独立的非字面量断言使无见证的候选保持 Bounded。
+        s.assert(Exp::Bvult(Box::new(Exp::Var(input)), Box::new(bits64(7, 64))));
+        let root = s.start_transaction();
+        s.with_deferred_region_queries(|s| {
+            if !reachable_bad {
+                s.assert(Exp::Var(level));
+            }
+            let choice = s
+                .resolve_scalar_choice(
+                    len,
+                    Some(OperandBounds::RequireWithin(1..=i128::from(u32::MAX / 8))),
+                    true,
+                    site,
+                )
+                .unwrap();
+            assert_eq!(choice.values, vec![bits64(4, 64)]);
+            if reachable_bad {
+                assert_eq!(s.check_deferred_assertions(site), Some(SmtResult::Sat));
+            } else {
+                assert!(matches!(s.check_deferred_assertions(site), None | Some(SmtResult::Unsat)));
+            }
+        });
+        s.rollback_transaction(root);
+        assert!(s.check_sat_with(&not(Exp::Var(level)), site).is_sat().unwrap());
+    }
+}
+
+#[test]
+fn scalar_resolver_read_checks_all_shift_widths() {
+    if !resolver_test("scalar_resolver_read_checks_all_shift_widths") {
+        return;
+    }
+    use Exp::*;
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let site = SourceLoc::unknown();
+    // 64 位左移的上界包含零与全部二次幂。地址读长只允许前 29 个二次幂。
+    let domain: Vec<_> = std::iter::once(bits64(0, 64)).chain((0..64).map(|n| bits64(1 << n, 64))).collect();
+    let valid: Vec<_> = (0..29).map(|n| bits64(1 << n, 64)).collect();
+    assert_eq!(domain.len() - valid.len(), 36);
+    for guarded in [false, true] {
+        let mut s = Solver::<B64>::new(&ctx);
+        let shift = s.declare_bitvector(64, site);
+        let width = s.define_const(Bvshl(Box::new(bits64(1, 64)), Box::new(Var(shift))), site);
+        let root = s.start_transaction();
+        s.with_deferred_region_queries(|s| {
+            if guarded {
+                s.assert(Bvult(Box::new(Var(shift)), Box::new(bits64(29, 64))));
+            }
+            s.set_operand_bound(width, site, domain.clone());
+            let choice = s
+                .resolve_scalar_choice(
+                    width,
+                    Some(OperandBounds::RequireWithin(1..=i128::from(u32::MAX / 8))),
+                    true,
+                    site,
+                )
+                .unwrap();
+            assert_eq!(choice.values, valid);
+            if !guarded {
+                assert!(choice.requires_checked_replay);
+            }
+            let checked = s.check_deferred_assertions(site);
+            if guarded {
+                assert!(matches!(checked, None | Some(SmtResult::Unsat)));
+            } else {
+                assert_eq!(checked, Some(SmtResult::Sat));
+            }
+        });
+        s.rollback_transaction(root);
+    }
+}
+
+#[test]
+fn scalar_resolver_remapped_arrival_rebuilds_guarded_facts() {
+    if !resolver_test("scalar_resolver_remapped_arrival_rebuilds_guarded_facts") {
+        return;
+    }
+    configure_tastic(Tactic::Qfaufbv);
+    let site = SourceLoc::unknown();
+    let ctx = Context::new(Config::new());
+    let mut main = Solver::<B64>::new(&ctx);
+    let g = main.declare_const(Ty::Bool, site);
+    let point = checkpoint(&mut main);
+    let (remote, suffix, layouts) = std::thread::spawn(move || {
+        let other = Context::new(Config::new());
+        let mut s = Solver::<B64>::from_checkpoint(&other, point);
+        let root = s.start_transaction();
+        let owner = s.new_logical_arm(None);
+        let sym = s.with_logical_arm(owner, |s| {
+            let width =
+                s.define_const(Exp::Ite(Box::new(Exp::Var(g)), Box::new(bits64(247, 8)), Box::new(bits64(9, 8))), site);
+            s.start_transaction_with_guard(Some(Exp::Var(g)));
+            s.commit_dead_transaction();
+            width
+        });
+        let packet = (sym, s.export_arm_suffix(owner).unwrap(), s.export_scalar_layouts(sym.as_u32()));
+        s.rollback_transaction(root);
+        packet
+    })
+    .join()
+    .unwrap();
+    let root = main.start_transaction();
+    let local = main.declare_bitvector(8, site);
+    assert_eq!(local, remote);
+    let target = main.fresh();
+    let remap = SymRemap::from_pairs([(remote, target)]);
+    let suffix: Vec<_> = suffix
+        .into_iter()
+        .map(|item| ArmSuffixEvent {
+            guard: item.guard.as_ref().map(|g| remap.exp(g)),
+            event: remap.event(&item.event),
+            ..item
+        })
+        .collect();
+    let arm = main.new_logical_arm(None);
+    main.import_arm_suffix(arm, suffix);
+    main.import_scalar_layouts(layouts.into_iter().map(|(sym, v)| (remap.get(sym), v)).collect());
+    assert!(
+        matches!(main.resolve_scalar(target,site),FiniteDomain::Known(v)|FiniteDomain::Bounded(v) if v==vec![bits64(9,8)])
+    );
+    assert!(main.check_sat_with(&equal(local, 247), site).is_sat().unwrap());
+    assert!(main.check_sat_with(&equal(target, 247), site).is_unsat().unwrap());
+    main.rollback_transaction(root);
+    assert!(main.check_sat_with(&Exp::Var(g), site).is_sat().unwrap());
+}
+
+#[test]
+fn scalar_resolver_only_records_new_predicates() {
+    if !resolver_test("scalar_resolver_only_records_new_predicates") {
+        return;
+    }
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let site = SourceLoc::unknown();
+    let x = solver.declare_bitvector(8, site);
+    let flags: Vec<_> = (0..4).map(|_| solver.declare_const(Ty::Bool, site)).collect();
+    solver.assert(Exp::Var(flags[0]));
+    solver.with_deferred_region_queries(|s| {
+        let p = s.start_transaction_with_guard(Some(Exp::Var(flags[1])));
+        s.resolve_scalar(x, site);
+        super::scalar::PREDICATE_VISITS.set(0);
+        for flag in &flags[2..] {
+            let child = s.start_transaction_with_guard(Some(Exp::Var(*flag)));
+            s.assert(equal(x, 3));
+            assert_eq!(s.resolve_scalar(x, site), FiniteDomain::Bounded(vec![bits64(3, 8)]));
+            s.rollback_transaction(child);
+            assert_eq!(s.resolve_scalar(x, site), FiniteDomain::Unknown);
+        }
+        assert_eq!(super::scalar::PREDICATE_VISITS.get(), 4, "每个子臂各新增一条断言和一个守卫");
+        s.rollback_transaction(p);
+    });
+}
+
+#[test]
+fn scalar_resolver_replays_range_before_assuming_it() {
+    let directory = std::env::temp_dir().join(format!("isla-scalar-range-{}", std::process::id()));
+    let options = crate::config::RegionOptions {
+        symbolic_scalar_resolver: true,
+        obligation_dump_dir: Some(directory.clone()),
+        ..Default::default()
+    };
+    if !resolver_test_options("scalar_resolver_replays_range_before_assuming_it", options) {
+        return;
+    }
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let site = SourceLoc::unknown();
+    std::fs::create_dir(&directory).unwrap();
+    // 两个前缀都有活模型。只有第二个允许零字节请求。
+    for expected in [Z3_L_FALSE, Z3_L_TRUE] {
+        let mut solver = Solver::<B64>::new(&ctx);
+        let length = solver.declare_bitvector(8, site);
+        let root = solver.start_transaction_with_guard(Some(equal(length, if expected == Z3_L_FALSE { 4 } else { 0 })));
+        solver.with_deferred_region_queries(|s| {
+            assert!(s.defer_scalar_range(length, &(1..=8), None, site));
+        });
+        solver.rollback_transaction(root);
+        let paths: Vec<_> = std::fs::read_dir(&directory).unwrap().map(|e| e.unwrap().path()).collect();
+        assert_eq!(paths.len(), 1);
+        let text = std::ffi::CString::new(std::fs::read(&paths[0]).unwrap()).unwrap();
+        let replay = Solver::<B64>::new(&ctx);
+        unsafe {
+            Z3_solver_from_string(ctx.z3_ctx, replay.z3_solver, text.as_ptr());
+            assert_eq!(Z3_solver_check(ctx.z3_ctx, replay.z3_solver), expected);
+        }
+        std::fs::remove_file(&paths[0]).unwrap();
+    }
+    std::fs::remove_dir(directory).unwrap();
+}
+
+#[test]
+fn scalar_resolver_reuses_finite_sets_of_outer_guards() {
+    if !resolver_test("scalar_resolver_reuses_finite_sets_of_outer_guards") {
+        return;
+    }
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut s = Solver::<B64>::new(&ctx);
+    let x = s.declare_bitvector(8, SourceLoc::unknown());
+    let subject = Exp::Var(x);
+    let choices = |a, b| Exp::Or(Box::new(equal(x, a)), Box::new(equal(x, b)));
+    let outer = s.start_transaction_with_guard(Some(choices(2, 3)));
+    assert_eq!(PathConditions::new(&s).unwrap().bounds(&subject), Some(vec![bits64(2, 8), bits64(3, 8)]));
+    for value in [2, 3] {
+        let inner = s.start_transaction_with_guard(Some(choices(value, 7)));
+        assert_eq!(PathConditions::new(&s).unwrap().bounds(&subject), Some(vec![bits64(value, 8)]));
+        s.rollback_transaction(inner);
+        BOUND_NODE_VISITS.set(0);
+        assert_eq!(PathConditions::new(&s).unwrap().bounds(&subject), Some(vec![bits64(2, 8), bits64(3, 8)]));
+        assert_eq!(BOUND_NODE_VISITS.get(), 0, "返回父臂应直接恢复该符号的守卫有限集");
+    }
+    s.rollback_transaction(outer);
+}
+
+#[test]
+fn scalar_resolver_certifies_declared_choice_arm_before_publish() {
+    if !resolver_test("scalar_resolver_certifies_declared_choice_arm_before_publish") {
+        return;
+    }
+    use Exp::*;
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let site = SourceLoc::unknown();
+    for reachable_extra in [true, false] {
+        let mut s = Solver::<B64>::new(&ctx);
+        let flag = s.declare_const(Ty::Bool, site);
+        let typed = s.declare_bitvector(8, site);
+        let shift = s.declare_bitvector(8, site);
+        s.assert(Or(Box::new(equal(typed, 2)), Box::new(equal(typed, 16))));
+        // 另一个值臂含 0、全部单比特值。另一条断言决定其中是否真有额外可达值。
+        if !reachable_extra {
+            s.assert(Or(Box::new(equal(shift, 1)), Box::new(equal(shift, 4))));
+        }
+        let alt = Bvshl(Box::new(bits64(1, 8)), Box::new(Var(shift)));
+        let val = s.define_const(Ite(Box::new(Var(flag)), Box::new(Var(typed)), Box::new(alt)), site);
+        let length = s.define_const(ZeroExtend(8, Box::new(Var(val))), site);
+        let root = s.start_transaction();
+        s.with_deferred_region_queries(|s| {
+            s.set_operand_bound(length, site, [0, 1, 2, 4, 8, 16, 32, 64, 128].map(|v| bits64(v, 16)).into());
+            let choice =
+                s.resolve_scalar_choice(length, Some(OperandBounds::RequireWithin(1..=64)), true, site).unwrap();
+            assert_eq!(choice.values, [bits64(2, 16), bits64(16, 16)]);
+            assert!(!choice.requires_checked_replay);
+            assert_eq!(
+                s.check_deferred_assertions(site),
+                Some(if reachable_extra { SmtResult::Sat } else { SmtResult::Unsat })
+            );
+        });
+        s.rollback_transaction(root);
+        assert_eq!(
+            s.check_sat_with(&Eq(Box::new(Var(length)), Box::new(bits64(32, 16))), site).is_sat().unwrap(),
+            reachable_extra
+        );
+    }
 }

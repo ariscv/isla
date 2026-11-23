@@ -280,6 +280,7 @@ pub(crate) struct RemoteArrival<'ir, B> {
     pub(crate) arm: ArmPath,
     pub(crate) symbols: std::ops::Range<u32>,
     pub(crate) suffix: Vec<ArmSuffixEvent<B>>,
+    pub(crate) scalar_layouts: Vec<(Sym, crate::smt::ScalarLayout)>,
     pub(crate) deferred: Option<DeferredArmAssertions>,
     pub(crate) frame: LocalFrame<'ir, B>,
 }
@@ -290,6 +291,9 @@ impl<'ir, B: BV> RemoteArrival<'ir, B> {
             self.suffix.iter().all(|item| !matches!(item.event, Event::WriteMem { .. })),
             "首版远端臂不得移交已写入且不可重命名的 Memory"
         );
+        for (sym, _) in &mut self.scalar_layouts {
+            *sym = remap.get(*sym);
+        }
         for item in &mut self.suffix {
             item.guard = item.guard.as_ref().map(|guard| remap.exp(guard));
             item.event = remap.event(&item.event);

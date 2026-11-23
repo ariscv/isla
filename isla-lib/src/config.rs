@@ -2886,6 +2886,7 @@ obligation_dump_dir = "obligations"
             RegionOptions {
                 bv_rewrite: Default::default(),
                 max_merge_depth: None,
+                symbolic_scalar_resolver: false,
                 defer_range_proofs: true,
                 defer_ctor_checks: true,
                 prune_constant_branches: true,

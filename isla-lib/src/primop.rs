@@ -431,16 +431,10 @@ pub(crate) fn integer_conversion_in_range<B: BV>(
     let value = replace_mixed_bits(value.clone(), solver, info)?;
     let Val::Symbolic(sym) = value else { return Ok(None) };
     let Some(width) = solver.length(sym) else { return Ok(None) };
-    if narrow && width == 128 && solver.is_widened_i64(sym) {
+    if narrow && width == 128 && solver.scalar_fits_i64(sym) {
         return Ok(None);
     }
-    if narrow
-        && matches!(solver.finite_domain(sym), crate::smt::FiniteDomain::Known(values) if values.iter().all(|value| match value {
-            Exp::Bits64(_) => true,
-            Exp::Bits(bits) => i128_from_model_bits(bits).is_some_and(|value| i64::try_from(value).is_ok()),
-            _ => unreachable!("精确有限域必须只包含位向量常量"),
-        }))
-    {
+    if narrow && solver.scalar_domain_within_i64(sym, info) {
         // `%i` 到 `%i64` 的窄化前先检查可表示性。精确有限域的每个值都能放入 i64 时，
         // 该检查已由结构化枚举证明，不能在延后区域退回到通用求解器。
         solver.note_finite_domain_use("finite_domain_i128_to_i64", info);
@@ -448,7 +442,7 @@ pub(crate) fn integer_conversion_in_range<B: BV>(
     }
     let range = if narrow {
         assert_eq!(width, 128, "整数窄化的输入必须是 128 位");
-        if solver.structural_fits_i64(sym) {
+        if !crate::config::RegionOptions::current().symbolic_scalar_resolver && solver.structural_fits_i64(sym) {
             return Ok(None);
         }
         Exp::Eq(
@@ -1375,7 +1369,7 @@ pub(crate) fn proven_symbolic_i128<B: BV>(
 ) -> Result<Option<i128>, ExecError> {
     let Some(width) = solver.length(sym) else { return Ok(None) };
     use crate::smt::FiniteDomain;
-    let domain = solver.operand_bound(sym, info).unwrap_or_else(|| solver.finite_domain(sym));
+    let domain = solver.resolve_scalar(sym, info);
     match &domain {
         FiniteDomain::Known(values) | FiniteDomain::Bounded(values) if values.len() == 1 => {
             if matches!(&domain, FiniteDomain::Bounded(_)) && !solver.region_queries_deferred() {
@@ -1402,7 +1396,10 @@ pub(crate) fn proven_symbolic_i128<B: BV>(
     if solver.no_smt() {
         return Ok(solver.structural_i128(sym));
     }
-    if solver.region_queries_deferred() && matches!(domain, FiniteDomain::Bounded(_)) {
+    if solver.region_queries_deferred()
+        && (crate::config::RegionOptions::current().symbolic_scalar_resolver
+            || matches!(domain, FiniteDomain::Bounded(_)))
+    {
         // 多值上界不能证明唯一，延后区域也无法取模型。把原符号交给消费者按守卫重试。
         return Ok(None);
     }
@@ -1799,8 +1796,8 @@ pub fn subrange_internal<B: BV>(
     // 同一有限域输入派生的两个端点可能各自只有保守的 Bounded 集合；分别用模型法
     // 具体化会在延后区域制造强制查询。保留相关性，随后由 high - low + 1 联合推导长度。
     let preserve_correlated_bounded_endpoints = solver.region_queries_deferred()
-        && matches!(&high, Val::Symbolic(sym) if matches!(solver.finite_domain(*sym), FiniteDomain::Bounded(values) if values.len() > 1))
-        && matches!(&low, Val::Symbolic(sym) if matches!(solver.finite_domain(*sym), FiniteDomain::Bounded(values) if values.len() > 1));
+        && matches!(&high, Val::Symbolic(sym) if matches!(solver.resolve_scalar(*sym, info), FiniteDomain::Bounded(values) if values.len() > 1))
+        && matches!(&low, Val::Symbolic(sym) if matches!(solver.resolve_scalar(*sym, info), FiniteDomain::Bounded(values) if values.len() > 1));
     let high = if preserve_correlated_bounded_endpoints { high } else { concretize_proven_i128(high, solver, info)? };
     let low = if preserve_correlated_bounded_endpoints { low } else { concretize_proven_i128(low, solver, info)? };
     let symbolic_width = match (&high, &low) {
@@ -1809,7 +1806,7 @@ pub fn subrange_internal<B: BV>(
     };
     let finite_width = if preserve_correlated_bounded_endpoints {
         let width = symbolic_width.expect("相关端点必须有符号切片长度");
-        match solver.finite_domain(width) {
+        match solver.resolve_scalar(width, info) {
             FiniteDomain::Known(values) | FiniteDomain::Bounded(values) if values.len() == 1 => {
                 Some(concretize_proven_i128(Val::Symbolic(width), solver, info)?)
             }
@@ -1827,7 +1824,7 @@ pub fn subrange_internal<B: BV>(
         let source_width = length_bits(&bits, solver, info)?;
         let high = smt_value(&high, info)?;
         let low = smt_value(&low, info)?;
-        let finite_candidates_satisfy = |sym, predicate: &dyn Fn(i128) -> bool| match solver.finite_domain(sym) {
+        let finite_candidates_satisfy = |sym, predicate: &dyn Fn(i128) -> bool| match solver.resolve_scalar(sym, info) {
             FiniteDomain::Known(values) | FiniteDomain::Bounded(values) if !values.is_empty() => {
                 values.iter().all(|value| {
                     let value = match value {
@@ -4848,7 +4845,13 @@ fn read_mem_byte_count<B: BV>(
             location: info,
         });
     }
-    Ok(i128::try_from(concrete_len(value, operation, info)?).unwrap())
+    let bytes = i128::try_from(concrete_len(value, operation, info)?).unwrap();
+    if crate::config::RegionOptions::current().symbolic_scalar_resolver
+        && !(1..=i128::from(u32::MAX / 8)).contains(&bytes)
+    {
+        return Err(ExecError::Overflow);
+    }
+    Ok(bytes)
 }
 
 fn read_mem<B: BV>(

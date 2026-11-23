@@ -5221,23 +5221,25 @@ fn merge_diagnostics_execution_is_observational() {
         Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
         Instr::End,
     ];
-    let run_nested = |limits| {
+    let run_nested = |initial, limits| {
         paths_with_state(nested.clone(), &shared, 2, limits, crate::memory::Memory::new(), |frame| {
-            frame.vars_mut().insert(slot, UVal::Uninit(&Ty::I64));
+            frame.vars_mut().insert(slot, initial);
             frame.vars_mut().insert(RETURN, UVal::Init(Val::Bool(false)));
         })
     };
-    diag::configure("off").unwrap();
-    let ordinary = run_nested(limits.clone().with_path_merging(false));
-    let without_diagnostics = run_nested(limits.clone());
-    diag::configure("detail").unwrap();
-    let result = run_nested(limits.clone());
-    let diagnostics = diag::summary_for_test();
-    assert!(diagnostics["differences"]["local_join_rejected"].as_u64().unwrap_or(0) > 0);
-    assert_eq!(diagnostics["propagated"], 0, "局部拒绝不应记作祖先的传播原因");
-    // 内层汇合被局部拒绝后，两个片段的槽值在返回处已死、出口状态等价，外层汇合按最少路径数合成一条。
-    assert_eq!(equivalent_paths(&ordinary, &result, 2, true), (3, 1));
-    assert_eq!(equivalent_paths(&without_diagnostics, &result, 2, true), (1, 1));
+    // 内层的 0 和 1 不能直接汇合。外层的未初始化 I64 可提供符号值，具体的 0 只能与 0 汇合。
+    for (initial, expected) in [(UVal::Uninit(&Ty::I64), 1), (UVal::Init(Val::I64(0)), 2)] {
+        diag::configure("off").unwrap();
+        let ordinary = run_nested(initial.clone(), limits.clone().with_path_merging(false));
+        let without_diagnostics = run_nested(initial.clone(), limits.clone());
+        diag::configure("detail").unwrap();
+        let result = run_nested(initial, limits.clone());
+        let diagnostics = diag::summary_for_test();
+        assert!(diagnostics["differences"]["local_join_rejected"].as_u64().unwrap_or(0) > 0);
+        assert_eq!(diagnostics["propagated"], 0, "局部拒绝不应记作祖先的传播原因");
+        assert_eq!(equivalent_paths(&ordinary, &result, 2, true), (3, expected));
+        assert_eq!(equivalent_paths(&without_diagnostics, &result, 2, true), (expected, expected));
+    }
     diag::configure("detail").unwrap();
     shared.function_regions.lock().unwrap().clear();
     shared.registers.insert(slot, Ty::I64);

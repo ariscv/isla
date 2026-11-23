@@ -821,6 +821,8 @@ witness_eval = true
 
 精确有限域识别默认开启，只在长度、索引等消费者需要具体值时枚举。已确认的候选可以直接复用，有穷上界内的每个候选仍受完整路径约束。结构层不能确定上界时，有 SMT 的执行沿用模型枚举，无 SMT 的执行报告缺少具体值。候选数量没有隐式上限。可用 `--finite-domain-enumeration=false` 或在 `[execution_limits.path_merge]` 设置 `finite_domain_enumeration = false` 关闭。旧字段 `finite_domain_max` 会产生配置错误。
 
+在 `[execution_limits.path_merge]` 中，`symbolic_scalar_resolver = true` 启用符号标量具体化，延后区域的读长范围可交给出口证明。`partial_commit_prefix = true` 配合相应的原因类别开关，可在任意层保留已认证的子合并，从拒绝指令继续执行。两个开关独立，默认均关闭。[前缀固化配置](specs/isarch-cli.md#探索路径的限时与求解失败) · [标量具体化配置](specs/isarch-cli.md#区域合并具体值)
+
 Jump 的条件恒值折叠默认开启，可用 `--prune-constant-branches=false` 或在 `[execution_limits.path_merge]` 设置 `prune_constant_branches = false` 关闭。求值后，执行器先用表达式结构和已启用的有限域前缀识别恒真／恒假，再作分支限制决策。能判定时只执行可达侧，未知时沿用原规则。不查询 SMT、不取模型，也不重复求值 IR；普通执行、defer、跳过分支检查及无 SMT 均适用。启用执行统计时，`folded_true_conditions`／`folded_false_conditions` 记录包括回滚尝试在内的折叠次数。
 
 区域合并默认在实际到达时检查普通被调函数的传递 `SpeculativeRejectReason::StateEffect`。直接原语仍在执行前检查，`SpeculativeRejectReason::CalleeStateWrite` 和未实现 extern 仍拒绝。可用 `--defer-call-effect-checks=false` 或在 `[execution_limits.path_merge]` 设置 `defer_call_effect_checks = false` 关闭。

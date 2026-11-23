@@ -58,9 +58,16 @@ pub(super) fn advance_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized
     info: SourceLoc,
 ) -> Result<Option<bool>, ExecError> {
     let resuming = prefix_resume::active(arm);
-    let mut run =
-        |solver: &mut Solver<B>| run_loop(tid, task_id, fraction, timeout, stop, sink, arm, state, shared, solver);
-    let result = if resuming { solver.with_region_resume_queries(run) } else { run(solver) };
+    let mut advance = |solver: &mut Solver<B>| {
+        let mut run = || run_loop(tid, task_id, fraction, timeout, stop, sink, arm, state, shared, solver);
+        // 标量消费者可递归进入下一区域，为原语和求解器调用预留栈空间。
+        if crate::config::RegionOptions::current().symbolic_scalar_resolver {
+            stacker::maybe_grow(1024 * 1024, 8 * 1024 * 1024, run)
+        } else {
+            run()
+        }
+    };
+    let result = if resuming { solver.with_region_resume_queries(advance) } else { advance(solver) };
     if let Err(error) = &result {
         let assertion = matches!(error, ExecError::AssertionFailure(..));
         let keep_error = ((consumer || crate::config::RegionOptions::current().arm_error_leaf)

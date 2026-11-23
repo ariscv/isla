@@ -313,6 +313,28 @@ fn assertion_inputs(inputs: &[Input], facts: &[(&Formula, Ast)]) -> Vec<u128> {
         .collect()
 }
 
+fn source_uses_input<B: BV>(exp: &Formula, prefix: &PathConditions<'_, B>, memo: &mut HashMap<Sym, bool>) -> bool {
+    let roots = exp.variables();
+    let mut pending: Vec<_> = roots.iter().copied().map(|sym| (sym, false)).collect();
+    while let Some((sym, expanded)) = pending.pop() {
+        if memo.contains_key(&sym) {
+            continue;
+        }
+        let Some(def) = prefix.definition(sym) else {
+            memo.insert(sym, false);
+            continue;
+        };
+        let children = def.variables();
+        if expanded {
+            memo.insert(sym, children.iter().any(|c| memo[c]));
+        } else {
+            pending.push((sym, true));
+            pending.extend(children.into_iter().filter(|c| !memo.contains_key(c)).map(|c| (c, false)));
+        }
+    }
+    roots.iter().any(|sym| memo[sym])
+}
+
 impl<'ctx, B: BV> Solver<'ctx, B> {
     /// 按产生目标值的输入重算活动守卫。只要一组赋值尚未被排除，就保留该值。
     pub(crate) fn refine_guarded_values(
@@ -320,6 +342,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         target: Sym,
         values: &mut Vec<Formula>,
         in_bounds: impl Fn(&Formula) -> bool,
+        expand_outer_operands: bool,
     ) {
         let Some(last_guard) = self.transaction_conditions.last() else { return };
         let Some(prefix) = PathConditions::new(self) else {
@@ -343,10 +366,19 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         // 最近的选择守卫可能比较另一个有限操作数。两者共用输入赋值，
         // 逐个补算比较操作数，避免把多个独立守卫展开为笛卡尔积。
         let mut subjects = Vec::new();
-        prefix.comparison_subjects(last_guard, &mut subjects);
+        // retain_guarded 已检查全部活动守卫。若剩余越界值可交给出口证明，
+        // 保留原重试臂的比较剪枝，避免为外层其它操作数展开第二组联合枚举。
+        if expand_outer_operands && super::scalar::enabled() {
+            for guard in self.transaction_conditions.iter().rev() {
+                prefix.comparison_subjects(guard, &mut subjects);
+            }
+        } else {
+            prefix.comparison_subjects(last_guard, &mut subjects);
+        }
+        let mut visited = HashSet::new();
         for subject in subjects {
             let Exp::Var(sym) = subject else { continue };
-            if *sym == target {
+            if *sym == target || !visited.insert(*sym) {
                 continue;
             }
             let Some(node) = graph.build(subject) else { continue };
@@ -369,8 +401,38 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         if graph.inputs.is_empty() {
             return None;
         }
-        let facts: Vec<_> = prefix.assertions().map(|exp| (exp, self.translate_exp(exp))).collect();
+        let stage1 = super::scalar::enabled();
+        let facts: Vec<_> = if stage1 {
+            let mut cache = prefix.index.projection.borrow_mut();
+            prefix.translate_projection_suffix(self, &mut cache);
+            prefix
+                .assertions()
+                .zip(cache.assertions.iter().rev().chain(&cache.guards))
+                .map(|(exp, key)| (exp, prefix.index.asts.get(*key)))
+                .collect()
+        } else {
+            prefix.assertions().map(|exp| (exp, self.translate_exp(exp))).collect()
+        };
         let dependencies = assertion_inputs(&graph.inputs, &facts);
+        // 原始定义也可能含有被 Z3 化简消去的锚点，须同时检查两个表达式图。
+        let mut source_dependencies = HashMap::new();
+        for input in &graph.inputs {
+            if let Some(sym) = input.symbol {
+                source_dependencies.insert(sym, true);
+            }
+        }
+        let mut relevant_facts = Vec::new();
+        for ((exp, ast), mask) in facts.iter().zip(dependencies) {
+            let depends = !stage1 || mask != 0 || source_uses_input(exp, prefix, &mut source_dependencies);
+            if !depends {
+                match prefix.index.rewrites.simplified(ast.clone()).0 {
+                    Some(true) => continue,
+                    Some(false) => return Some(()),
+                    None => (),
+                }
+            }
+            relevant_facts.push((*exp, ast, mask, depends));
+        }
         let mut negative_atoms = Vec::new();
         let mut literals = HashMap::new();
         for sym in prefix.bool_symbols() {
@@ -418,9 +480,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             let mut exact = true;
             let mut reuse_witness = self.has_stashed_model() && bindings.is_empty();
             let mut possible = true;
-            let assertions = facts.iter().zip(&dependencies).map(|((exp, ast), mask)| (Some((*exp, *mask)), ast));
+            let assertions =
+                relevant_facts.iter().map(|(exp, ast, mask, depends)| (Some((*exp, *mask, *depends)), *ast));
             for (source, original) in assertions.chain(bindings.iter().map(|ast| (None, ast))) {
-                let relevant = if let Some((_, mask)) = source {
+                let relevant = if let Some((_, mask, _)) = source {
                     local_replacements
                         .entry(mask)
                         .or_insert_with(|| {
@@ -438,7 +501,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 let (unchanged, truth, mut fact) = rewrites.narrow(relevant, original);
                 reuse_witness &= unchanged;
                 if truth.is_none() {
-                    if let Some((source, _)) = source.filter(|_| !projected.is_empty()) {
+                    if let Some((source, _, _)) = source.filter(|(_, _, depends)| *depends && !projected.is_empty()) {
                         let mut changed = false;
                         let substituted = source
                             .map_var(&mut |sym| {
