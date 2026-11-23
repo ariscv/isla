@@ -254,7 +254,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             self.transaction_condition_scopes.push(if lazy { Some(condition) } else { None });
             self.transaction_conditions.push(self.savepoints.last().unwrap().guard.clone().unwrap());
             if let Some(prefix) = &mut self.finite_prefix {
-                prefix.guards_changed();
+                prefix.guards_changed(self.transaction_conditions.len());
             }
         }
         token
@@ -325,7 +325,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
         restore_path_smt_stats(savepoint.smt_stats);
         if let Some(prefix) = &mut self.finite_prefix {
-            prefix.guards_changed();
+            prefix.guards_changed(self.transaction_conditions.len());
             prefix.remove_suffix(BUFFERED, &self.transaction_events, savepoint.events_len);
         }
         self.invalidate_error_snapshot(savepoint.events_len);
@@ -386,7 +386,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.transaction_condition_scopes.push(deferred_ast);
         self.transaction_conditions.push(condition.clone());
         if let Some(prefix) = &mut self.finite_prefix {
-            prefix.guards_changed();
+            prefix.guards_changed(self.transaction_conditions.len());
         }
         let depth = self.transaction_depth();
         let events_len = self.transaction_events.len();
@@ -412,7 +412,6 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let unchanged = self.knowledge.constraints == saved.constraints;
         self.knowledge.sat = unchanged && (self.knowledge.sat || saved.sat);
         self.knowledge.change();
-        self.guard_transaction_events(events_len, condition);
         if self.transaction_condition_scopes.pop().expect("条件作用域必须对齐").is_none() {
             unsafe {
                 let native_scope = crate::executor::stats::region_cost::Scope::enter(
@@ -423,6 +422,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             }
         }
         self.transaction_conditions.pop().unwrap();
+        self.guard_transaction_events(events_len, condition);
         self.clear_stashed_model();
         self.last_check_sat = false;
         if unchanged && balanced && result.is_ok() {
@@ -809,7 +809,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     fn guard_transaction_events(&mut self, start: usize, guard: &Exp<Sym>) {
         self.invalidate_error_snapshot(start);
         if let Some(prefix) = &mut self.finite_prefix {
-            prefix.invalidate_candidates();
+            prefix.guarded_suffix(start, self.transaction_conditions.len());
         }
         let cost_scope =
             crate::executor::stats::region_cost::Scope::enter(crate::executor::stats::region_cost::Category::Guard);

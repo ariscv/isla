@@ -5,9 +5,11 @@ mod arithmetic;
 mod prefix_index;
 mod projection;
 mod rewrites;
+mod scalar;
 use prefix_index::{BranchCandidates, Candidate, PathConditions, ProjectionCache};
 pub(super) use prefix_index::{PrefixIndex, BUFFERED};
 use projection::{AnchorProjection, ProjectedFact};
+pub(crate) use scalar::{OperandBounds, ScalarChoice, ScalarLayout};
 
 #[derive(Clone)]
 #[cfg_attr(test, derive(Debug, PartialEq))]
@@ -129,56 +131,87 @@ fn bound<B: BV>(
     negated: bool,
     memo: &mut HashMap<(Sym, bool), Bound>,
 ) -> Bound {
-    let symbol = if let Exp::Var(sym) = exp { Some(*sym) } else { None };
-    if let Some(cached) = symbol.and_then(|sym| memo.get(&(sym, negated))) {
-        return cached.clone();
-    }
     use Exp::*;
-    #[cfg(test)]
-    BOUND_NODE_VISITS.set(BOUND_NODE_VISITS.get() + 1);
-    let mut visit = |child, negated| bound(child, target, prefix, negated, memo);
-    let exp = resolve(exp, prefix);
-    let result = match exp {
-        Eq(lhs, rhs) | Neq(lhs, rhs) if matches!(exp, Eq(..)) != negated => {
-            let (lhs, rhs) = (resolve(lhs, prefix), resolve(rhs, prefix));
-            let value = if lhs == target {
-                constant(rhs)
-            } else if rhs == target {
-                constant(lhs)
-            } else {
-                masked_slice(target, lhs, rhs, prefix).or_else(|| masked_slice(target, rhs, lhs, prefix))
-            };
-            value.map(|value| vec![value])
-        }
-        Not(inner) => visit(inner, !negated),
-        And(lhs, rhs) | Or(lhs, rhs) => {
-            let left = visit(lhs, negated);
-            if matches!(exp, And(..)) != negated {
-                if left.as_ref().is_some_and(Vec::is_empty) {
-                    left
-                } else {
-                    intersect(left, visit(rhs, negated))
+    // 调用栈只随 Rust 函数调用增长；守卫定义可以任意深，故把待完成的运算保存在堆上。
+    #[derive(Clone, Copy)]
+    enum Input<'a> {
+        Predicate(&'a Exp<Sym>, bool),
+        Arm { guard: &'a Exp<Sym>, inverted: bool, value: &'a Exp<Sym>, negated: bool },
+    }
+    enum Step<'a> {
+        Visit(Input<'a>),
+        Cache(Sym, bool),
+        Then { intersection: bool, right: Input<'a> },
+        Combine { intersection: bool, left: Bound },
+    }
+    use Input::*;
+    use Step::*;
+
+    let mut steps = vec![Visit(Predicate(exp, negated))];
+    let mut result = None;
+    while let Some(step) = steps.pop() {
+        match step {
+            Visit(Predicate(exp, negated)) => {
+                if let Var(sym) = exp {
+                    if let Some(cached) = memo.get(&(*sym, negated)) {
+                        result = cached.clone();
+                        continue;
+                    }
+                    steps.push(Cache(*sym, negated));
                 }
-            } else {
-                left.and_then(|values| union(Some(values), visit(rhs, negated)))
+                #[cfg(test)]
+                BOUND_NODE_VISITS.set(BOUND_NODE_VISITS.get() + 1);
+                let exp = resolve(exp, prefix);
+                match exp {
+                    Eq(lhs, rhs) | Neq(lhs, rhs) if matches!(exp, Eq(..)) != negated => {
+                        let (lhs, rhs) = (resolve(lhs, prefix), resolve(rhs, prefix));
+                        let value = if lhs == target {
+                            constant(rhs)
+                        } else if rhs == target {
+                            constant(lhs)
+                        } else {
+                            masked_slice(target, lhs, rhs, prefix).or_else(|| masked_slice(target, rhs, lhs, prefix))
+                        };
+                        result = value.map(|value| vec![value]);
+                    }
+                    Not(inner) => steps.push(Visit(Predicate(inner, !negated))),
+                    And(lhs, rhs) | Or(lhs, rhs) => {
+                        steps.push(Then {
+                            intersection: matches!(exp, And(..)) != negated,
+                            right: Predicate(rhs, negated),
+                        });
+                        steps.push(Visit(Predicate(lhs, negated)));
+                    }
+                    Ite(guard, yes, no) => {
+                        steps.push(Then {
+                            intersection: false,
+                            right: Arm { guard, inverted: true, value: no, negated },
+                        });
+                        steps.push(Visit(Arm { guard, inverted: false, value: yes, negated }));
+                    }
+                    Bool(value) if *value == negated => result = Some(Vec::new()),
+                    _ => result = None,
+                }
+            }
+            Visit(Arm { guard, inverted, value, negated }) => {
+                steps.push(Then { intersection: true, right: Predicate(value, negated) });
+                steps.push(Visit(Predicate(guard, inverted)));
+            }
+            Cache(sym, negated) => {
+                memo.insert((sym, negated), result.clone());
+            }
+            Then { intersection, right } => {
+                // 空集与任意域的交仍为空集，未知上界与任意域的并仍未知。
+                if (intersection && result.as_ref().is_some_and(Vec::is_empty)) || (!intersection && result.is_none()) {
+                    continue;
+                }
+                steps.push(Combine { intersection, left: result.take() });
+                steps.push(Visit(right));
+            }
+            Combine { intersection, left } => {
+                result = if intersection { intersect(left, result) } else { union(left, result) };
             }
         }
-        Ite(condition, yes, no) => {
-            let mut arm = |inverted, value| {
-                let guard = visit(condition, inverted);
-                if guard.as_ref().is_some_and(Vec::is_empty) {
-                    guard
-                } else {
-                    intersect(guard, visit(value, negated))
-                }
-            };
-            arm(false, yes).and_then(|values| union(Some(values), arm(true, no)))
-        }
-        Bool(value) if *value == negated => Some(Vec::new()),
-        _ => None,
-    };
-    if let Some(sym) = symbol {
-        memo.insert((sym, negated), result.clone());
     }
     result
 }
@@ -428,8 +461,17 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     pub(crate) fn operand_bound(&self, sym: Sym, site: SourceLoc) -> Option<FiniteDomain> {
-        let bound = self.savepoints.last()?.operand_bound.as_ref()?;
-        if bound.sym != sym || bound.site != site || !self.region_queries_deferred() {
+        let bound = if scalar::enabled() {
+            self.savepoints
+                .iter()
+                .rev()
+                .filter_map(|arm| arm.operand_bound.as_deref())
+                .find(|bound| bound.sym == sym)?
+        } else {
+            let bound = self.savepoints.last()?.operand_bound.as_deref()?;
+            (bound.sym == sym && bound.site == site).then_some(bound)?
+        };
+        if !self.region_queries_deferred() {
             return None;
         }
         PathConditions::new(self)?; // 符号已重绑时重新推导。

@@ -225,6 +225,7 @@ fn run_b<'ir, B: BV>(
             region,
             arm: ArmPath::new(vec![1]),
             symbols: start..solver.next_join_symbol(),
+            scalar_layouts: solver.export_scalar_layouts(start),
             suffix,
             deferred: solver.take_arm_assertions(),
             frame,
@@ -568,6 +569,7 @@ pub(super) fn receive<'ir, 'task, B: BV>(
     } else {
         solver.import_arm_suffix(owner, &packet.suffix);
     }
+    solver.import_scalar_layouts(packet.scalar_layouts);
     packet.frame.region_execution.as_mut().unwrap().remote_cancel =
         base.region_execution.as_ref().unwrap().remote_cancel.clone();
     packet.frame.region_arm = Some(owner);

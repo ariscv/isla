@@ -464,7 +464,7 @@ isarch [原 J1 探索参数] \
 | TOML 字段 | CLI 参数 | 默认值 | 用途 |
 | --- | --- | --- | --- |
 | `path_merge.prune_constant_branches` | `--prune-constant-branches=true/false` | `true` | Jump 在分支限制决策前识别布尔恒值；不查询 SMT |
-| `path_merge.defer_call_effect_checks` | `--defer-call-effect-checks=true/false` | `true` | 延后普通被调函数的传递 `StateEffect` 检查 |
+| `path_merge.defer_call_effect_checks` | `--defer-call-effect-checks=true/false` | `true` | 延后普通被调函数的传递 `SpeculativeRejectReason::StateEffect` 检查 |
 | `path_merge.finite_domain_enumeration` | `--finite-domain-enumeration=true/false` | `true` | 从路径条件识别有限域，具体值消费者按需枚举 |
 | `path_merge.merge_poison_slots` | `--merge-poison-slots=true/false` | `true` | 只消除已证明不可观察的局部槽位或联合载荷 |
 | `path_merge.defer_exit_check` | `--region-defer-exit-check=true/false` | `false` | 延迟区域出口检查 |
@@ -541,9 +541,9 @@ progress = true
 
 `[execution_limits] on_path_timeout = "panic"` 是逐路径 `--timeout` 的缺省处置。`--on-path-timeout=panic|dead` 覆盖 TOML。显式选择 `dead` 时使用原来的逐路径到限记录并继续探索。两类 panic 都报告 IR 函数、PC、Sail 位置、用途、耗时、限额和路径深度。scheduler 将这类退出记为 `error`，诊断行保存在结果 JSON 的 `errors` 中。
 
-区域拒绝的 `reason` 包括 `unknown_finite_domain`（有限候选不足）、`unknown_deferred_mode`（延后或无 SMT 模式限制）及 `path_timeout`（路径墙钟到限）。Z3 查询失败细分为 `z3_timeout`（超时或中断）、`z3_resource_exhausted`（资源限额耗尽）和 `unknown_z3`（Z3 返回 UNDEF，且没有上述控制原因）。当根出口已证 Unsat 且需要回滚时记 `exit_unsat`。自动合并撤销失败的尝试，在普通分叉上执行。路径策略只在结果可归属单条探索路径或执行最终到限时生效。样本绑定和验收的错误继续交给各自调用方。
+区域拒绝的 `reason` 包括 `SpeculativeRejectReason::UnknownFiniteDomain`（有限候选不足）、`SpeculativeRejectReason::UnknownDeferredMode`（延后或无 SMT 模式限制）及 `SpeculativeRejectReason::PathTimeout`（路径墙钟到限）。Z3 查询失败细分为 `SpeculativeRejectReason::Z3Timeout`（超时或中断）、`SpeculativeRejectReason::Z3ResourceExhausted`（资源限额耗尽）和 `SpeculativeRejectReason::UnknownZ3`（Z3 返回 UNDEF，且没有上述控制原因）。当根出口已证 Unsat 且需要回滚时记 `SpeculativeRejectReason::ExitUnsat`。自动合并撤销失败的尝试，在普通分叉上执行。路径策略只在结果可归属单条探索路径或执行最终到限时生效。样本绑定和验收的错误继续交给各自调用方。
 
-区域统计的 `failure_reasons` 与运行摘要的 `failure-reasons` 同样使用这些标签。详细区域诊断在 `first_indeterminate` 字段和 `region_first_indeterminate_summary` 中报告首次未完成判定的位置及原因。
+区域统计的 `failure_reasons` 和 `reason_counts`、运行摘要的 `failure-reasons` 及诊断的 `reason` 使用 `SpeculativeRejectReason::变体名`。详细区域诊断在 `first_indeterminate` 字段和 `region_first_indeterminate_summary` 中报告首次未完成判定的位置及原因。错误详情使用 `SmtError::变体名`，例如 `SmtError::Z3Timeout` 或 `SmtError::Z3Unknown`，Z3 原始原因仍在 `reason_unknown`。已保存的缓存摘要读回时保留原字符串。
 
 嵌套区域的五个开关各对应一类失败，控制是否保留外层区域，并把内层分叉交回外层继续。以下示例只启用有限域一类，五项缺省均为 false。
 
@@ -560,7 +560,7 @@ partial_commit_deferred_mode = false
 
 使用线程中断功能构建时，`--smt-timeout` 设置单次 Z3 调用的软中断限时，省略时不限。终态查询的专用限时独立生效。直接调用构建没有这两种单次限时。
 
-递归与平铺合并都在实际到达指令时检查普通被调函数的传递 `StateEffect`。普通被调函数的寄存器写入沿用调用者区域的访问记录，各汇合组发布自己的最终写入。区域准入仍检查直接不可撤销效应，到达未实现的 extern 时仍拒绝推演。
+递归与平铺合并都在实际到达指令时检查普通被调函数的传递 `SpeculativeRejectReason::StateEffect`。普通被调函数的寄存器写入沿用调用者区域的访问记录，各汇合组发布自己的最终写入。区域准入仍检查直接不可撤销效应，到达未实现的 extern 时仍拒绝推演。
 
 ### 臂内执行错误叶子
 
@@ -568,6 +568,8 @@ partial_commit_deferred_mode = false
 即时与延后区域共用失败点的执行迹和完整守卫。正常组继续执行，已证可达的执行错误单独交付。无 SMT 时，错误叶标记为未认证。已证不可达的错误叶会被筛除，认证时遇到真实求解失败则应用探索路径的求解策略。judge 在 `execution_errors` 记录具体输入命中的错误叶及源码位置，并继续核对正常路径。
 
 ### 区域合并具体值
+
+在 `[execution_limits.path_merge]` 设置 `symbolic_scalar_resolver = true`，或传入 `--symbolic-scalar-resolver=true`，可开启符号长度、位宽和索引的统一具体化。默认关闭。读长的可表示范围是 `1..=u32::MAX/8` 字节。开启后，延后区域可以把读长范围登记为出口需要验证的安全义务；出口认证仍需排除越界反例。设置 `--obligation-dump-dir` 后，目录中的 `scalar-range-*.smt2` 保存登记义务之前的原始前缀和反例条件，可独立用 Z3 检查。若 ITE 的一个值臂直接来自有显式有限域的输入，解析器可按这些值拆分，并要求出口同时排除越界值和该集合之外的合法值。若反例可达，区域撤销推演并从原前缀重试。
 
 `[execution_limits.path_merge].merge_concrete_values` 默认开启，`--merge-concrete-values=true|false` 可覆盖。区域出口用守卫保留两臂不同的具体字符串或 I64。字符串相等比较直接计算对应的符号布尔值。需要具体操作数的指令沿原守卫重试，区域内重试通过共用汇合入口交回正常前沿。
 
@@ -603,7 +605,7 @@ CLI `--bv-rewrite` 等价于 `--bv-rewrite=true`。`--bv-rewrite=false` 关闭�
 
 `execution_limits` 只保留非合并的全局限制、输出过滤、配额和 judge 参数。路径合并全局参数放 `execution_limits.path_merge`，枚举配置放其 `enumeration` 子表，省略类、路径及字节上限即不限。局部规则统一放 `regions` 数组。`step_budget` 缺省关闭（-1），`-1`关闭；CLI名字和优先级不变。
 
-步数、嵌套深度及片段数缺省不限，显式 `-1` 与省略等价。正整数 `max_merge_depth` 可由 `--region-max-merge-depth` 覆盖。保存点深度不限，诊断记录实际区域深度分布和最大值，调用深度另计。正整数 `max_fragments` 允许每次根区域尝试额外保留至多 `max_fragments - 1` 个局部汇合失败片段，超限计 `fragment_limit` 并保留普通分叉。
+步数、嵌套深度及片段数缺省不限，显式 `-1` 与省略等价。正整数 `max_merge_depth` 可由 `--region-max-merge-depth` 覆盖。保存点深度不限，诊断记录实际区域深度分布和最大值，调用深度另计。正整数 `max_fragments` 允许每次根区域尝试额外保留至多 `max_fragments - 1` 个局部汇合失败片段，超限计 `SpeculativeRejectReason::FragmentLimit` 并保留普通分叉。
 
 每条局部规则必须显式指定 `kind`，不得靠缺失字段猜类别：
 

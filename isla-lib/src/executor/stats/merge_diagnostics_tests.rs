@@ -99,7 +99,9 @@ fn merge_diagnostics_snapshot_child() {
     configure(&mode).unwrap();
     let stats = std::sync::Arc::new(super::ExecutionStats::new(false));
     let reporter = SnapshotReporter::start(stats, std::time::Duration::from_millis(20));
-    emit(json!({"stage":"merge_states","difference":"missing_arm","reason":"incompatible_state"}));
+    emit(
+        json!({"stage":"merge_states","difference":"missing_arm","reason":"SpeculativeRejectReason::IncompatibleState"}),
+    );
     if enabled() {
         record_depth(23, 7, 44);
         record_depth(23, 9, 48);
@@ -225,7 +227,7 @@ fn merge_diagnostics_root_preserves_nested_rejection() {
     assert_eq!(started["callers"][0]["pc"], 8);
     assert_eq!(ended["outcome"], "rejected");
     assert_eq!(ended["failure"]["origin"]["pc"], 20);
-    assert_eq!(ended["failure"]["reason"], "state_effect");
+    assert_eq!(ended["failure"]["reason"], "SpeculativeRejectReason::StateEffect");
 }
 
 #[test]
@@ -250,18 +252,23 @@ fn merge_diagnostics_root_records_first_indeterminate_query() {
         record_current_site(function, 17, &symtab);
         record_deferred_query("general", info, true);
         root.finish_rejected(FailurePhase::ArmExecution, &rejection, &rejection, &symtab);
+        drop(root);
+        print(&super::ExecutionStats::new(false));
         return;
     }
     let output = std::process::Command::new(std::env::current_exe().unwrap()).args(args).output().unwrap();
     assert!(output.status.success());
     let text = String::from_utf8(output.stderr).unwrap();
-    let ended = text
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .find(|row| row["kind"] == "merge_root_end")
-        .expect(&text);
-    assert_eq!(ended["failure"]["reason"], "unknown_deferred_mode");
-    assert_eq!(ended["first_indeterminate"]["reason"], "unknown_deferred_mode");
+    let rows: Vec<Value> = text.lines().filter_map(|line| serde_json::from_str(line).ok()).collect();
+    let ended = rows.iter().find(|row| row["kind"] == "merge_root_end").expect(&text);
+    let summary = rows.iter().find(|row| row["kind"] == "region_first_indeterminate_summary").expect(&text);
+    assert_eq!(summary["roots"][0]["key"]["reason"], "SpeculativeRejectReason::UnknownDeferredMode");
+    assert_eq!(
+        summary["roots"][0]["key"]["first_indeterminate"]["reason"],
+        "SpeculativeRejectReason::UnknownDeferredMode"
+    );
+    assert_eq!(ended["failure"]["reason"], "SpeculativeRejectReason::UnknownDeferredMode");
+    assert_eq!(ended["first_indeterminate"]["reason"], "SpeculativeRejectReason::UnknownDeferredMode");
     assert_eq!(ended["first_indeterminate"]["purpose"], "general");
     assert_eq!(ended["first_indeterminate"]["function"], "caller");
     assert_eq!(ended["first_indeterminate"]["pc"], 17);

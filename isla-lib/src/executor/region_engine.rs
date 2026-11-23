@@ -56,7 +56,13 @@ pub(super) fn advance_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized
     tx: crate::smt::SolverTransaction,
     info: SourceLoc,
 ) -> Result<Option<bool>, ExecError> {
-    let result = run_loop(tid, task_id, fraction, timeout, stop, sink, arm, state, shared, solver);
+    let mut advance = || run_loop(tid, task_id, fraction, timeout, stop, sink, arm, state, shared, solver);
+    // 一个消费者可在同一线程进入下一个区域。保留足够的普通栈给本臂的原语和求解器调用。
+    let result = if crate::config::RegionOptions::current().symbolic_scalar_resolver {
+        stacker::maybe_grow(1024 * 1024, 8 * 1024 * 1024, advance)
+    } else {
+        advance()
+    };
     if let Err(error) = &result {
         let assertion = matches!(error, ExecError::AssertionFailure(..));
         let keep_error = ((consumer || crate::config::RegionOptions::current().arm_error_leaf)
@@ -666,7 +672,7 @@ fn diagnose_slot<B: BV>(
         "after_init":{"left":diagnostics::describe_value(a,solver,&shared.symtab),"right":diagnostics::describe_value(b,solver,&shared.symtab)},
         "failure":leaf,"difference":difference,
         "error":error.map(diagnostics::describe_error),
-        "reason":if matches!(error,Some(ExecError::IncompatibleUnionPayload)) {"union_payload"} else {"incompatible_state"}
+        "reason":if matches!(error,Some(ExecError::IncompatibleUnionPayload)) {SpeculativeRejectReason::UnionPayload} else {SpeculativeRejectReason::IncompatibleState}
     }));
 }
 

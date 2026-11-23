@@ -209,7 +209,7 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
             let width = solver.define_const(primop::subrange_width(*high, *low), info);
             let source_width = crate::primop_util::length_bits(bits, solver, info)?;
             let valid = 1..=i128::from(source_width);
-            let finite = match solver.finite_domain(width) {
+            let finite = match solver.resolve_scalar(width, info) {
                 FiniteDomain::Known(_) | FiniteDomain::Bounded(_) => true,
                 FiniteDomain::Unknown => false,
             };
@@ -510,7 +510,7 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                     && solver.check_sat_with(&remainder, info).is_sat()?
                 {
                     // 先完整分离两类候选，再由消费者拒绝非法索引或处理默认符号内存。
-                    let local = consumer.filter(|_| matches!(solver.finite_domain(sym), FiniteDomain::Known(_)));
+                    let local = consumer.filter(|_| matches!(solver.resolve_scalar(sym, info), FiniteDomain::Known(_)));
                     return retry_partition(
                         local,
                         None,
@@ -610,20 +610,7 @@ pub(super) enum ValueRetry {
     Dead,
 }
 
-pub(super) enum OperandBounds {
-    // 原语已经在当前路径证明边界，或在无 SMT 下把边界加入了路径。
-    Established(std::ops::RangeInclusive<i128>),
-    RequireWithin(std::ops::RangeInclusive<i128>),
-}
-
-fn candidate_in_bounds(value: &smtlib::Exp<crate::smt::Sym>, bounds: &std::ops::RangeInclusive<i128>) -> bool {
-    let length = match value {
-        smtlib::Exp::Bits64(bits) => Some(i128::from(bits.signed())),
-        smtlib::Exp::Bits(bits) => primop::i128_from_model_bits(bits),
-        _ => unreachable!("有限域只含位向量常量"),
-    };
-    length.is_some_and(|length| bounds.contains(&length))
-}
+use crate::smt::OperandBounds;
 
 /// 将符号值拆为当前候选和剩余候选；唯一值不需要分叉。
 #[allow(clippy::too_many_arguments)]
@@ -653,42 +640,13 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
     };
     let width = solver.length(sym).expect("长度参数必须是位向量");
     assert!(width > 0, "待枚举的位向量必须具有正位宽");
-    let inherited = solver.operand_bound(sym, info);
-    let mut pass_bound = inherited.is_some();
-    let domain = inherited.unwrap_or_else(|| solver.finite_domain(sym));
-    let bounded = matches!(domain, FiniteDomain::Bounded(_));
-    let mut restricted = false;
-    let mut rejected_candidates = None;
-    let values = match (domain, bounds) {
-        (FiniteDomain::Known(values), _) => Some(values),
-        (FiniteDomain::Bounded(mut values), Some(OperandBounds::Established(range))) => {
-            let old_len = values.len();
-            // 切片的联合边界已生效，只能留下区间内的值。原前缀和选择等式继续参与重试。
-            values.retain(|value| candidate_in_bounds(value, &range));
-            restricted = values.len() != old_len;
-            Some(values)
+    let resolution = solver.resolve_scalar_choice(sym, bounds, consumer.is_some(), info);
+    if let Ok(choice) = resolution {
+        let crate::smt::ScalarChoice { values, bounded, restricted, pass_bound, requires_checked_replay } = choice;
+        if requires_checked_replay {
+            // 撤销本次推演及其范围假设。普通路径从原前缀按模型拆分候选和补集。
+            return Err(super::region_merge::reject(frame, SpeculativeRejectReason::RetryOperand));
         }
-        (FiniteDomain::Bounded(mut values), Some(OperandBounds::RequireWithin(range))) => {
-            if values.iter().any(|v| !candidate_in_bounds(v, &range)) {
-                let previous = values.len();
-                solver.refine_guarded_values(sym, &mut values, |v| candidate_in_bounds(v, &range));
-                restricted = values.len() != previous;
-                pass_bound |= restricted;
-            }
-            if values.iter().all(|v| candidate_in_bounds(v, &range)) {
-                Some(values)
-            } else {
-                rejected_candidates = Some(values);
-                None
-            }
-        }
-        (FiniteDomain::Bounded(values), None) => {
-            rejected_candidates = Some(values);
-            None
-        }
-        (FiniteDomain::Unknown, _) => None,
-    };
-    if let Some(values) = values {
         let Some(candidate) = values.first() else { return Ok(ValueRetry::Dead) };
         if values.len() == 1 {
             if !restricted {
@@ -758,27 +716,9 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
         );
     }
     if solver.finite_domain_enabled() {
-        let missing_domain = || crate::error::SmtError::FiniteDomain {
-            source_loc: info,
-            symbol: sym,
-            width,
-            candidates: rejected_candidates.map(|values| {
-                values
-                    .iter()
-                    .map(|value| match value {
-                        Bits64(bits) => bits.to_string(),
-                        Bits(bits) => {
-                            let mut text = Vec::new();
-                            crate::simplify::write_bits(&mut text, bits).unwrap();
-                            String::from_utf8(text).unwrap()
-                        }
-                        _ => unreachable!("有限域候选必须是位向量常量"),
-                    })
-                    .collect()
-            }),
-        };
+        let missing_domain = || resolution.err().expect("未解析的标量必须携带拒绝原因");
         let Some(result) = solver.check_candidate_sat(info) else {
-            crate::smt::no_smt::record("unknown_finite_domain", info);
+            crate::smt::no_smt::record(SpeculativeRejectReason::UnknownFiniteDomain.reason_name(), info);
             return Err(ExecError::Smt(missing_domain()));
         };
         if result == crate::smt::SmtResult::Unsat {

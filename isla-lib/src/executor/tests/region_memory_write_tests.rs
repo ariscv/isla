@@ -248,7 +248,10 @@ fn region_memory_write_barriers_roll_back_before_device_or_exclusive_attempt() {
             info(),
         );
         assert!(matches!(result, Ok(region_merge::RegionResult::Rejected)));
-        assert_eq!(state.speculation_stats().reject_json()["reason_counts"]["state_effect"].as_u64(), Some(1));
+        assert_eq!(
+            state.speculation_stats().reject_json()["reason_counts"]["SpeculativeRejectReason::StateEffect"].as_u64(),
+            Some(1)
+        );
         assert_eq!(solver.transaction_depth(), 0);
         assert_eq!(attempts.load(Ordering::Relaxed), 0);
         assert_eq!(frame.memory().ram_version(), Some(version));

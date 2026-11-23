@@ -19,6 +19,7 @@ const BOOL_OPTIONS: &[(&str, &str, &str)] = &[
         "partial-commit-deferred-mode",
         "嵌套区域遇到延后模式限制时在外层保留两个片段；默认关闭",
     ),
+    ("symbolic_scalar_resolver", "symbolic-scalar-resolver", "使用随臂符号标量具体化，默认关闭"),
     ("finite_domain_enumeration", "finite-domain-enumeration", "先按可确认的有限域枚举具体值；默认开启"),
     ("merge_poison_slots", "merge-poison-slots", "只消除已证明不可观察的局部未初始化槽位或载荷；默认开启"),
     ("defer_ctor_checks", "region-defer-ctor-checks", "延后推演时，构造子解包标签转为出口待证义务；默认开启"),
@@ -83,6 +84,7 @@ pub fn apply_cli(matches: &getopts::Matches, limits: &mut ExecutionLimitsConfig)
         if let Some(value) = matches.opt_str(flag) {
             let value: bool = value.parse().map_err(|_| format!("--{flag} 必须是 true 或 false"))?;
             match *field {
+                "symbolic_scalar_resolver" => updated.path_merge.symbolic_scalar_resolver = value,
                 "merge_poison_slots" => updated.path_merge.merge_poison_slots = value,
                 "defer_ctor_checks" => updated.path_merge.defer_ctor_checks = value,
                 "defer_range_proofs" => updated.path_merge.defer_range_proofs = value,
@@ -217,6 +219,7 @@ mod tests {
         assert!(limits.path_merge.defer_range_proofs && limits.path_merge.defer_ctor_checks);
         for (field, flag, _) in BOOL_OPTIONS {
             let section = if [
+                "symbolic_scalar_resolver",
                 "partial_commit_finite_domain",
                 "partial_commit_unknown_z3",
                 "partial_commit_z3_timeout",

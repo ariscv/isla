@@ -9,6 +9,8 @@ pub struct RegionOptions {
     pub bv_rewrite: crate::smt::rewrite::BvRewrite,
     /// 区域推演嵌套上限；缺省或-1不限。
     pub max_merge_depth: Option<i64>,
+    /// 按当前臂的定义和断言解析符号标量。默认关闭。
+    pub symbolic_scalar_resolver: bool,
     /// 延后推演时，范围证明转为出口待证义务；默认开启。
     pub defer_range_proofs: bool,
     /// 延后推演时，构造子解包标签转为出口待证义务；默认开启。
@@ -88,6 +90,7 @@ impl RegionOptions {
         Self {
             bv_rewrite: limits.solver.bv_rewrite,
             max_merge_depth: merge.max_merge_depth,
+            symbolic_scalar_resolver: merge.symbolic_scalar_resolver,
             defer_range_proofs: merge.defer_range_proofs,
             defer_ctor_checks: merge.defer_ctor_checks,
             skip_branch_checks: limits.solver.skip_branch_checks,

@@ -1,3 +1,4 @@
+use super::scalar::{ArmFacts, ScalarLayout};
 use super::*;
 use std::cell::OnceCell;
 
@@ -7,10 +8,15 @@ pub(in crate::smt) const BUFFERED: usize = usize::MAX;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Position(usize, usize);
 
+type GuardBounds = HashMap<Sym, Option<Arc<Vec<Exp<Sym>>>>>;
+
 pub(in crate::smt) struct PrefixIndex<'ctx> {
+    pub(super) arm_facts: RefCell<ArmFacts>,
+    pub(super) layouts: HashMap<Sym, ScalarLayout>,
     symbols: ahash::AHashMap<Sym, Position>,
     rebindings: usize,
     bounds: RefCell<HashMap<Sym, (usize, Bound)>>,
+    guard_bounds: RefCell<Vec<GuardBounds>>,
     assertions: Vec<Position>,
     bool_symbols: Vec<(Position, Sym)>,
     pub(super) projection: RefCell<ProjectionCache>,
@@ -49,11 +55,12 @@ enum BranchCheck {
 pub(super) struct ProjectionAsts<'ctx> {
     pub(super) ctx: &'ctx Context,
     refs: RefCell<HashSet<Z3_ast>>,
+    ordinary: RefCell<HashSet<Z3_ast>>,
 }
 
 impl<'ctx> ProjectionAsts<'ctx> {
     pub(super) fn new(ctx: &'ctx Context) -> Self {
-        Self { ctx, refs: Default::default() }
+        Self { ctx, refs: Default::default(), ordinary: Default::default() }
     }
 
     pub(super) fn retain(&self, key: Z3_ast) {
@@ -76,7 +83,7 @@ impl<'ctx> ProjectionAsts<'ctx> {
     }
 
     pub(super) fn get(&self, key: Z3_ast) -> Ast<'ctx> {
-        assert!(self.refs.borrow().contains(&key));
+        assert!(self.refs.borrow().contains(&key) || self.ordinary.borrow().contains(&key));
         unsafe { Z3_inc_ref(self.ctx.z3_ctx, key) };
         Ast { ctx: self.ctx, z3_ast: key }
     }
@@ -91,6 +98,9 @@ impl<'ctx> ProjectionAsts<'ctx> {
 impl Drop for ProjectionAsts<'_> {
     fn drop(&mut self) {
         self.clear();
+        for key in self.ordinary.get_mut().drain() {
+            unsafe { Z3_dec_ref(self.ctx.z3_ctx, key) };
+        }
     }
 }
 
@@ -113,11 +123,18 @@ fn binding<B>(event: &Event<B>) -> Option<(Sym, bool)> {
 }
 
 impl<'ctx> PrefixIndex<'ctx> {
+    pub(super) fn has_binding(&self, sym: Sym) -> bool {
+        self.symbols.contains_key(&sym)
+    }
+
     pub(in crate::smt) fn new(ctx: &'ctx Context) -> Self {
         Self {
+            arm_facts: Default::default(),
+            layouts: Default::default(),
             symbols: Default::default(),
             rebindings: 0,
             bounds: Default::default(),
+            guard_bounds: RefCell::default(),
             assertions: Vec::new(),
             bool_symbols: Vec::new(),
             projection: RefCell::default(),
@@ -135,6 +152,16 @@ impl<'ctx> PrefixIndex<'ctx> {
         if let Some((sym, boolean)) = binding(event) {
             if let std::collections::hash_map::Entry::Vacant(entry) = self.symbols.entry(sym) {
                 entry.insert(position);
+                if super::scalar::enabled() {
+                    let layout = match event {
+                        Event::Smt(Def::DeclareConst(_, Ty::BitVec(width)), ..) => Some(ScalarLayout::full(*width)),
+                        Event::Smt(Def::DefineConst(_, exp), ..) => ScalarLayout::definition(exp, &self.layouts),
+                        _ => None,
+                    };
+                    if let Some(layout) = layout {
+                        self.layouts.insert(sym, layout);
+                    }
+                }
             } else {
                 self.rebindings += 1;
                 self.invalidate_candidates();
@@ -161,24 +188,57 @@ impl<'ctx> PrefixIndex<'ctx> {
                 let first = self.symbols[&sym];
                 if first == Position(segment, index) {
                     self.symbols.remove(&sym);
+                    self.layouts.remove(&sym);
+                    for layer in self.guard_bounds.get_mut() {
+                        layer.remove(&sym);
+                    }
                 } else {
                     self.rebindings -= 1;
                 }
             }
         }
         if start < events.len() {
-            self.invalidate_candidates();
+            self.arm_facts.get_mut().truncate_assertions(self.assertions.len());
+            self.clear_candidate_caches();
         }
     }
 
     pub(in crate::smt) fn invalidate_candidates(&mut self) {
-        self.bounds.get_mut().clear();
-        self.guards_changed();
+        *self.arm_facts.get_mut() = ArmFacts::default();
+        self.guard_bounds.get_mut().clear();
+        self.clear_candidate_caches();
     }
 
-    // bounds 只含已登记的普通断言，活动守卫由 assertion_bound 逐次套用。
-    pub(in crate::smt) fn guards_changed(&mut self) {
-        *self.projection.get_mut() = ProjectionCache::default();
+    pub(in crate::smt) fn guarded_suffix(&mut self, offset: usize, guard_depth: usize) {
+        let retained = self.assertions.partition_point(|p| *p < Position(BUFFERED, offset));
+        self.arm_facts.get_mut().truncate_assertions(retained);
+        self.truncate_guards(guard_depth);
+        self.clear_candidate_caches();
+    }
+
+    fn clear_candidate_caches(&mut self) {
+        self.bounds.get_mut().clear();
+        self.projection.get_mut().assertions.clear();
+        for key in self.asts.ordinary.get_mut().drain() {
+            unsafe { Z3_dec_ref(self.asts.ctx.z3_ctx, key) };
+        }
+        self.clear_guard_caches();
+    }
+
+    fn truncate_guards(&mut self, depth: usize) {
+        self.arm_facts.get_mut().truncate_guards(depth);
+        self.guard_bounds.get_mut().truncate(depth);
+    }
+
+    pub(in crate::smt) fn guards_changed(&mut self, depth: usize) {
+        self.truncate_guards(depth);
+        self.clear_guard_caches();
+    }
+
+    fn clear_guard_caches(&mut self) {
+        let cache = self.projection.get_mut();
+        let assertions = if super::scalar::enabled() { std::mem::take(&mut cache.assertions) } else { Vec::new() };
+        *cache = ProjectionCache { assertions, ..Default::default() };
         self.asts.clear();
         self.domains.get_mut().clear();
         self.rewrites.advance();
@@ -190,7 +250,26 @@ impl<'ctx> PrefixIndex<'ctx> {
         use std::mem::size_of;
 
         let cache = self.projection.borrow();
-        (cache.assertions.capacity() + cache.guards.capacity()) * size_of::<Z3_ast>()
+        let layers = self.guard_bounds.borrow();
+        let mut unique = HashSet::new();
+        let guarded_bytes = layers
+            .iter()
+            .map(|layer| {
+                map_bytes::<Sym, Option<Arc<Vec<Exp<Sym>>>>>(layer.capacity())
+                    + layer
+                        .values()
+                        .flatten()
+                        .filter(|v| unique.insert(Arc::as_ptr(v)))
+                        .map(|v| v.capacity() * size_of::<Exp<Sym>>() + v.iter().map(exp_heap_bytes).sum::<usize>())
+                        .sum::<usize>()
+            })
+            .sum::<usize>();
+        self.arm_facts.borrow().heap_bytes()
+            + map_bytes::<Sym, ScalarLayout>(self.layouts.capacity())
+            + map_bytes::<Z3_ast, ()>(self.asts.ordinary.borrow().capacity())
+            + layers.capacity() * size_of::<GuardBounds>()
+            + guarded_bytes
+            + (cache.assertions.capacity() + cache.guards.capacity()) * size_of::<Z3_ast>()
             + map_bytes::<Z3_ast, (Option<bool>, Z3_ast)>(cache.simplified.capacity())
             + map_bytes::<Z3_ast, ()>(self.asts.refs.borrow().capacity())
             + map_bytes::<Z3_ast, AnchorFacts>(cache.anchors.capacity())
@@ -294,7 +373,7 @@ impl<'a, B: BV> PathConditions<'a, B> {
     }
 
     // 原顺序是最新断言在前、活动臂守卫在后。追加后用新后缀作交集的左操作数，
-    // 保留第一个给出有限集合的断言所规定的候选顺序。守卫每次单独计算。
+    // 保留第一个给出有限集合的断言所规定的候选顺序。守卫与普通断言分别索引。
     pub(super) fn assertion_bound(&self, input: &Exp<Sym>, subject: &Exp<Sym>) -> Bound {
         let symbol = match input {
             Exp::Var(s) if self.index.symbols.contains_key(s) => Some(*s),
@@ -314,17 +393,43 @@ impl<'a, B: BV> PathConditions<'a, B> {
                 self.index.bounds.borrow_mut().insert(s, (count, total.clone()));
             }
         }
+        if let Some(sym) = symbol.filter(|_| super::scalar::enabled() && !self.guards.is_empty()) {
+            let mut layers = self.index.guard_bounds.borrow_mut();
+            layers.resize_with(self.guards.len(), HashMap::new);
+            let start = layers.iter().rposition(|layer| layer.contains_key(&sym)).map_or(0, |i| i + 1);
+            let mut inherited = start.checked_sub(1).and_then(|i| layers[i][&sym].clone());
+            for (guard, layer) in self.guards[start..].iter().zip(&mut layers[start..]) {
+                if let Some(values) = bound(guard, subject, self, false, &mut memo) {
+                    let common = intersect(inherited.as_deref().cloned(), Some(values));
+                    inherited = common.map(Arc::new);
+                }
+                layer.insert(sym, inherited.clone());
+            }
+            return intersect(total, inherited.as_deref().cloned());
+        }
         for guard in self.guards {
             total = intersect(total, bound(guard, subject, self, false, &mut memo));
         }
         total
     }
 
+    pub(super) fn ordinary_suffix(&self, start: usize) -> impl Iterator<Item = &'a Exp<Sym>> + '_ {
+        self.index.assertions[start..].iter().map(|position| self.assertion(*position))
+    }
+
     pub(super) fn translate_projection_suffix(&self, solver: &Solver<'_, B>, cache: &mut ProjectionCache) {
         for &position in &self.index.assertions[cache.assertions.len()..] {
-            cache
-                .assertions
-                .push(self.index.asts.keep(solver.translate_projection_assertion(self.assertion(position))));
+            let ast = solver.translate_projection_assertion(self.assertion(position));
+            let key = if super::scalar::enabled() {
+                let key = ast.z3_ast;
+                if self.index.asts.ordinary.borrow_mut().insert(key) {
+                    std::mem::forget(ast);
+                }
+                key
+            } else {
+                self.index.asts.keep(ast)
+            };
+            cache.assertions.push(key);
         }
         for guard in &self.guards[cache.guards.len()..] {
             cache.guards.push(self.index.asts.keep(solver.translate_projection_assertion(guard)));

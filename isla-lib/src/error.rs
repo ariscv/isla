@@ -55,14 +55,90 @@ impl IslaError for VoidError {
     }
 }
 
-#[derive(Clone, Debug)]
-pub enum SmtError {
+// 从枚举声明生成标签，包含载荷的变体只匹配其判别类型。
+macro_rules! qualified_reason_enum {
+    ($(#[$enum_attr:meta])* $vis:vis enum $name:ident {
+        $($(#[$attr:meta])* $variant:ident $(($($tuple:tt)*))? $({$($fields:tt)*})?,)*
+    }) => {
+        $(#[$enum_attr])*
+        $vis enum $name {
+            $($(#[$attr])* $variant $(($($tuple)*))? $({$($fields)*})?,)*
+        }
+
+        impl $name {
+            pub(crate) const fn reason_name(&self) -> &'static str {
+                match self {
+                    $(qualified_reason_enum!(@pattern $variant $(($($tuple)*))? $({$($fields)*})?) =>
+                        qualified_reason_enum!(@name $name, $variant),)*
+                }
+            }
+        }
+    };
+    (@pattern $variant:ident) => { Self::$variant };
+    (@pattern $variant:ident ($($tuple:tt)*)) => { Self::$variant(..) };
+    (@pattern $variant:ident {$($fields:tt)*}) => { Self::$variant { .. } };
+    (@name $name:ident, $variant:ident) => { concat!(stringify!($name), "::", stringify!($variant)) };
+}
+pub(crate) use qualified_reason_enum;
+
+// 从同一份变体声明生成携带诊断数据的错误和稳定的 JSON 原因名。
+macro_rules! smt_error_variants {
+    ($($variant:ident $payload:tt,)*) => {
+        qualified_reason_enum! {
+            #[derive(Clone, Debug)]
+            pub enum SmtError { $($variant $payload,)* }
+        }
+
+        #[derive(Copy, Clone, Debug)]
+        pub enum SmtErrorKind { $($variant,)* }
+
+        impl SmtErrorKind {
+            #[cfg(test)]
+            const ALL: &'static [Self] = &[$(Self::$variant,)*];
+        }
+        impl SmtError {
+            pub fn kind(&self) -> SmtErrorKind {
+                match self { $(Self::$variant { .. } => SmtErrorKind::$variant,)* }
+            }
+        }
+    }
+}
+smt_error_variants! {
     FiniteDomain { source_loc: SourceLoc, symbol: crate::smt::Sym, width: u32, candidates: Option<Vec<String>> },
     DeferredQuery { source_loc: SourceLoc, purpose: &'static str },
     NoSmt { reason: &'static str, source_loc: SourceLoc },
     Z3Timeout(Z3Timeout),
     Z3ResourceExhausted(Z3QueryFailure),
     Z3Unknown(Z3QueryFailure),
+}
+
+impl serde::Serialize for SmtError {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.reason_name())
+    }
+}
+
+#[test]
+fn every_smt_error_has_a_qualified_reason() {
+    let source_loc = SourceLoc::unknown();
+    let query =
+        Z3QueryFailure { reason: "test".into(), source_loc, purpose: "model_value", wall: Duration::ZERO, limit: None };
+    for kind in SmtErrorKind::ALL {
+        let error = match kind {
+            SmtErrorKind::FiniteDomain => {
+                SmtError::FiniteDomain { source_loc, symbol: crate::smt::Sym::from_u32(0), width: 8, candidates: None }
+            }
+            SmtErrorKind::DeferredQuery => SmtError::DeferredQuery { source_loc, purpose: "model_value" },
+            SmtErrorKind::NoSmt => SmtError::NoSmt { source_loc, reason: "model_value" },
+            SmtErrorKind::Z3Timeout => SmtError::Z3Timeout(Z3Timeout::Native(query.clone())),
+            SmtErrorKind::Z3ResourceExhausted => SmtError::Z3ResourceExhausted(query.clone()),
+            SmtErrorKind::Z3Unknown => SmtError::Z3Unknown(query.clone()),
+        };
+        let expected = format!("SmtError::{kind:?}");
+        assert_eq!(serde_json::to_value(&error).unwrap(), expected);
+        assert_eq!(error.diagnostic()["reason"], expected);
+        assert_eq!(error.to_string(), expected);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -104,7 +180,7 @@ impl SmtError {
 
     pub fn diagnostic(&self) -> serde_json::Value {
         use serde_json::json;
-        match self {
+        let mut detail = match self {
             Self::FiniteDomain { symbol, width, candidates, .. } => {
                 json!({"purpose":"symbolic_value_enumeration","symbol":symbol.as_u32(),"width":width,"candidates":candidates})
             }
@@ -120,7 +196,9 @@ impl SmtError {
                 json!({"purpose":timeout.query_purpose,"operation":format!("{:?}",timeout.operation),
                 "seconds":timeout.operation_wall.as_secs_f64(),"limit_seconds":timeout.limit.as_secs_f64()})
             }
-        }
+        };
+        detail["reason"] = json!(self);
+        detail
     }
 
     pub fn source_loc(&self) -> SourceLoc {
@@ -164,38 +242,7 @@ impl Eq for SmtError {}
 
 impl fmt::Display for SmtError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::FiniteDomain { source_loc, symbol, width, candidates } => write!(
-                f,
-                "unknown_finite_domain: v{} ({} 位)，候选 {:?}，位置 {:?}",
-                symbol.as_u32(),
-                width,
-                candidates,
-                source_loc
-            ),
-            Self::DeferredQuery { source_loc, purpose } => {
-                write!(f, "unknown_deferred_mode: {purpose}，位置 {source_loc:?}")
-            }
-            SmtError::NoSmt { reason, source_loc } => {
-                write!(f, "unknown_deferred_mode: 无 SMT 无法继续：{reason}，位置{source_loc:?}")
-            }
-            Self::Z3Timeout(Z3Timeout::Native(query)) | Self::Z3ResourceExhausted(query) | Self::Z3Unknown(query) => {
-                write!(
-                    f,
-                    "{}: Z3 返回 {:?}，用途 {}，位置 {:?}，耗时 {:?}",
-                    self.reject_reason(),
-                    query.reason,
-                    query.purpose,
-                    query.source_loc,
-                    query.wall
-                )
-            }
-            Self::Z3Timeout(Z3Timeout::Interrupted(timeout)) => write!(
-                f,
-                "z3_timeout: Z3 调用 {:?} 在 {:?} 中断，限时 {:?}，耗时 {:?}",
-                timeout.operation, timeout.source_loc, timeout.limit, timeout.operation_wall
-            ),
-        }
+        f.write_str(self.reason_name())
     }
 }
 
@@ -404,7 +451,7 @@ impl fmt::Display for ExecError {
             NoElfEntry => write!(f, "No entry point specified"),
             OutOfBounds(func) => write!(f, "Out of bounds error in {}", func),
             MatchFailure(_) => write!(f, "Pattern match failure"),
-            Timeout => write!(f, "path_timeout"),
+            Timeout => fmt::Display::fmt(&crate::executor::SpeculativeRejectReason::PathTimeout, f),
             Smt(error) => write!(f, "{}", error),
             NoModel => write!(f, "No SMT model found"),
             Z3Error(msg) => write!(f, "SMT solver error: {}", msg),

@@ -187,7 +187,7 @@ mod tests {
                     sail_location: "test.sail:7".into(),
                     source_loc: isla_lib::source_loc::SourceLoc::new(0, 7, 0, 7, 3),
                     purpose: "range_proof".into(),
-                    reason: "unknown_z3".into(),
+                    reason: "SpeculativeRejectReason::UnknownZ3".into(),
                     reason_unknown: None,
                     seconds: 5.0,
                     limit_seconds: Some(5.0),
