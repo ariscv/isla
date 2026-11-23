@@ -30,6 +30,7 @@
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::ir::Name;
 use crate::source_loc::SourceLoc;
@@ -56,28 +57,27 @@ impl IslaError for VoidError {
 
 #[derive(Clone, Debug)]
 pub enum SmtError {
-    FiniteDomain {
-        source_loc: SourceLoc,
-        symbol: crate::smt::Sym,
-        width: u32,
-        candidates: Option<Vec<String>>,
-    },
-    DeferredQuery {
-        source_loc: SourceLoc,
-        purpose: &'static str,
-    },
-    NoSmt {
-        reason: &'static str,
-        source_loc: SourceLoc,
-    },
-    Timeout(Arc<SmtTimeout>),
-    SolverUnknown {
-        reason: String,
-        source_loc: SourceLoc,
-        purpose: &'static str,
-        wall: std::time::Duration,
-        limit: Option<std::time::Duration>,
-    },
+    FiniteDomain { source_loc: SourceLoc, symbol: crate::smt::Sym, width: u32, candidates: Option<Vec<String>> },
+    DeferredQuery { source_loc: SourceLoc, purpose: &'static str },
+    NoSmt { reason: &'static str, source_loc: SourceLoc },
+    Z3Timeout(Z3Timeout),
+    Z3ResourceExhausted(Z3QueryFailure),
+    Z3Unknown(Z3QueryFailure),
+}
+
+#[derive(Clone, Debug)]
+pub enum Z3Timeout {
+    Interrupted(Arc<SmtTimeout>),
+    Native(Z3QueryFailure),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Z3QueryFailure {
+    pub reason: String,
+    pub source_loc: SourceLoc,
+    pub purpose: &'static str,
+    pub wall: Duration,
+    pub limit: Option<Duration>,
 }
 
 impl SmtError {
@@ -85,8 +85,20 @@ impl SmtError {
         use crate::executor::SpeculativeRejectReason::*;
         match self {
             Self::FiniteDomain { .. } => UnknownFiniteDomain,
-            Self::Timeout(_) | Self::SolverUnknown { .. } => UnknownSolver,
+            Self::Z3Timeout(_) => Z3Timeout,
+            Self::Z3ResourceExhausted(_) => Z3ResourceExhausted,
+            Self::Z3Unknown(_) => UnknownZ3,
             Self::DeferredQuery { .. } | Self::NoSmt { .. } => UnknownDeferredMode,
+        }
+    }
+
+    /// Z3 原生返回 UNDEF 时的诊断。线程中断另外携带可回放的转储。
+    pub(crate) fn z3_query_failure(&self) -> Option<&Z3QueryFailure> {
+        match self {
+            Self::Z3Timeout(Z3Timeout::Native(query)) | Self::Z3ResourceExhausted(query) | Self::Z3Unknown(query) => {
+                Some(query)
+            }
+            _ => None,
         }
     }
 
@@ -98,11 +110,13 @@ impl SmtError {
             }
             Self::DeferredQuery { purpose, .. } => json!({"purpose":purpose}),
             Self::NoSmt { reason, .. } => json!({"purpose":reason,"no_smt":true}),
-            Self::SolverUnknown { reason, purpose, wall, limit, .. } => json!({
+            Self::Z3Timeout(Z3Timeout::Native(Z3QueryFailure { reason, purpose, wall, limit, .. }))
+            | Self::Z3ResourceExhausted(Z3QueryFailure { reason, purpose, wall, limit, .. })
+            | Self::Z3Unknown(Z3QueryFailure { reason, purpose, wall, limit, .. }) => json!({
                 "purpose":purpose,"reason_unknown":reason,"seconds":wall.as_secs_f64(),
                 "limit_seconds":limit.map(|duration| duration.as_secs_f64())
             }),
-            Self::Timeout(timeout) => {
+            Self::Z3Timeout(Z3Timeout::Interrupted(timeout)) => {
                 json!({"purpose":timeout.query_purpose,"operation":format!("{:?}",timeout.operation),
                 "seconds":timeout.operation_wall.as_secs_f64(),"limit_seconds":timeout.limit.as_secs_f64()})
             }
@@ -111,11 +125,13 @@ impl SmtError {
 
     pub fn source_loc(&self) -> SourceLoc {
         match self {
-            SmtError::Timeout(timeout) => timeout.source_loc(),
+            Self::Z3Timeout(Z3Timeout::Interrupted(timeout)) => timeout.source_loc(),
+            Self::Z3Timeout(Z3Timeout::Native(query)) | Self::Z3ResourceExhausted(query) | Self::Z3Unknown(query) => {
+                query.source_loc
+            }
             Self::FiniteDomain { source_loc, .. }
             | Self::DeferredQuery { source_loc, .. }
-            | SmtError::NoSmt { source_loc, .. }
-            | SmtError::SolverUnknown { source_loc, .. } => *source_loc,
+            | Self::NoSmt { source_loc, .. } => *source_loc,
         }
     }
 }
@@ -130,14 +146,15 @@ impl PartialEq for SmtError {
             (Self::DeferredQuery { source_loc: a, purpose: x }, Self::DeferredQuery { source_loc: b, purpose: y }) => {
                 (a, x) == (b, y)
             }
-            (SmtError::Timeout(lhs), SmtError::Timeout(rhs)) => Arc::ptr_eq(lhs, rhs),
+            (Self::Z3Timeout(Z3Timeout::Interrupted(lhs)), Self::Z3Timeout(Z3Timeout::Interrupted(rhs))) => {
+                Arc::ptr_eq(lhs, rhs)
+            }
             (SmtError::NoSmt { reason: a, source_loc: x }, SmtError::NoSmt { reason: b, source_loc: y }) => {
                 a == b && x == y
             }
-            (
-                SmtError::SolverUnknown { source_loc: a, purpose: p, wall: x, limit: l, reason: r },
-                SmtError::SolverUnknown { source_loc: b, purpose: q, wall: y, limit: m, reason: s },
-            ) => a == b && p == q && x == y && l == m && r == s,
+            (Self::Z3Timeout(Z3Timeout::Native(lhs)), Self::Z3Timeout(Z3Timeout::Native(rhs)))
+            | (Self::Z3ResourceExhausted(lhs), Self::Z3ResourceExhausted(rhs))
+            | (Self::Z3Unknown(lhs), Self::Z3Unknown(rhs)) => lhs == rhs,
             _ => false,
         }
     }
@@ -162,12 +179,20 @@ impl fmt::Display for SmtError {
             SmtError::NoSmt { reason, source_loc } => {
                 write!(f, "unknown_deferred_mode: 无 SMT 无法继续：{reason}，位置{source_loc:?}")
             }
-            SmtError::SolverUnknown { source_loc, purpose, wall, reason, .. } => {
-                write!(f, "unknown_solver: Z3 Unknown ({reason}) during {purpose} at {source_loc:?} (operation wall {wall:?})")
+            Self::Z3Timeout(Z3Timeout::Native(query)) | Self::Z3ResourceExhausted(query) | Self::Z3Unknown(query) => {
+                write!(
+                    f,
+                    "{}: Z3 返回 {:?}，用途 {}，位置 {:?}，耗时 {:?}",
+                    self.reject_reason(),
+                    query.reason,
+                    query.purpose,
+                    query.source_loc,
+                    query.wall
+                )
             }
-            SmtError::Timeout(timeout) => write!(
+            Self::Z3Timeout(Z3Timeout::Interrupted(timeout)) => write!(
                 f,
-                "unknown_solver: SMT timeout during {:?} at {:?} after {:?} (operation wall {:?})",
+                "z3_timeout: Z3 调用 {:?} 在 {:?} 中断，限时 {:?}，耗时 {:?}",
                 timeout.operation, timeout.source_loc, timeout.limit, timeout.operation_wall
             ),
         }

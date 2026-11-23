@@ -229,11 +229,11 @@ fn merge_diagnostics_root_preserves_nested_rejection() {
 }
 
 #[test]
-fn merge_diagnostics_root_records_first_unknown_query() {
+fn merge_diagnostics_root_records_first_indeterminate_query() {
     use crate::error::ExecError;
     use crate::executor::SpeculativeRejectReason;
 
-    let args = ["merge_diagnostics_root_records_first_unknown_query", "--nocapture", "--test-threads=1"];
+    let args = ["merge_diagnostics_root_records_first_indeterminate_query", "--nocapture", "--test-threads=1"];
     if std::env::args().skip(1).eq(args.map(str::to_owned)) {
         configure("detail").unwrap();
         let mut symtab = Symtab::new();
@@ -261,10 +261,10 @@ fn merge_diagnostics_root_records_first_unknown_query() {
         .find(|row| row["kind"] == "merge_root_end")
         .expect(&text);
     assert_eq!(ended["failure"]["reason"], "unknown_deferred_mode");
-    assert_eq!(ended["first_unknown"]["reason"], "unknown_deferred_mode");
-    assert_eq!(ended["first_unknown"]["purpose"], "general");
-    assert_eq!(ended["first_unknown"]["function"], "caller");
-    assert_eq!(ended["first_unknown"]["pc"], 17);
-    assert_eq!(ended["first_unknown"]["depth"], 1);
-    assert!(ended["first_unknown"]["location"].is_object());
+    assert_eq!(ended["first_indeterminate"]["reason"], "unknown_deferred_mode");
+    assert_eq!(ended["first_indeterminate"]["purpose"], "general");
+    assert_eq!(ended["first_indeterminate"]["function"], "caller");
+    assert_eq!(ended["first_indeterminate"]["pc"], 17);
+    assert_eq!(ended["first_indeterminate"]["depth"], 1);
+    assert!(ended["first_indeterminate"]["location"].is_object());
 }

@@ -165,10 +165,12 @@ fn default_snapshot_keeps_context_configuration_and_explicit_seed() {
         let limited = Context::new(config);
         let mut solver = Solver::<B64>::new(&limited);
         let value = solver.declare_bitvector(64, info);
-        assert!(matches!(
-            solver.check_sat_with(&Eq(Box::new(Var(value)), Box::new(smtlib::bits64(12, 64))), info),
-            Error(SmtError::SolverUnknown { .. })
-        ));
+        let Error(error) = solver.check_sat_with(&Eq(Box::new(Var(value)), Box::new(smtlib::bits64(12, 64))), info)
+        else {
+            panic!("极小 rlimit 应耗尽")
+        };
+        assert_eq!(error.diagnostic()["reason_unknown"], "canceled");
+        assert_eq!(error.reject_reason().to_string(), "z3_resource_exhausted");
         assert!(!solver.has_stashed_model());
     });
 }
@@ -188,8 +190,9 @@ fn default_snapshot_interrupt_keeps_dump_and_restores_queries() {
             Error(error) => error,
             other => panic!("应中断真实求解，得到{other:?}"),
         };
+        assert_eq!(error.reject_reason().to_string(), "z3_timeout");
         // 实际中断错误携带的转储来自原执行保存点，仍保留全部乘法断言。
-        let SmtError::Timeout(timeout) = error else { panic!("应为超时错误") };
+        let SmtError::Z3Timeout(Z3Timeout::Interrupted(timeout)) = error else { panic!("应为超时错误") };
         assert!(timeout.dump.materialize().unwrap().contains("bvmul"));
         solver.rollback_transaction(tx);
         assert!(solver.check_sat_with(&Bool(false), info).is_unsat().unwrap());
@@ -282,7 +285,7 @@ fn default_integer_range_proof_preserves_incremental_scope_and_limits() {
         assert!(
             matches!(
                 narrow(Val::Symbolic(wide), &mut solver, info),
-                Err(ExecError::Smt(SmtError::SolverUnknown { .. }))
+                Err(ExecError::Smt(SmtError::Z3ResourceExhausted(_)))
             ),
             "显式资源限制返回Unknown，不能被当作无溢出"
         );
@@ -358,7 +361,7 @@ fn default_range_interrupt_keeps_complete_dump_and_rollback_model() {
         solver.with_transaction_condition(&Var(temporary), |solver| {
             let narrow = crate::primop::unary_primops::<B64>()["%i->%i64"];
             let error = narrow(Val::Symbolic(wide), solver, info).unwrap_err();
-            let crate::error::ExecError::Smt(SmtError::Timeout(timeout)) = error else {
+            let crate::error::ExecError::Smt(SmtError::Z3Timeout(Z3Timeout::Interrupted(timeout))) = error else {
                 panic!("范围查询必须传播真实中断错误，得到{error:?}");
             };
             assert_eq!(timeout.operation, SmtOperation::CheckSatAssuming);
@@ -504,7 +507,7 @@ fn default_vector_bounds_keep_errors_limits_and_incremental_scope() {
         let index = solver.declare_bitvector(128, info);
         assert!(matches!(
             crate::primop::vector_access(values, Val::Symbolic(index), &mut solver, info),
-            Err(ExecError::Smt(SmtError::SolverUnknown { .. }))
+            Err(ExecError::Smt(SmtError::Z3ResourceExhausted(_)))
         ));
     });
 }
@@ -665,7 +668,7 @@ fn default_boolean_proofs_keep_small_incremental_and_unknown_behavior() {
         assert!(
             matches!(
                 lt(Val::Symbolic(complex), Val::I128(64), &mut solver, info),
-                Err(ExecError::Smt(SmtError::SolverUnknown { purpose: "boolean_proof", .. }))
+                Err(ExecError::Smt(SmtError::Z3ResourceExhausted(Z3QueryFailure { purpose: "boolean_proof", .. })))
             ),
             "真实查询未判定必须作为带来源的求解错误返回"
         );

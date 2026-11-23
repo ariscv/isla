@@ -1,4 +1,4 @@
-use isla_lib::error::{ExecError, SmtError};
+use isla_lib::error::{ExecError, SmtError, Z3Timeout};
 use isla_lib::timeout::TimeoutDiagnostic;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -43,7 +43,7 @@ impl TimeoutReporter {
 
     pub(super) fn report_error(&self, clause: &str, error: &ExecError) {
         let (stem, diagnostic) = match error {
-            ExecError::Smt(SmtError::Timeout(timeout)) => {
+            ExecError::Smt(SmtError::Z3Timeout(Z3Timeout::Interrupted(timeout))) => {
                 (format!("{:?}", timeout.operation), TimeoutDiagnostic::Smt(timeout.clone()))
             }
             _ => return,
@@ -130,14 +130,14 @@ mod tests {
     }
 
     fn timeout_error() -> ExecError {
-        ExecError::Smt(SmtError::Timeout(Arc::new(SmtTimeout {
+        ExecError::Smt(SmtError::Z3Timeout(Z3Timeout::Interrupted(Arc::new(SmtTimeout {
             source_loc: SourceLoc::unknown(),
             operation: SmtOperation::CheckSat,
             query_purpose: "unclassified",
             limit: Duration::from_secs(1),
             operation_wall: Duration::from_secs(1),
             dump: Arc::new(TimeoutSmtDump::new(Arc::new(FixedDump))),
-        })))
+        }))))
     }
 
     #[test]

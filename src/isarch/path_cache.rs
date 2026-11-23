@@ -705,7 +705,8 @@ pub struct ExplorationSummary {
     pub sampled_paths: u64,
     pub errors: u64,
     #[serde(default)]
-    pub failure_reasons: std::collections::BTreeMap<isla_lib::executor::SpeculativeRejectReason, u64>,
+    // 已写出的诊断保留原标签，读回时无需猜测历史查询的具体原因。
+    pub failure_reasons: std::collections::BTreeMap<String, u64>,
     pub execution_timeouts: u64,
     pub smt_timeouts: u64,
     pub unfinished_paths: u64,
@@ -1133,7 +1134,11 @@ pub(super) fn restored_summary(summary: &ExplorationSummary) -> super::solve_sum
         uncertified: summary.uncertified,
         sampled_paths: field(summary.sampled_paths),
         errors: field(summary.errors),
-        failure_reasons: summary.failure_reasons.iter().map(|(reason, count)| (*reason, field(*count))).collect(),
+        failure_reasons: summary
+            .failure_reasons
+            .iter()
+            .map(|(reason, count)| (reason.clone(), field(*count)))
+            .collect(),
         execution_timeouts: field(summary.execution_timeouts),
         smt_timeouts: field(summary.smt_timeouts),
         unfinished_paths: field(summary.unfinished_paths),

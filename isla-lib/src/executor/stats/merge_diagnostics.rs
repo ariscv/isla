@@ -514,7 +514,7 @@ struct Attempt {
     rejection_reason: Option<super::SpeculativeRejectReason>,
     failure: Option<Value>,
     nested_failure: Option<Value>,
-    first_unknown: Option<Value>,
+    first_indeterminate: Option<Value>,
     phase_at: Option<(super::SpeculativeRejectReason, Name, usize, FailurePhase)>,
 }
 
@@ -558,7 +558,7 @@ impl AttemptGuard {
                 outcome: "unfinished",
                 failure: None,
                 nested_failure: None,
-                first_unknown: None,
+                first_indeterminate: None,
                 rejection_reason: None,
                 phase_at: None,
             });
@@ -607,7 +607,7 @@ impl AttemptGuard {
             let depth = stack.len();
             if reason.is_indeterminate() {
                 let root = stack.first_mut().unwrap();
-                root.first_unknown.get_or_insert_with(|| {
+                root.first_indeterminate.get_or_insert_with(|| {
                     let detail = error.query_failure().map(|cause| cause.diagnostic());
                     json!({"reason":reason, "function":site["function"], "pc":pc, "location":location,
                         "purpose":detail.as_ref().and_then(|value|value.get("purpose")).cloned().unwrap_or(json!(phase)), "depth":depth})
@@ -660,10 +660,10 @@ impl Drop for AttemptGuard {
                 }
                 return;
             }
-            let first_unknown = if attempt.outcome == "rejected"
+            let first_indeterminate = if attempt.outcome == "rejected"
                 && attempt.rejection_reason.is_some_and(super::SpeculativeRejectReason::is_indeterminate)
             {
-                attempt.first_unknown.clone()
+                attempt.first_indeterminate.clone()
             } else {
                 None
             };
@@ -673,14 +673,14 @@ impl Drop for AttemptGuard {
                     json!({"schema":1,"kind":"merge_root_end",
                     "attempt":attempt.id,"task":attempt.task,"origin":attempt.origin,"location":location,
                     "outcome":attempt.outcome,"elapsed_seconds":started.elapsed().as_secs_f64(),
-                    "failure":attempt.failure,"first_unknown":first_unknown})
+                    "failure":attempt.failure,"first_indeterminate":first_indeterminate})
                 );
             }
-            if let (Some(first_unknown), Some(started)) = (first_unknown, attempt.root_started) {
-                COUNTS.get().unwrap().lock().unwrap().record_first_unknown_root(
+            if let (Some(first_indeterminate), Some(started)) = (first_indeterminate, attempt.root_started) {
+                COUNTS.get().unwrap().lock().unwrap().record_first_indeterminate_root(
                     &attempt.origin,
                     attempt.rejection_reason.unwrap(),
-                    &first_unknown,
+                    &first_indeterminate,
                     started.elapsed().as_secs_f64(),
                 );
             }
@@ -790,7 +790,7 @@ pub(crate) fn record_deferred_query(purpose: &str, info: crate::source_loc::Sour
             let mut stack = stack.borrow_mut();
             let depth = stack.len();
             if let Some(root) = stack.first_mut() {
-                root.first_unknown.get_or_insert_with(|| {
+                root.first_indeterminate.get_or_insert_with(|| {
                     json!({"reason":super::SpeculativeRejectReason::UnknownDeferredMode,"purpose":purpose,"location":info,"function":site["function"],"pc":site["pc"],"depth":depth})
                 });
             }
@@ -850,7 +850,7 @@ pub(crate) fn execute_arm_error(function: Name, pc: usize, error: &ExecError, sy
 
 pub(super) struct DiagnosticCounts {
     blocked_queries: BTreeMap<String, u64>,
-    first_unknown_roots: BTreeMap<String, (u64, f64)>,
+    first_indeterminate_roots: BTreeMap<String, (u64, f64)>,
     depths: BTreeMap<usize, u64>,
     max_call_depth: usize,
     max_transaction_depth: usize,
@@ -868,7 +868,7 @@ impl DiagnosticCounts {
     pub fn new(mode: Mode) -> Self {
         Self {
             blocked_queries: BTreeMap::new(),
-            first_unknown_roots: BTreeMap::new(),
+            first_indeterminate_roots: BTreeMap::new(),
             depths: BTreeMap::new(),
             max_call_depth: 0,
             max_transaction_depth: 0,
@@ -883,15 +883,15 @@ impl DiagnosticCounts {
             oversized: 0,
         }
     }
-    fn record_first_unknown_root(
+    fn record_first_indeterminate_root(
         &mut self,
         root: &Value,
         reason: super::SpeculativeRejectReason,
-        first_unknown: &Value,
+        first_indeterminate: &Value,
         elapsed_seconds: f64,
     ) {
-        let key = json!({"root":root,"reason":reason,"first_unknown":{"reason":first_unknown["reason"],"purpose":first_unknown["purpose"],"location":first_unknown["location"]}}).to_string();
-        let entry = self.first_unknown_roots.entry(key).or_default();
+        let key = json!({"root":root,"reason":reason,"first_indeterminate":{"reason":first_indeterminate["reason"],"purpose":first_indeterminate["purpose"],"location":first_indeterminate["location"]}}).to_string();
+        let entry = self.first_indeterminate_roots.entry(key).or_default();
         entry.0 += 1;
         entry.1 += elapsed_seconds;
     }
@@ -992,8 +992,8 @@ fn print_with_trigger(trigger: &str, stats: &super::ExecutionStats) {
     writeln!(
         out,
         "{}",
-        json!({"kind":"region_first_unknown_summary","snapshot":snapshot,
-        "roots":counts.first_unknown_roots.iter().map(|(key,(count,root_wall_seconds))|
+        json!({"kind":"region_first_indeterminate_summary","snapshot":snapshot,
+        "roots":counts.first_indeterminate_roots.iter().map(|(key,(count,root_wall_seconds))|
             json!({"key":serde_json::from_str::<Value>(key).unwrap(),"count":count,"root_wall_seconds":root_wall_seconds})).collect::<Vec<_>>()})
     )
     .unwrap();

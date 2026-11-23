@@ -20,7 +20,9 @@ pub enum SpeculationMode {
 #[serde(rename_all = "snake_case")]
 pub enum SpeculativeRejectReason {
     UnknownFiniteDomain,
-    UnknownSolver,
+    UnknownZ3,
+    Z3Timeout,
+    Z3ResourceExhausted,
     UnknownDeferredMode,
     ExitUnsat,
     SymbolicAssertion,
@@ -73,13 +75,23 @@ pub enum SpeculativeRejectReason {
 
 impl SpeculativeRejectReason {
     pub(crate) fn is_indeterminate(self) -> bool {
-        matches!(self, Self::UnknownFiniteDomain | Self::UnknownSolver | Self::UnknownDeferredMode | Self::PathTimeout)
+        matches!(
+            self,
+            Self::UnknownFiniteDomain
+                | Self::UnknownZ3
+                | Self::Z3Timeout
+                | Self::Z3ResourceExhausted
+                | Self::UnknownDeferredMode
+                | Self::PathTimeout
+        )
     }
 
     pub(crate) fn partial_commit(self, options: &crate::config::RegionOptions) -> bool {
         match self {
             Self::UnknownFiniteDomain => options.partial_commit_finite_domain,
-            Self::UnknownSolver => options.partial_commit_solver,
+            Self::UnknownZ3 => options.partial_commit_unknown_z3,
+            Self::Z3Timeout => options.partial_commit_z3_timeout,
+            Self::Z3ResourceExhausted => options.partial_commit_z3_resource_exhausted,
             Self::UnknownDeferredMode => options.partial_commit_deferred_mode,
             _ => false,
         }

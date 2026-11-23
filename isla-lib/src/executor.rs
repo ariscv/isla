@@ -13515,7 +13515,7 @@ fn zcaller(za, zb) {
     mod path_failure_policy_tests;
 
     #[test]
-    fn unknown_solver_jump_drops_only_the_indeterminate_side() {
+    fn unknown_z3_jump_drops_only_the_indeterminate_side() {
         let mut shared = empty_shared_state();
         shared.symtab.set_files(vec!["branch.sail"]);
         let source = SourceLoc::new(0, 7, 3, 7, 9);
@@ -13553,7 +13553,7 @@ fn zcaller(za, zb) {
     }
 
     #[test]
-    fn unknown_solver_assertion_drops_the_path() {
+    fn unknown_z3_assertion_drops_the_path() {
         let shared = empty_shared_state();
         let flag = test_name(100);
         let program = vec![
@@ -13585,7 +13585,7 @@ fn zcaller(za, zb) {
     }
 
     #[test]
-    fn unknown_solver_in_validation_reaches_the_collector() {
+    fn unknown_z3_in_validation_reaches_the_collector() {
         crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let shared = empty_shared_state();
         let flag = test_name(100);
@@ -13598,15 +13598,12 @@ fn zcaller(za, zb) {
                 results.borrow_mut().push(result.map(|(run, _)| run).map_err(|(error, _)| error));
             });
         });
-        assert!(matches!(
-            results.into_inner().as_slice(),
-            [Err(ExecError::Smt(crate::error::SmtError::SolverUnknown { .. }))]
-        ));
+        assert!(matches!(results.into_inner().as_slice(), [Err(ExecError::Smt(crate::error::SmtError::Z3Unknown(_)))]));
         assert_eq!(shared.execution_stats.solver_path_drop_count(), 0);
     }
 
     #[test]
-    fn unknown_solver_length_candidate_retains_the_remainder() {
+    fn unknown_z3_length_candidate_retains_the_remainder() {
         crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
         let shared = empty_shared_state();
         let mut config = Config::new();

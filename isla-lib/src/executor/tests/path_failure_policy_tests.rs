@@ -14,7 +14,7 @@ pub(super) fn with_solver_dead<T>(run: impl FnOnce() -> T) -> T {
 }
 
 #[test]
-fn unknown_solver_panics_for_one_or_both_branch_sides() {
+fn unknown_z3_panics_for_one_or_both_branch_sides() {
     let mut shared = empty_shared_state();
     shared.symtab.set_files(vec!["branch.sail"]);
     let source = SourceLoc::new(0, 7, 3, 7, 9);
@@ -36,15 +36,9 @@ fn unknown_solver_panics_for_one_or_both_branch_sides() {
                 );
             });
         });
-        for detail in [
-            "pc=1",
-            "branch.sail:7",
-            "branch_feasibility",
-            "reason=unknown_solver",
-            "elapsed=",
-            "limit=",
-            "path_depth=",
-        ] {
+        for detail in
+            ["pc=1", "branch.sail:7", "branch_feasibility", "reason=unknown_z3", "elapsed=", "limit=", "path_depth="]
+        {
             assert!(message.contains(detail), "{message}");
         }
     }

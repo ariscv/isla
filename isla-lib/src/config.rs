@@ -2753,11 +2753,14 @@ end_column = 0
 
     #[test]
     fn unknown_taxonomy_rejects_removed_combined_switch() {
+        assert!(merge_config("[execution_limits.path_merge]\npartial_commit_solver=true").is_err());
         assert!(merge_config("[execution_limits.path_merge]\npartial_commit_solver_unknown=true").is_err());
         use crate::executor::SpeculativeRejectReason::*;
         let switches = [
             ("partial_commit_finite_domain", UnknownFiniteDomain),
-            ("partial_commit_solver", UnknownSolver),
+            ("partial_commit_unknown_z3", UnknownZ3),
+            ("partial_commit_z3_timeout", Z3Timeout),
+            ("partial_commit_z3_resource_exhausted", Z3ResourceExhausted),
             ("partial_commit_deferred_mode", UnknownDeferredMode),
         ];
         for (field, enabled) in switches {
@@ -2774,7 +2777,7 @@ end_column = 0
     #[test]
     fn region_options_toml_accepts_switches_and_limits() {
         assert!(merge_config(
-            "[execution_limits.path_merge]\ndefer_exit_check=true\npartial_commit_solver=true\nwitness_eval=true\n[execution_limits.solver]\nbool_proof_rlimit=1"
+            "[execution_limits.path_merge]\ndefer_exit_check=true\npartial_commit_unknown_z3=true\nwitness_eval=true\n[execution_limits.solver]\nbool_proof_rlimit=1"
         )
         .is_ok());
         assert!(merge_config("[execution_limits.path_merge.diagnostics]\nquery_dump_sites=['f@1']\nquery_dump_dir='queries'\nsame_context_sites=['f@1']").is_ok());
@@ -2887,7 +2890,9 @@ obligation_dump_dir = "obligations"
                 no_smt_keep_bool_proofs: false,
                 defer_exit_check: true,
                 partial_commit_finite_domain: false,
-                partial_commit_solver: false,
+                partial_commit_unknown_z3: false,
+                partial_commit_z3_timeout: false,
+                partial_commit_z3_resource_exhausted: false,
                 partial_commit_deferred_mode: false,
                 lazy_z3_scope: true,
                 witness_eval: true,

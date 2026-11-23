@@ -10,7 +10,7 @@ use super::{get_all_clause_names, list_instructions, try_get_assembly_encdec, tr
 use isla_lib::bitvector::BV;
 use isla_lib::config::ExecutionLimitsConfig;
 use isla_lib::error::IslaError;
-use isla_lib::error::{ExecError, SmtError};
+use isla_lib::error::{ExecError, SmtError, Z3Timeout};
 use isla_lib::executor::stats::solver_failures::{handle_solver_path_failure, is_solver_failure};
 use isla_lib::executor::{backtrace_string, execute_ir_function_with_limits, LocalFrame, Run, ScopedCollector};
 use isla_lib::executor::{ExecutionLimits, TaskId, TaskState};
@@ -931,10 +931,10 @@ impl SolveCollectorState {
     fn record_error(&mut self, error: &ExecError) {
         self.summary.errors += 1;
         if let Some(reason) = error.rejection_reason() {
-            *self.summary.failure_reasons.entry(reason).or_default() += 1;
+            *self.summary.failure_reasons.entry(reason.to_string()).or_default() += 1;
         }
         self.summary.execution_timeouts += usize::from(matches!(error, ExecError::Timeout));
-        self.summary.smt_timeouts += usize::from(matches!(error, ExecError::Smt(SmtError::Timeout(_))));
+        self.summary.smt_timeouts += usize::from(matches!(error, ExecError::Smt(SmtError::Z3Timeout(_))));
         if self.first_error.is_none() {
             self.first_error = Some(error.clone());
         }
@@ -1018,7 +1018,7 @@ impl ErrorRecorder<'_> {
     ) -> Vec<(isla_lib::timeout::TimeoutDiagnostic, bool)> {
         self.collected.lock().expect("solve collector mutex poisoned").record_error(error);
         let diagnostics = match error {
-            ExecError::Smt(SmtError::Timeout(timeout)) => {
+            ExecError::Smt(SmtError::Z3Timeout(Z3Timeout::Interrupted(timeout))) => {
                 let diagnostic = isla_lib::timeout::TimeoutDiagnostic::Smt(timeout.clone());
                 drop(diagnostic.dump().materialize());
                 vec![(diagnostic, self.reporter.trace_enabled())]
@@ -2554,7 +2554,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                             };
                             if let isla_lib::smt::SmtResult::Error(error) = &smt_result {
                                 let error = ExecError::Smt(error.clone());
-                                if matches!(error, ExecError::Smt(SmtError::Timeout(_))) {
+                                if matches!(error, ExecError::Smt(SmtError::Z3Timeout(_))) {
                                     collected
                                         .lock()
                                         .expect("solve collector mutex poisoned")
@@ -3075,7 +3075,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             .iter()
             .filter(|case| case.materialization_timed_out)
             .map(|case| {
-                serde_json::json!({"status":"incomplete", "reason":"unknown_solver",
+                serde_json::json!({"status":"incomplete", "reason":"z3_timeout",
             "path-signature":case.path_signature, "symbolic-return-value":case.item.ret_val})
             })
             .collect::<Vec<_>>(),
@@ -3702,7 +3702,7 @@ mod tests {
             operation_wall: Duration::from_secs(1),
             dump: Arc::new(TimeoutSmtDump::new(Arc::new(NamesDump))),
         });
-        let error = ExecError::Smt(SmtError::Timeout(timeout.clone()));
+        let error = ExecError::Smt(SmtError::Z3Timeout(Z3Timeout::Interrupted(timeout.clone())));
         let collected = Mutex::new(SolveCollectorState::new());
         let reporter = TimeoutReporter::new(TimeoutReportConfig {
             output: TimeoutSmtOutput::new(false, false, true),
@@ -3713,7 +3713,7 @@ mod tests {
         let diagnostics = recorder.record_error_diagnostic(&error, &frame, &shared_state);
 
         let state = collected.into_inner().unwrap();
-        let Some(ExecError::Smt(SmtError::Timeout(recorded))) = state.first_error else {
+        let Some(ExecError::Smt(SmtError::Z3Timeout(Z3Timeout::Interrupted(recorded)))) = state.first_error else {
             panic!("SMT timeout was not recorded")
         };
         assert!(Arc::ptr_eq(&recorded, &timeout));
@@ -3737,17 +3737,20 @@ mod tests {
             operation_wall: Duration::from_secs(1),
             dump: Arc::new(TimeoutSmtDump::new(Arc::new(NamesDump))),
         });
-        for error in [
-            SmtError::SolverUnknown {
-                reason: "测试注入".into(),
-                source_loc: SourceLoc::unknown(),
-                purpose: "terminal_value",
-                wall: Duration::from_millis(1),
-                limit: Some(Duration::from_secs(1)),
-            },
-            SmtError::Timeout(timeout),
+        let query = |reason: &str| isla_lib::error::Z3QueryFailure {
+            reason: reason.into(),
+            source_loc: SourceLoc::unknown(),
+            purpose: "terminal_value",
+            wall: Duration::from_millis(1),
+            limit: None,
+        };
+        for (error, reason) in [
+            (SmtError::Z3Unknown(query("(incomplete quantifiers)")), "unknown_z3"),
+            (SmtError::Z3ResourceExhausted(query("max. resource limit exceeded")), "z3_resource_exhausted"),
+            (SmtError::Z3Timeout(Z3Timeout::Native(query("timeout"))), "z3_timeout"),
+            (SmtError::Z3Timeout(Z3Timeout::Interrupted(timeout)), "z3_timeout"),
         ] {
-            let is_timeout = matches!(error, SmtError::Timeout(_));
+            let is_timeout = matches!(error, SmtError::Z3Timeout(_));
             let collected = Mutex::new(SolveCollectorState::new());
             let reporter = TimeoutReporter::new(TimeoutReportConfig {
                 output: TimeoutSmtOutput::new(false, true, false),
@@ -3766,16 +3769,14 @@ mod tests {
             .unwrap_err();
             let message = panic.downcast_ref::<String>().unwrap();
             assert!(message.contains("function=test_function"), "{message}");
-            assert!(
-                message.contains(if is_timeout { "reason=unknown_solver" } else { "purpose=terminal_value" }),
-                "{message}"
-            );
+            assert!(message.contains(&format!("reason={reason}")), "{message}");
             let drop_start = shared_state.execution_stats.solver_path_drop_count();
             let recorder = ErrorRecorder { on_unknown: Some(PathFailureAction::Dead), ..recorder };
             assert!(!recorder.terminal_path_is_sat(isla_lib::smt::SmtResult::Error(error), &frame, &shared_state));
             let mut state = collected.into_inner().unwrap();
             let drops = shared_state.execution_stats.solver_path_drops_since(drop_start);
             assert_eq!(drops.count, 1);
+            assert_eq!(drops.first_locations[0].reason, reason);
             state.summary.solver_path_drops = drops;
             assert!(state.cases.is_empty());
             assert_eq!(state.summary.errors, 1);
@@ -3783,6 +3784,7 @@ mod tests {
             assert!(matches!(state.first_error, Some(ExecError::Smt(_))));
             assert_eq!(state.summary.status(), "partial");
             assert_eq!(state.diagnostics.len(), 1);
+            assert_eq!(state.diagnostics[0]["reason"], reason);
             assert_eq!(state.summary.json()["valid"], false);
             assert_eq!(exploration_exit_code(1, &shared_state), 66);
         }
@@ -3813,6 +3815,13 @@ mod tests {
     fn unknown_taxonomy_counts_each_terminal_reason() {
         let loc = SourceLoc::unknown();
         let mut state = SolveCollectorState::new();
+        let query = |reason: &str| isla_lib::error::Z3QueryFailure {
+            source_loc: loc,
+            purpose: "test",
+            reason: reason.into(),
+            wall: Duration::ZERO,
+            limit: None,
+        };
         for error in [
             ExecError::Smt(SmtError::FiniteDomain {
                 source_loc: loc,
@@ -3820,13 +3829,9 @@ mod tests {
                 width: 64,
                 candidates: None,
             }),
-            ExecError::Smt(SmtError::SolverUnknown {
-                source_loc: loc,
-                purpose: "test",
-                reason: "rlimit".into(),
-                wall: Duration::ZERO,
-                limit: None,
-            }),
+            ExecError::Smt(SmtError::Z3Unknown(query("(incomplete lambdas)"))),
+            ExecError::Smt(SmtError::Z3ResourceExhausted(query("memout"))),
+            ExecError::Smt(SmtError::Z3Timeout(Z3Timeout::Native(query("timeout")))),
             ExecError::Unproven(SmtError::DeferredQuery { source_loc: loc, purpose: "model_or_general" }),
             ExecError::Timeout,
         ] {
@@ -3837,12 +3842,18 @@ mod tests {
         assert_eq!(
             total.json()["failure-reasons"],
             serde_json::json!({
-                "unknown_finite_domain":1, "unknown_solver":1, "unknown_deferred_mode":1, "path_timeout":1
+                "unknown_finite_domain":1, "unknown_z3":1, "unknown_deferred_mode":1, "path_timeout":1,
+                "z3_timeout":1, "z3_resource_exhausted":1
             })
         );
         let saved = serde_json::from_value(total.json()).unwrap();
         assert_eq!(super::super::path_cache::restored_summary(&saved).failure_reasons, total.failure_reasons);
-        assert_eq!(total.errors, 4);
+        assert_eq!(total.errors, 6);
+
+        let mut saved = total.json();
+        saved["failure-reasons"]["older-diagnostic"] = serde_json::json!(1);
+        let saved = serde_json::from_value(saved).unwrap();
+        assert_eq!(super::super::path_cache::restored_summary(&saved).failure_reasons["older-diagnostic"], 1);
     }
 
     #[test]

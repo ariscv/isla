@@ -67,7 +67,7 @@ use std::ptr;
 use std::sync::{Arc, OnceLock};
 
 use crate::bitvector::BV;
-use crate::error::{ExecError, SmtError};
+use crate::error::{ExecError, SmtError, Z3QueryFailure, Z3Timeout};
 use crate::executor::stats::region_progress::{WorkKind, WorkTimer};
 use crate::ir::{Loc, Name, Symtab, Val};
 use crate::source_loc::SourceLoc;
@@ -951,6 +951,8 @@ pub struct Config {
     pub solver_options: SolverOptions,
     pub(crate) validation: bool,
     z3_cfg: Z3_config,
+    rlimit: Option<u32>,
+    native_timeout: Option<Duration>,
 }
 
 impl Config {
@@ -958,7 +960,9 @@ impl Config {
         let solver_options = SOLVER_OPTIONS.get().copied().unwrap_or_default();
         #[cfg(test)]
         let solver_options = test_queries::solver_options().unwrap_or(solver_options);
-        unsafe { Config { z3_cfg: Z3_mk_config(), solver_options, validation: false } }
+        unsafe {
+            Config { z3_cfg: Z3_mk_config(), solver_options, validation: false, rlimit: None, native_timeout: None }
+        }
     }
 }
 
@@ -976,6 +980,17 @@ impl Default for Config {
 
 impl Config {
     pub fn set_param_value(&mut self, id: &str, value: &str) {
+        match id {
+            "rlimit" => self.rlimit = value.parse::<u32>().ok().filter(|limit| *limit != 0),
+            "timeout" => {
+                self.native_timeout = value
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|limit| *limit != 0 && *limit != u32::MAX)
+                    .map(|limit| Duration::from_millis(u64::from(limit)))
+            }
+            _ => (),
+        }
         let id = CString::new(id).unwrap();
         let value = CString::new(value).unwrap();
         unsafe { Z3_set_param_value(self.z3_cfg, id.as_ptr(), value.as_ptr()) }
@@ -1000,6 +1015,8 @@ pub struct Context {
     solver_options: SolverOptions,
     validation: bool,
     z3_ctx: Z3_context,
+    rlimit: Option<u32>,
+    native_timeout: Option<Duration>,
     enum_cache: RefCell<HashMap<EnumSortKey, Enum>>,
 }
 
@@ -1022,6 +1039,8 @@ impl Context {
                 solver_options: cfg.solver_options,
                 validation: cfg.validation,
                 z3_ctx: Z3_mk_context_rc(cfg.z3_cfg),
+                rlimit: cfg.rlimit,
+                native_timeout: cfg.native_timeout,
                 enum_cache: RefCell::new(HashMap::new()),
             }
         }
@@ -2210,7 +2229,7 @@ pub(crate) fn model_bits_to_bv<B: BV>(bits: &[bool]) -> Result<B, ExecError> {
     Ok(bitvector)
 }
 
-/// thread-interrupt wrapper 在 ModelEval 超时时构造最终 `SmtError::Timeout`
+/// thread-interrupt wrapper 在 ModelEval 超时时构造最终 `SmtError::Z3Timeout`
 /// 所需的调用边界信息。它不是另一套错误类型。
 struct ModelEvalTimeoutContext {
     started: Instant,
@@ -2611,20 +2630,34 @@ pub enum SmtResult {
 
 use SmtResult::*;
 
-fn z3_unknown_error(info: SourceLoc, wall: Duration, deadline: Option<Duration>, reason: String) -> SmtError {
-    #[cfg(feature = "smt-thread-interrupt")]
-    let limit = deadline.or_else(z3_timeout::configured_operation_timeout);
-    #[cfg(not(feature = "smt-thread-interrupt"))]
-    let limit = {
-        let _ = deadline;
-        None
-    };
-    SmtError::SolverUnknown {
-        reason,
-        source_loc: info,
-        wall,
-        limit,
-        purpose: crate::executor::stats::region_progress::query_label(),
+fn z3_query_error(
+    source_loc: SourceLoc,
+    wall: Duration,
+    native_timeout: Option<Duration>,
+    reason: String,
+    rlimit_exhausted: bool,
+) -> SmtError {
+    let purpose = crate::executor::stats::region_progress::query_label();
+    let mut query = Z3QueryFailure { source_loc, wall, limit: None, reason, purpose };
+    match query.reason.trim() {
+        "max. resource limit exceeded"
+        | "(resource limits reached)"
+        | "max. memory exceeded"
+        | "out of memory"
+        | "memout"
+        | "max-conflicts-reached"
+        | "max. scopes exceeded"
+        | "max. steps exceeded"
+        | "max. frames exceeded" => SmtError::Z3ResourceExhausted(query),
+        "canceled" | "sat.canceled" if rlimit_exhausted => SmtError::Z3ResourceExhausted(query),
+        "timeout" => {
+            query.limit = native_timeout;
+            SmtError::Z3Timeout(Z3Timeout::Native(query))
+        }
+        "interrupted" | "interrupted from keyboard" | "canceled" | "sat.canceled" => {
+            SmtError::Z3Timeout(Z3Timeout::Native(query))
+        }
+        _ => SmtError::Z3Unknown(query),
     }
 }
 
@@ -2728,9 +2761,9 @@ impl SmtResult {
         }
     }
 
-    /// 保留可选证明未完成与 Z3 返回 UNDEF 的判定；拒绝分类读取具体载荷。
+    /// Z3 返回 UNDEF，且没有超时、中断或资源耗尽原因时为真。
     pub fn is_unknown(&self) -> bool {
-        matches!(self, Unproven(_) | Error(SmtError::SolverUnknown { .. }))
+        matches!(self, Unproven(SmtError::Z3Unknown(_)) | Error(SmtError::Z3Unknown(_)))
     }
 }
 
@@ -3686,7 +3719,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let query_scope = crate::executor::stats::region_progress::QueryScope::fallback(label);
         #[cfg(test)]
         if test_queries::take_unknown_purpose() {
-            return Error(z3_unknown_error(info, Duration::ZERO, None, "测试注入".into()));
+            return Error(z3_query_error(info, Duration::ZERO, None, "测试注入".into(), false));
         }
 
         let proof_limit = if matches!(&purpose, query::QueryPurpose::BooleanProof) && self.transaction_depth() > 0 {
@@ -3758,6 +3791,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         };
         let diagnostic_started = diagnostic_dump.as_ref().map(|_| Instant::now());
         let slow_query = self.slow_query_begin(query.z3_solver);
+        let resource_budget = query.resource_budget(proof_limit);
         let check_started = Instant::now();
         let z3_result = match timeout_Z3_solver_check_assumptions(
             self.ctx.z3_ctx,
@@ -3814,7 +3848,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         } else if z3_result == Z3_L_FALSE {
             Unsat
         } else {
-            let error = z3_unknown_error(info, check_elapsed, None, z3_reason_unknown(self.ctx, query.z3_solver));
+            let error = query.failure(info, check_elapsed, resource_budget);
             // 显式限额只约束可选折叠，耗尽时保留原布尔表达式。
             if proof_limit.is_some() {
                 Unproven(error)
@@ -3860,6 +3894,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let query = self.query_solver(&assumptions, false);
         let shadow = self.shadow_probe(query.z3_solver, query.assumptions(&assumptions));
         let slow_query = self.slow_query_begin(query.z3_solver);
+        let resource_budget = query.resource_budget(None);
         let check_started = Instant::now();
         let z3_result =
             match timeout_Z3_solver_check(self.ctx.z3_ctx, query.z3_solver, query.assumptions(&assumptions), info) {
@@ -3883,7 +3918,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         } else if z3_result == Z3_L_FALSE {
             Unsat
         } else {
-            Error(z3_unknown_error(info, check_started.elapsed(), None, z3_reason_unknown(self.ctx, query.z3_solver)))
+            Error(query.failure(info, check_started.elapsed(), resource_budget))
         };
         self.slow_query_finish(slow_query, query.z3_solver, None, info, z3_result);
         self.record_check_result(&result, query.z3_solver);
@@ -3989,6 +4024,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let query = self.query_solver(&assumptions, false);
         let shadow = self.shadow_probe(query.z3_solver, query.assumptions(&assumptions));
         let _query_scope = crate::executor::stats::region_progress::QueryScope::fallback("terminal_model");
+        let resource_budget = query.resource_budget(None);
         let check_started = Instant::now();
         let z3_result = match timeout_Z3_solver_check_deadline(
             self.ctx.z3_ctx,
@@ -4017,12 +4053,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         } else if z3_result == Z3_L_FALSE {
             Unsat
         } else {
-            Error(z3_unknown_error(
-                info,
-                check_started.elapsed(),
-                Some(deadline),
-                z3_reason_unknown(self.ctx, query.z3_solver),
-            ))
+            Error(query.failure(info, check_started.elapsed(), resource_budget))
         };
         self.record_check_result(&result, query.z3_solver);
         result
@@ -4675,14 +4706,16 @@ mod tests {
     #[test]
     fn smt_timeout_result_preserves_error_artifact_identity() {
         let timeout = timeout_artifact();
-        let same = SmtResult::Error(SmtError::Timeout(timeout.clone()));
-        let same_again = SmtResult::Error(SmtError::Timeout(timeout.clone()));
-        let different = SmtResult::Error(SmtError::Timeout(timeout_artifact()));
+        let same = SmtResult::Error(SmtError::Z3Timeout(Z3Timeout::Interrupted(timeout.clone())));
+        let same_again = SmtResult::Error(SmtError::Z3Timeout(Z3Timeout::Interrupted(timeout.clone())));
+        let different = SmtResult::Error(SmtError::Z3Timeout(Z3Timeout::Interrupted(timeout_artifact())));
 
         assert_eq!(same, same_again);
         assert_ne!(same, different);
         match same.is_sat() {
-            Err(ExecError::Smt(SmtError::Timeout(error))) => assert!(Arc::ptr_eq(&error, &timeout)),
+            Err(ExecError::Smt(SmtError::Z3Timeout(Z3Timeout::Interrupted(error)))) => {
+                assert!(Arc::ptr_eq(&error, &timeout))
+            }
             result => panic!("unexpected timeout conversion: {:?}", result),
         }
     }
