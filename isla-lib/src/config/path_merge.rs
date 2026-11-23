@@ -112,8 +112,6 @@ pub struct PathMergeConfig {
     pub defer_exit_check: bool,
     /// 嵌套区域遇到 solver_unknown 时，保留外层区域并在其中退化为普通分叉；默认关闭。
     pub partial_commit_solver_unknown: bool,
-    /// 根区域出口认证失败时按到达守卫分别认证并发布；默认关闭。
-    pub root_cert_split: bool,
     /// 分支入口识别布尔恒值；默认开启。
     pub prune_constant_branches: bool,
     /// 保留独立执行错误叶，默认关闭。
@@ -150,7 +148,6 @@ impl Default for PathMergeConfig {
             step_budget: None,
             defer_exit_check: false,
             partial_commit_solver_unknown: false,
-            root_cert_split: false,
             prune_constant_branches: true,
             arm_error_leaf: false,
             merge_concrete_values: true,

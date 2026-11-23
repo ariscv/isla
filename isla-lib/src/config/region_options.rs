@@ -25,8 +25,6 @@ pub struct RegionOptions {
     pub defer_exit_check: bool,
     /// 嵌套区域遇到 solver_unknown 时，保留外层区域并在其中退化为普通分叉；默认关闭。
     pub partial_commit_solver_unknown: bool,
-    /// 根区域出口认证失败时按到达守卫分别认证并发布；默认关闭。
-    pub root_cert_split: bool,
     /// 分支入口识别布尔恒值；默认开启。
     pub prune_constant_branches: bool,
     pub arm_error_leaf: bool,
@@ -93,7 +91,6 @@ impl RegionOptions {
             no_smt_keep_bool_proofs: limits.solver.no_smt_keep_bool_proofs,
             defer_exit_check: merge.defer_exit_check,
             partial_commit_solver_unknown: merge.partial_commit_solver_unknown,
-            root_cert_split: merge.root_cert_split,
             prune_constant_branches: merge.prune_constant_branches,
             arm_error_leaf: merge.arm_error_leaf,
             arm_error_batch_size: merge.solver.arm_error_batch_size,

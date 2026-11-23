@@ -137,19 +137,6 @@ impl<B: BV> Solver<'_, B> {
         }
     }
 
-    /// 根出口分治认证需要在延后义务仍可读取时查询候选。只临时恢复真实查询；
-    /// 义务上下文、事务和后续登记均保持不变。
-    pub(crate) fn suspend_deferred_region_queries<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
-        assert!(self.deferred_region_queries, "只能在延后区域认证期间暂停延后查询");
-        self.deferred_region_queries = false;
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
-        self.deferred_region_queries = true;
-        match result {
-            Ok(value) => value,
-            Err(error) => std::panic::resume_unwind(error),
-        }
-    }
-
     pub(crate) fn note_deferred_mandatory_query(
         &mut self,
         purpose: &'static str,
@@ -289,16 +276,6 @@ impl<B: BV> Solver<'_, B> {
     }
 
     pub(crate) fn check_deferred_assertions(&mut self, info: SourceLoc) -> Option<SmtResult> {
-        self.check_deferred_assertions_with(None, info)
-    }
-
-    /// `condition` 选择一组根出口臂。每项义务本身已经包含产生它的臂守卫，
-    /// 因而该查询只认证此组，不能由兄弟臂的正常出口掩盖失败。
-    pub(crate) fn check_deferred_assertions_with(
-        &mut self,
-        condition: Option<&Exp<Sym>>,
-        info: SourceLoc,
-    ) -> Option<SmtResult> {
         if !self.validates_candidates() {
             return None;
         }
@@ -356,11 +333,7 @@ impl<B: BV> Solver<'_, B> {
         let mut verifier = Solver::<B>::from_checkpoint(self.ctx, point.clone());
         let replay_seconds = replay_started.elapsed().as_secs_f64();
         let check_started = Instant::now();
-        let target = match condition {
-            Some(condition) => Exp::And(Box::new(condition.clone()), Box::new(bad.clone())),
-            None => bad.clone(),
-        };
-        let result = verifier.check_sat_with(&target, info);
+        let result = verifier.check_sat_with(&bad, info);
         let check_seconds = check_started.elapsed().as_secs_f64();
         // 仅显式诊断开关导出少量小检查；旧日志没有这些dump，不能冒充旧查询重放。
         if matches!(result, Sat) && state.arm.obligations.len() <= 8 {

@@ -208,7 +208,6 @@ pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
         pc: frame.pc,
         speculation_mode: frame.speculation_mode,
         region_execution: frame.region_execution.clone(),
-        root_certification_done: false,
         region_replay: frame.region_replay,
         region_merge_records: frame.region_merge_records.clone(),
         region_arrivals: Vec::new(),
@@ -244,8 +243,6 @@ pub struct LocalFrame<'ir, B> {
     // 符号悲观断言拒绝后，按普通分叉重跑到原区域汇合点。
     pub(super) region_replay: Option<(usize, crate::ir::regions::RegionPoint)>,
     pub(super) region_execution: Option<super::region_merge::RegionExecution>,
-    /// 根出口已按到达守卫逐组认证，外层不得再次用整根查询覆盖该结果。
-    pub(super) root_certification_done: bool,
     /// 未能汇合的已到达片段，仅在活动区域的挂起边界上传递。
     pub(super) region_arrivals: Vec<LocalFrame<'ir, B>>,
     pub(super) region_arm: Option<crate::smt::LogicalArm>,
@@ -303,7 +300,6 @@ impl<'ir, B: Clone> Clone for LocalFrame<'ir, B> {
             speculation_mode: self.speculation_mode,
             region_replay: self.region_replay,
             region_execution: self.region_execution.clone(),
-            root_certification_done: self.root_certification_done,
             region_arrivals: Vec::new(),
             region_arm: self.region_arm,
             region_merge_records: self.region_merge_records.clone(),
@@ -654,7 +650,6 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             pc: 0,
             speculation_mode: SpeculationMode::Off,
             region_execution: None,
-            root_certification_done: false,
             region_arrivals: Vec::new(),
             region_arm: None,
             region_replay: None,
