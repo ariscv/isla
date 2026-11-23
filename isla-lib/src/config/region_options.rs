@@ -39,8 +39,9 @@ pub struct RegionOptions {
     pub witness_shadow: bool,
     /// 局部见证补全影子诊断；默认关闭。
     pub witness_local_shadow: bool,
-    /// 迭代边界前缀固化，并压缩无架构写入循环的运行时记录历史；默认关闭。
+    /// 迭代边界前缀固化，并压缩已完成轮次的记录和逻辑臂；默认关闭。
     pub prefix_compact: bool,
+    pub loop_fold_shapes: bool,
     /// 可选布尔证明资源统计；默认关闭。
     pub bool_proof_profile: bool,
     /// 区域步数和查询进度诊断；默认关闭。
@@ -101,6 +102,7 @@ impl RegionOptions {
             lazy_z3_scope: merge.lazy_z3_scope,
             witness_eval: merge.witness_eval,
             prefix_compact: merge.prefix_compact,
+            loop_fold_shapes: merge.loop_fold_shapes,
             bool_proof_rlimit: limits.solver.bool_proof_rlimit,
             witness_shadow: diagnostics.witness_shadow,
             witness_local_shadow: diagnostics.witness_local_shadow,

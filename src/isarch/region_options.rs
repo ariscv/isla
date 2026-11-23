@@ -26,6 +26,7 @@ const BOOL_OPTIONS: &[(&str, &str, &str)] = &[
     ("witness_eval", "region-witness-eval", "完整前提见证求值；默认关闭"),
     ("witness_shadow", "region-witness-shadow", "见证影子诊断；默认关闭"),
     ("witness_local_shadow", "region-witness-local-shadow", "局部见证补全影子诊断；默认关闭"),
+    ("loop_fold_shapes", "region-loop-fold-shapes", "扩展循环逐轮折叠形状；默认关闭"),
     ("prefix_compact", "region-prefix-compact", "迭代边界前缀固化；默认关闭"),
     ("bool_proof_profile", "region-bool-proof-profile", "可选布尔证明资源统计；默认关闭"),
     ("progress", "region-progress", "区域步数和查询进度诊断；默认关闭"),
@@ -92,6 +93,7 @@ pub fn apply_cli(matches: &getopts::Matches, limits: &mut ExecutionLimitsConfig)
                 "witness_eval" => updated.path_merge.witness_eval = value,
                 "witness_shadow" => updated.path_merge.diagnostics.witness_shadow = value,
                 "witness_local_shadow" => updated.path_merge.diagnostics.witness_local_shadow = value,
+                "loop_fold_shapes" => updated.path_merge.loop_fold_shapes = value,
                 "prefix_compact" => updated.path_merge.prefix_compact = value,
                 "bool_proof_profile" => updated.path_merge.diagnostics.bool_proof_profile = value,
                 "progress" => updated.path_merge.diagnostics.progress = value,
@@ -220,6 +222,7 @@ mod tests {
                 "finite_domain_enumeration",
                 "witness_eval",
                 "prefix_compact",
+                "loop_fold_shapes",
             ]
             .contains(field)
             {

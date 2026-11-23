@@ -2892,6 +2892,7 @@ obligation_dump_dir = "obligations"
                 lazy_z3_scope: true,
                 witness_eval: true,
                 prefix_compact: true,
+                loop_fold_shapes: false,
                 witness_shadow: true,
                 witness_local_shadow: true,
                 bool_proof_profile: true,

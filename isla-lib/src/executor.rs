@@ -1323,7 +1323,7 @@ enum SpecialResult {
 trait ForkSink<'ir, 'task, B: BV> {
     fn submit(&self, task: Task<'ir, 'task, B>);
 
-    fn reserve_arm_thread(&self) -> Option<region_arm::ThreadSlot<'_>> {
+    fn arm_scheduler(&self) -> Option<region_arm::Scheduler<'_, 'ir, B>> {
         None
     }
 
@@ -1345,6 +1345,7 @@ impl<'a, 'ir, 'task, B: BV> ForkSink<'ir, 'task, B> for SingleForkSink<'a, 'ir, 
 
 struct MultiForkSink<'scope, 'env, 'ir, 'task, 'collector, B: BV, R> {
     runtime: Arc<MultiRuntime<'ir, 'task, 'collector, B, R>>,
+    arms: Option<region_arm::ArmQueue<'ir, B>>,
     scope: &'scope thread::Scope<'scope, 'env>,
 }
 
@@ -1359,7 +1360,15 @@ where
         self.runtime.submit(self.scope, task);
     }
 
-    fn reserve_arm_thread(&self) -> Option<region_arm::ThreadSlot<'_>> {
+    fn arm_scheduler(&self) -> Option<region_arm::Scheduler<'_, 'ir, B>> {
+        Some(region_arm::Scheduler { threads: self, queue: self.arms.as_ref()? })
+    }
+}
+
+impl<'scope, 'env, 'ir: 'scope, 'task: 'scope, 'collector: 'scope, B: BV, R: Send + Sync> region_arm::ArmThreads
+    for MultiForkSink<'scope, 'env, 'ir, 'task, 'collector, B, R>
+{
+    fn reserve(&self) -> Option<region_arm::ThreadSlot<'_>> {
         self.runtime.try_reserve_thread().then(|| region_arm::ThreadSlot {
             tid: self.runtime.next_tid.fetch_add(1, Ordering::Relaxed),
             release: Some(Box::new(|| {
@@ -1456,7 +1465,13 @@ impl<'ir, 'task, 'collector, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'
             solver.add_event(event);
             solver.add(def);
         }
-        let fork_sink = MultiForkSink { runtime: Arc::clone(&self), scope };
+        let arms = task
+            .state
+            .execution_limits
+            .as_ref()
+            .is_some_and(ExecutionLimits::can_schedule_region_arm)
+            .then(region_arm::ArmQueue::new);
+        let fork_sink = MultiForkSink { runtime: Arc::clone(&self), scope, arms };
         let result = run(
             tid,
             task.id,

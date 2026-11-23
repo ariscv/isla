@@ -128,6 +128,8 @@ pub struct PathMergeConfig {
     pub finite_domain_enumeration: bool,
     pub witness_eval: bool,
     pub prefix_compact: bool,
+    /// 扩展循环逐轮折叠形状；缺省关闭。
+    pub loop_fold_shapes: bool,
     pub diagnostics: PathMergeDiagnostics,
     pub regions: Option<Vec<PathMergeRegionConfig>>,
     #[serde(deserialize_with = "deserialize_enumeration")]
@@ -160,6 +162,7 @@ impl Default for PathMergeConfig {
             finite_domain_enumeration: true,
             witness_eval: false,
             prefix_compact: false,
+            loop_fold_shapes: false,
             diagnostics: PathMergeDiagnostics::default(),
             regions: None,
             enumeration: None,
