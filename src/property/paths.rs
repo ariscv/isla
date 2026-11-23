@@ -29,6 +29,7 @@ pub fn add_options(opts: &mut getopts::Options) {
     opts.optflag("", "observe-assertion-failures", "将可达断言失败导出为独立场景终态");
     opts.optflag("", "sequential-ram", "用顺序字节数组建模 RAM 读写");
     opts.optflag("", "scenario-observations", "在路径 JSON 中保留场景观测、访存和寄存器读事件");
+    opts.optopt("", "merge-diagnostics", "输出区域合并诊断，默认 off", "off|summary|detail");
 }
 
 pub struct PathOptions {
@@ -44,6 +45,9 @@ pub struct PathOptions {
 
 impl PathOptions {
     pub fn parse(matches: &getopts::Matches) -> Result<Self, String> {
+        if let Some(mode) = matches.opt_str("merge-diagnostics") {
+            executor::stats::merge_diagnostics::configure(&mode)?;
+        }
         let dump = matches.opt_str("dump-paths").map(PathBuf::from);
         let dump_assertions = matches.opt_str("dump-assertions").map(PathBuf::from);
         let scenario_observations = matches.opt_present("scenario-observations");

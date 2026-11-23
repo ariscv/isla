@@ -2,32 +2,35 @@
 use super::concrete_values::ConsumerRetry;
 use super::region_engine::{
     advance_arm, append_loop_exit, branch_arm, charge_fragment_growth, finish_arrivals, finish_prepared_region,
-    finish_region, loop_exit_guard, publish_committed_records, publish_register_writes, record_projected_arrival,
-    LoopDependencies, ReadyFragments,
+    finish_region, loop_exit_guard, publish_committed_records, publish_region_records, publish_register_writes,
+    record_projected_arrival, LoopDependencies, ReadyFragments,
 };
 use super::region_summary::{function_effect_summaries, instruction_effect, CachedReject, FunctionEffect};
 use super::stats::merge_diagnostics as diagnostics;
 use super::*;
 use crate::config::MergeMode;
+use crate::error::{SmtError, Z3Timeout};
 use crate::executor::stats::region_cost as cost;
 use crate::ir::regions::{FunctionRegions, Region, RegionOptions, RegionPoint, RegionRejection};
 
 mod consumer_continuation;
+mod delivery;
 mod exception_continuation;
 mod loop_fold;
 mod parallel_arms;
+pub(super) mod prefix_commit;
 
 /// 任一祖先区域拒绝时，随该次推演撤销失败任务的发布。
-struct ArmErrorSink<'ir, 'task, B: BV> {
+pub(super) struct ArmErrorSink<'ir, 'task, B: BV> {
     tasks: Mutex<Vec<Task<'ir, 'task, B>>>,
 }
 
 impl<'ir, 'task, B: BV> ArmErrorSink<'ir, 'task, B> {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self { tasks: Mutex::new(Vec::new()) }
     }
 
-    fn forward(self, sink: &(impl ForkSink<'ir, 'task, B> + ?Sized)) {
+    pub(super) fn forward(self, sink: &(impl ForkSink<'ir, 'task, B> + ?Sized)) {
         for task in self.tasks.into_inner().unwrap() {
             sink.submit_consumer_error(task);
         }
@@ -81,6 +84,7 @@ pub(super) struct RegionExecution {
     pub mode: MergeMode,
     pub origin: (Name, usize, SourceLoc),
     pub pending_branch: Option<(Sym, usize, Arc<Region>, SourceLoc)>,
+    pub verified_prefix: Option<prefix_commit::Cut>,
 }
 
 impl RegionExecution {
@@ -248,12 +252,14 @@ pub(super) fn feasible<B: BV>(
     info: SourceLoc,
     shared: &SharedState<B>,
 ) -> Result<bool, ExecError> {
-    let speculative = frame.region_execution.is_some();
+    let speculative = frame.region_execution.is_some() && !super::region_engine::prefix_resume::active(frame);
     match solver.check_sat_with_for_branch(exp, info, speculative) {
         None => Ok(true),
         Some(SmtResult::Unproven(cause)) if speculative => Err(reject_query(frame, cause)),
         Some(SmtResult::Error(cause))
-            if speculative && cause.reject_reason().partial_commit(crate::config::RegionOptions::current()) =>
+            if speculative
+                && !matches!(&cause, SmtError::Z3Timeout(Z3Timeout::Interrupted(_)))
+                && cause.reject_reason().partial_commit(crate::config::RegionOptions::current()) =>
         {
             Err(reject_query(frame, cause))
         }
@@ -521,14 +527,13 @@ pub(super) fn region<'ir, B: BV>(
     )
 }
 
-/// 只有最外层、无控制流采样限制的有环函数出口区域才能分段。
-/// 分段本身不猜测循环是否终止；它只将同一有限展开的前缀变成两个普通前沿。
-fn can_segment<B: BV>(frame: &LocalFrame<B>, state: &TaskState<B>, mode: MergeMode) -> bool {
-    frame.region_execution.is_none() && can_fold_iterations(state, mode)
+/// 折叠和分段交付同一有界展开。显式采样和控制流限制仍按原执行入口生效。
+fn can_fold_iterations<B: BV>(state: &TaskState<B>, mode: MergeMode) -> bool {
+    state.pc_limit.is_none() && unrestricted_adaptive(state, mode)
 }
 
-fn can_fold_iterations<B: BV>(state: &TaskState<B>, mode: MergeMode) -> bool {
-    if mode != MergeMode::Adaptive || state.pc_limit.is_some() {
+fn unrestricted_adaptive<B: BV>(state: &TaskState<B>, mode: MergeMode) -> bool {
+    if mode != MergeMode::Adaptive {
         return false;
     }
     state.execution_limits.as_ref().is_some_and(|limits| {
@@ -542,11 +547,18 @@ fn can_fold_iterations<B: BV>(state: &TaskState<B>, mode: MergeMode) -> bool {
     })
 }
 
+/// 用父组织者运行普通分支时，不能绕过使用普通 fork 计数的配置。
+pub(super) fn can_split_nested_branch<B: BV>(frame: &LocalFrame<B>, state: &TaskState<B>) -> bool {
+    frame.region_execution.as_ref().is_some_and(|execution| can_fold_iterations(state, execution.mode))
+}
+
 pub(super) enum RegionResult {
     GuardedExits,
     Merged,
     Dead,
     Rejected,
+    /// 前沿停在各自的指令边界，尚待本层认证并交付。
+    VerifiedPrefix(ExecError),
     /// 当前汇合分成多个组；各组已保留在挂起帧。
     Separate {
         reason: SpeculativeRejectReason,
@@ -556,9 +568,23 @@ pub(super) enum RegionResult {
     Suspended,
 }
 
-/// 内层 Unknown 后把原分叉作为祖先区域里的两个待执行片段。调用方若已回滚
-/// 内层事务，片段会重建它；若尚未创建内层事务，则保留当前外层臂事务。绝不能交给
-/// 全局 sink；祖先的组织者会在自己的工作栈中继续它们。
+/// 两个互补片段仍属于父臂，由当前区域的工作栈继续。
+pub(super) fn separate_nested_fragments<'ir, B: BV>(
+    frame: &mut LocalFrame<'ir, B>,
+    solver: &mut Solver<B>,
+    branches: [(usize, smtlib::Exp<Sym>); 2],
+) -> Result<(), ExecError> {
+    assert!(frame.region_execution.is_some(), "仅嵌套区域可保留普通分叉片段");
+    assert!(frame.region_arrivals.is_empty(), "区域入口不能已有未交付片段");
+    let parent = frame.region_arm.expect("嵌套区域入口必须属于祖先逻辑臂");
+    charge_fragment_growth(frame, 1)?;
+    frame.region_arrivals = branches
+        .into_iter()
+        .map(|(pc, guard)| branch_arm(frame, pc, guard, solver.new_logical_arm(Some(parent))))
+        .collect();
+    Ok(())
+}
+
 pub(super) fn separate_nested_branch<'ir, B: BV>(
     condition: Sym,
     target: usize,
@@ -566,17 +592,47 @@ pub(super) fn separate_nested_branch<'ir, B: BV>(
     solver: &mut Solver<B>,
 ) -> Result<(), ExecError> {
     use smtlib::Exp::{Not, Var};
+    separate_nested_fragments(frame, solver, [(target, Var(condition)), (frame.pc + 1, Not(Box::new(Var(condition))))])
+}
 
-    assert!(frame.region_execution.is_some(), "仅嵌套区域可保留普通分叉片段");
-    assert!(frame.region_arrivals.is_empty(), "区域入口不能已有未交付片段");
-    let parent = frame.region_arm.expect("嵌套区域入口必须属于祖先逻辑臂");
-    charge_fragment_growth(frame, 1)?;
-    let then_owner = solver.new_logical_arm(Some(parent));
-    let else_owner = solver.new_logical_arm(Some(parent));
-    frame.region_arrivals = vec![
-        branch_arm(frame, target, Var(condition), then_owner),
-        branch_arm(frame, frame.pc + 1, Not(Box::new(Var(condition))), else_owner),
-    ];
+/// 局部拆分后保留原拒绝原因及其出错位置。
+pub(super) fn record_local_rejection<B: BV>(
+    frame: &LocalFrame<B>,
+    state: &TaskState<B>,
+    shared: &SharedState<B>,
+    error: &ExecError,
+) {
+    let reason = error.rejection_reason().expect("局部拒绝必须有原因");
+    let site;
+    let rejection = if matches!(error, ExecError::SpeculativeReject { .. }) {
+        error
+    } else {
+        site = reject(frame, reason);
+        &site
+    };
+    shared.execution_stats.merge_rejected(frame.function_name, frame.pc, rejection);
+    state.speculation_stats.record_reject(reason);
+    if diagnostics::enabled() {
+        diagnostics::emit(serde_json::json!({
+            "stage":"local_arm_rejected",
+            "difference":"local_arm_rejected",
+            "reason":reason,"cause":error.query_failure().map(|cause|cause.diagnostic()),"error":error.to_string(),
+            "at":{"function":diagnostics::name_string(frame.function_name, &shared.symtab),
+                "pc":frame.pc,"location":error.source_loc()}
+        }));
+    }
+}
+
+pub(super) fn separate_nested_retry<B: BV>(
+    guards: [smtlib::Exp<Sym>; 2],
+    frame: &mut LocalFrame<B>,
+    state: &TaskState<B>,
+    shared: &SharedState<B>,
+    solver: &mut Solver<B>,
+) -> Result<(), ExecError> {
+    let pc = frame.pc;
+    separate_nested_fragments(frame, solver, guards.map(|guard| (pc, guard)))?;
+    record_local_rejection(frame, state, shared, &reject(frame, SpeculativeRejectReason::RetryOperand));
     Ok(())
 }
 
@@ -697,7 +753,8 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
     let replay_join = candidate.as_ref().ok().map(|region| region.join);
     let mut pending_errors = ArmErrorSink::new();
     let mut segmented = false;
-    // 只有此标志为真才说明本层已创建并回滚区域事务。候选识别和缓存拒绝不能退化为片段。
+    let mut prefix_dead = false;
+    // 准入拒绝没有子事务，执行拒绝必须先撤销子事务，再向父区域交付片段。
     let mut arm_execution_rolled_back = false;
     let result = match candidate {
         Err(error) => {
@@ -728,7 +785,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         "at":{"function":diagnostics::name_string(frame.function_name,&shared.symtab),
                             "pc":frame.pc,"location":info,"region_depth":depth,
                             "call_depth":frame.backtrace.len(),"transaction_depth":solver.transaction_depth()},
-                        "difference":"nesting_limit","reason":"nesting_limit"}));
+                        "difference":"nesting_limit","reason":SpeculativeRejectReason::NestingLimit}));
                 }
                 Err(reject(frame, SpeculativeRejectReason::NestingLimit))
             } else {
@@ -738,6 +795,8 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                 let arm_task_entry = parallel_arms::entry(sink, frame, state, &region, solver);
                 let tx = solver.start_transaction();
                 let defer = solver.defer_region_checks();
+                // 开启义务作用域的这一层认证出口；借用父作用域的层把义务留给其所有者。
+                let owns_obligations = defer && !solver.region_queries_deferred();
                 let probe_context = (!nested && crate::smt::probe_query_timings_enabled()).then(|| {
                     serde_json::json!({
                     "attempt":super::stats::region_progress::probe_attempt_id(),"task":task_id.as_usize(),
@@ -752,7 +811,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         });
                     }
                 };
-                let mut execute = |solver: &mut Solver<B>| {
+                let execute = |solver: &mut Solver<B>| {
                     log_phase("execute_start", None);
                     let output = execute_region(
                         condition,
@@ -779,7 +838,22 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         info,
                     );
                     log_phase("execute_end", None);
-                    if defer && !nested && output.is_ok() {
+                    if let Ok(RegionResult::VerifiedPrefix(error)) = &output {
+                        let reason = error.rejection_reason().expect("切点必须记录拒绝原因");
+                        state.speculation_stats.record_reject(reason);
+                        shared.execution_stats.merge_rejected(key.0, key.1, error);
+                        diagnostics::emit(serde_json::json!({
+                            "stage":"verified_prefix_candidate", "difference":"verified_prefix_candidate",
+                            "reason":reason, "cause":error.query_failure().map(|cause|cause.diagnostic()),
+                            "error":error.to_string(), "location":error.source_loc(),
+                        }));
+                        failure_phase = FailurePhase::ExitCertification;
+                        let candidate = candidate_frame.as_mut().expect("切点必须有可认证候选");
+                        prefix_commit::certify_groups(candidate, solver, info, timeout)?;
+                        prefix_dead = candidate.region_arrivals.is_empty();
+                        return output;
+                    }
+                    if owns_obligations && output.is_ok() {
                         failure_phase = FailurePhase::ExitObligation;
                         log_phase("obligation_start", None);
                         let _scope = stats::region_progress::QueryScope::enter("exit_obligations");
@@ -802,81 +876,66 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                     output
                 };
                 let result = if defer { solver.with_deferred_region_queries(execute) } else { execute(solver) };
-                // 只有最外层出口查询可以验证候选；嵌套结果仍带着全部守卫。
-                let result =
-                    if defer && !nested && result.as_ref().is_ok_and(|output| !matches!(output, RegionResult::Dead)) {
-                        failure_phase = FailurePhase::ExitCertification;
-                        log_phase("exit_check_start", None);
-                        let _scope = stats::region_progress::QueryScope::enter("region_exit");
-                        let checked = solver.check_candidate_sat(info);
-                        log_phase("exit_check_end", checked.as_ref());
-                        match checked {
-                            None | Some(SmtResult::Sat) => result,
-                            // 分段可能还有继续前沿；退出前沿为空不代表整次调用为空。
-                            Some(SmtResult::Unsat)
-                                if !matches!(result, Ok(RegionResult::GuardedExits))
-                                    && !pending_errors.tasks.get_mut().unwrap().is_empty() =>
-                            {
-                                Ok(RegionResult::Dead)
-                            }
-                            Some(SmtResult::Unsat) => Err(reject(frame, SpeculativeRejectReason::ExitUnsat)),
-                            Some(SmtResult::Unproven(cause)) => Err(reject_query(frame, cause)),
-                            Some(SmtResult::Error(cause))
-                                if cause.z3_query_failure().is_some() && solver.exploration_on_unknown().is_some() =>
-                            {
-                                Err(reject_query(frame, cause))
-                            }
-                            Some(SmtResult::Error(error)) => Err(ExecError::Smt(error)),
+                // 完成义务认证后才检查本作用域的正常出口，子层交付仍带原守卫。
+                let result = if owns_obligations
+                    && result
+                        .as_ref()
+                        .is_ok_and(|output| !matches!(output, RegionResult::Dead | RegionResult::VerifiedPrefix(_)))
+                {
+                    failure_phase = FailurePhase::ExitCertification;
+                    log_phase("exit_check_start", None);
+                    let _scope = stats::region_progress::QueryScope::enter("region_exit");
+                    let checked = solver.check_candidate_sat(info);
+                    log_phase("exit_check_end", checked.as_ref());
+                    match checked {
+                        None | Some(SmtResult::Sat) => result,
+                        // 分段可能还有继续前沿；退出前沿为空不代表整次调用为空。
+                        Some(SmtResult::Unsat)
+                            if !matches!(result, Ok(RegionResult::GuardedExits))
+                                && !pending_errors.tasks.get_mut().unwrap().is_empty() =>
+                        {
+                            Ok(RegionResult::Dead)
                         }
-                    } else {
-                        result
-                    };
+                        Some(SmtResult::Unsat) => Err(reject(frame, SpeculativeRejectReason::ExitUnsat)),
+                        Some(SmtResult::Unproven(cause)) => Err(reject_query(frame, cause)),
+                        Some(SmtResult::Error(cause))
+                            if cause.z3_query_failure().is_some() && solver.exploration_on_unknown().is_some() =>
+                        {
+                            Err(reject_query(frame, cause))
+                        }
+                        Some(SmtResult::Error(error)) => Err(ExecError::Smt(error)),
+                    }
+                } else {
+                    result
+                };
                 match &result {
                     Ok(_) => {
                         assert!(!solver.transaction_invalid(), "区域提交前保存点必须有效");
                         log_phase("commit_start", None);
                         segmented = matches!(result, Ok(RegionResult::GuardedExits));
-                        let grouped_root =
-                            !nested && (segmented || matches!(result, Ok(RegionResult::Separate { .. })));
-                        if !grouped_root {
-                            solver.commit_transaction();
+                        if let Some(candidate) = candidate_frame {
+                            *frame = candidate;
                         }
-                        // 出口义务或可行性验证拒绝时，调用者帧仍停留在入口。
-                        if let Some(candidate_frame) = candidate_frame {
-                            *frame = candidate_frame;
-                        }
-                        if !nested {
-                            publish_arm_errors(
-                                frame,
-                                std::mem::take(pending_errors.tasks.get_mut().unwrap()),
-                                solver,
-                                fraction,
-                                sink,
-                                shared,
-                            );
-                        }
-                        if grouped_root {
-                            publish_join_groups(
-                                frame,
-                                record_start,
-                                task_id,
-                                fraction,
-                                stop,
-                                sink,
-                                state,
-                                shared,
-                                solver,
-                                info,
-                            );
-                        }
+                        let output = result.as_ref().unwrap();
+                        delivery::finish(
+                            output,
+                            frame,
+                            record_start,
+                            &mut pending_errors,
+                            task_id,
+                            fraction,
+                            stop,
+                            sink,
+                            state,
+                            shared,
+                            solver,
+                            info,
+                        );
                         log_phase("commit_end", None);
-                        if !nested {
+                        if !nested && !matches!(output, RegionResult::VerifiedPrefix(_)) {
                             crate::smt::probe_query_event(
                                 || serde_json::json!({"type":"region_commit", "function":zencode::decode(shared.symtab.to_str(frame.function_name)), "branch_pc":key.1, "call_instance":frame.local_state.call_instance,"region":probe_context}),
                             );
-                            if !grouped_root {
-                                publish_committed_records(frame, record_start, task_id, shared, solver);
-                            }
                         }
                     }
                     Err(_) => {
@@ -891,35 +950,28 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
     let result = match result {
         Err(error)
             if nested
-                && arm_execution_rolled_back
-                && error
-                    .rejection_reason()
-                    .is_some_and(|cause| cause.partial_commit(crate::config::RegionOptions::current())) =>
+                && error.rejection_reason().is_some_and(|reason| {
+                    if !stats::solver_failures::is_solver_failure(&error) && prefix_commit::can_capture(frame, reason) {
+                        return false;
+                    }
+                    let options = crate::config::RegionOptions::current();
+                    if arm_execution_rolled_back {
+                        !matches!(&error, ExecError::Smt(SmtError::Z3Timeout(Z3Timeout::Interrupted(_))))
+                            && reason.partial_commit(options)
+                    } else {
+                        mode == MergeMode::Adaptive
+                            && can_split_nested_branch(frame, state)
+                            && reason.split_admission(options)
+                    }
+                }) =>
         {
             let reason = error.rejection_reason().unwrap();
-            // 事务撤销了内层的义务、事件和定义；错误叶也不能越过这次撤销。
-            // 两个片段会从本分叉的后继重新建立它们，再由祖先的出口认证。
+            // 仍在父臂的分叉点，完整互补守卫和预算一起交给父组织者。
+            // 回滚撤销的子事务义务、事件和错误叶由两个片段重新建立。
             match separate_nested_branch(condition, target, frame, solver) {
                 Ok(()) => {
                     pending_errors.discard();
-                    let site;
-                    let rejection = if matches!(&error, ExecError::SpeculativeReject { .. }) {
-                        &error
-                    } else {
-                        site = reject(frame, reason);
-                        &site
-                    };
-                    shared.execution_stats.merge_rejected(key.0, key.1, rejection);
-                    state.speculation_stats.record_reject(reason);
-                    if diagnostics_active {
-                        diagnostics::emit(serde_json::json!({
-                            "stage":"local_arm_rejected",
-                            "difference":"local_arm_rejected",
-                            "reason":reason,"cause":error.query_failure().map(|cause|cause.diagnostic()),"error":error.to_string(),
-                            "at":{"function":diagnostics::name_string(frame.function_name, &shared.symtab),
-                                "pc":frame.pc,"location":error.source_loc()}
-                        }));
-                    }
+                    record_local_rejection(frame, state, shared, &error);
                     Ok(RegionResult::Separate { reason, merged_groups: false })
                 }
                 Err(error) => Err(error),
@@ -927,10 +979,22 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
         }
         result => result,
     };
-    if nested && result.is_ok() {
-        pending_errors.forward(sink);
-    }
     match result {
+        Ok(RegionResult::VerifiedPrefix(error)) => {
+            let reason = error.rejection_reason().unwrap();
+            if let Some(attempt) = diagnostics_attempt.as_mut() {
+                attempt.finish_verified_prefix(&error, &shared.symtab);
+            }
+            shared.execution_stats.rule_finished(rule, Some(reason));
+            shared.execution_stats.merge_finished(false);
+            if prefix_dead {
+                Ok(RegionResult::Dead)
+            } else if nested {
+                Ok(RegionResult::Separate { reason, merged_groups: false })
+            } else {
+                Ok(RegionResult::Merged)
+            }
+        }
         Ok(RegionResult::Separate { reason, merged_groups }) => {
             assert_eq!(nested, !frame.region_arrivals.is_empty());
             if let Some(attempt) = diagnostics_attempt.as_mut() {
@@ -953,7 +1017,15 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
             }
             shared.execution_stats.merge_finished(true);
             shared.execution_stats.rule_finished(rule, None);
-            Ok(if segmented { RegionResult::Merged } else { result })
+            Ok(if segmented {
+                if nested {
+                    RegionResult::Suspended
+                } else {
+                    RegionResult::Merged
+                }
+            } else {
+                result
+            })
         }
         Err(error) => {
             if shared.execution_stats.enabled() {
@@ -1059,75 +1131,6 @@ fn publish_arm_errors<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     }
 }
 
-/// 根事务已通过出口认证。每组在自身的到达守卫下独立继续。
-#[allow(clippy::too_many_arguments)]
-fn publish_join_groups<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
-    frame: &mut LocalFrame<'ir, B>,
-    record_start: usize,
-    task_id: TaskId,
-    fraction: &mut Fraction,
-    stop: Option<&'task StopConditions>,
-    sink: &S,
-    state: &'task TaskState<B>,
-    shared: &SharedState<'ir, B>,
-    solver: &mut Solver<B>,
-    info: SourceLoc,
-) {
-    use smtlib::Exp::Var;
-    let groups = std::mem::take(&mut frame.region_arrivals);
-    let count = groups.len();
-    assert!(count > 0);
-    let owners: Vec<_> = groups.iter().map(|group| group.region_arm.expect("每个汇合组必须拥有逻辑臂")).collect();
-    let selectors: Vec<_> = groups
-        .iter()
-        .map(|group| {
-            let guard = group.local_state.speculative_access.as_ref().unwrap().guard.as_ref().unwrap();
-            match guard {
-                Var(sym) => *sym,
-                _ => solver.define_const(guard.clone(), info),
-            }
-        })
-        .collect();
-    let effects = solver.commit_region_groups(&owners);
-    let fork_bits = usize::BITS - (count - 1).leading_zeros();
-    for (index, ((mut group, effects), selector)) in groups.into_iter().zip(effects).zip(selectors).enumerate() {
-        let guard = Var(selector);
-        group.region_arm = None;
-        let fork = (count > 1).then(|| {
-            let limits = cost::make_mut(&mut group.execution_limit_state);
-            let id = limits.record_fork();
-            for bit in (0..fork_bits).rev() {
-                limits.advance_path_signature(index & (1 << bit) != 0);
-            }
-            Event::Fork(id, selector, u32::try_from(index).expect("汇合组编号溢出"), info)
-        });
-        solver.select_region_group(effects);
-        publish_register_writes(&mut group, shared, solver);
-        publish_committed_records(&mut group, record_start, task_id, shared, solver);
-        group.capture_path_smt_stats();
-        if index + 1 == count {
-            if let Some(fork) = fork {
-                solver.add_event(fork);
-            }
-            solver.assert(guard.clone());
-            super::btrace_push_branch_condition!(group, guard);
-            *frame = group;
-        } else {
-            let frozen = super::trace_fork_frame_with_branch_condition!(&group, group.pc, guard.clone());
-            fraction.halve();
-            sink.submit(Task {
-                id: task_id,
-                fraction: fraction.clone(),
-                frame: frozen,
-                checkpoint: solver.region_group_checkpoint(),
-                fork_cond: Some((smtlib::Def::Assert(guard), fork.expect("多个汇合组必须有分叉事件"))),
-                state,
-                stop_conditions: stop,
-            });
-        }
-    }
-}
-
 /// 组织者共享的区域入口帧、调用范围和预算。
 pub(super) fn prepare_region_base<'ir, B: BV>(
     frame: &LocalFrame<'ir, B>,
@@ -1148,6 +1151,7 @@ pub(super) fn prepare_region_base<'ir, B: BV>(
         remote_cancel: parent.as_ref().and_then(|execution| execution.remote_cancel.clone()),
         region: region.clone(),
         pending_branch: None,
+        verified_prefix: None,
         entry_depth: frame.backtrace.len(),
         catch_return: None,
         write_depth: parent.as_ref().map_or(frame.backtrace.len(), |execution| execution.write_depth),
@@ -1228,6 +1232,11 @@ fn advance_region_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     {
         return Ok(alive);
     }
+    if arm.region_arrivals.iter().any(prefix_commit::is_cut) {
+        // 子层已认证需普通执行的前沿；停止推进兄弟并把完整集合交给本层认证。
+        solver.commit_transaction();
+        return Ok(true);
+    }
     // 本臂已经分成互斥片段；分别关闭，不把任何一个临时条件留在主求解器上。
     let mut pending = ReadyFragments::new(state);
     pending.extend(
@@ -1261,18 +1270,36 @@ fn advance_region_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             }
             Ok(step)
         });
+        let mut cut = false;
         match outcome {
-            Ok(Some(true)) => reached.push((branch, fragment)),
+            Ok(Some(true)) => {
+                cut = prefix_commit::is_cut(&fragment);
+                reached.push((branch, fragment));
+            }
             Ok(Some(false)) => solver.discard_logical_arm_effects(owner),
-            Ok(None) => pending.extend(fragment.region_arrivals.into_iter().enumerate().map(|(index, frame)| {
-                let mut path = branch.clone();
-                path.push(index);
-                (path, frame)
-            })),
+            Ok(None) => {
+                cut = fragment.region_arrivals.iter().any(prefix_commit::is_cut);
+                let children = fragment.region_arrivals.into_iter().enumerate().map(|(index, frame)| {
+                    let mut path = branch.clone();
+                    path.push(index);
+                    (path, frame)
+                });
+                if cut {
+                    reached.extend(children);
+                } else {
+                    pending.extend(children);
+                }
+            }
             Err(error) => {
                 solver.rollback_transaction(tx);
                 return Err(error);
             }
+        }
+        if cut {
+            while let Some(part) = pending.pop() {
+                reached.push(part);
+            }
+            break;
         }
     }
     if reached.is_empty() {
@@ -1325,6 +1352,25 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         .then(|| exception_continuation::find_catcher(frame, &region, shared))
         .flatten();
     base.region_execution.as_mut().unwrap().catch_return = catcher.as_ref().map(|_| fresh_call_scope());
+    if crate::config::RegionOptions::current().partial_commit_prefix
+        && (frame.speculation_mode == SpeculationMode::Off || frame.region_execution.is_some())
+        && unrestricted_adaptive(state, mode)
+        && catcher.is_none()
+        && solver.validates_candidates()
+        && arm_task_entry.is_none()
+        && frame.region_execution.as_ref().is_none_or(|parent| parent.remote_cancel.is_none())
+    {
+        base.region_execution.as_mut().unwrap().verified_prefix = Some(prefix_commit::Cut {
+            record_start: frame.region_merge_records.len(),
+            resume_in_parent: frame.region_execution.is_some(),
+            can_resume_normally: frame
+                .region_execution
+                .as_ref()
+                .is_none_or(|parent| parent.verified_prefix.as_ref().is_some_and(|cut| cut.can_resume_normally)),
+            saw_live_merge: false,
+            rejection: None,
+        });
+    }
     let mut arms = [Vec::new(), Vec::new()];
     let mut ready = ReadyFragments::new(state);
     let guards = match &consumer {
@@ -1351,6 +1397,7 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         };
         (slot, job, reject(frame, SpeculativeRejectReason::IncompatibleState))
     });
+    let mut cut = false;
     let mut local = |cell: Option<&parallel_arms::ArmCell<'ir, B>>| -> Result<(), ExecError> {
         while let Some((side, (pc, guard))) = ready.pop() {
             live_forks.set(if side == 0 { 1 } else { arms[0].len() });
@@ -1377,23 +1424,28 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     }
                 }
             }
-            if consumer.is_some() && !feasible(frame, solver, &guard, info, shared)? {
+            if !cut && consumer.is_some() && !feasible(frame, solver, &guard, info, shared)? {
                 solver.assert(Not(Box::new(guard)));
                 continue;
             }
             let owner = solver.new_logical_arm(solver.current_logical_arm());
-            let tx = solver.start_transaction_with_guard(Some(guard.clone()));
-            if let Some(ConsumerRetry::Operand { split: Some((sym, values)), .. }) = &consumer {
-                let bound = if side == 0 { &values[..1] } else { &values[1..] };
-                solver.set_operand_bound(*sym, info, bound.to_vec());
-            }
-            let mut arm = branch_arm(&base, pc, guard, owner);
+            let mut arm = branch_arm(&base, pc, guard.clone(), owner);
             if let Some(ConsumerRetry::Choice(guard)) = consumer {
                 cost::make_mut(&mut arm.local_state)
                     .concrete_choices
                     .as_mut()
                     .expect("消费者拆分必须已启用")
                     .insert(guard, side == 0);
+            }
+            if cut {
+                // 尚未开始的互补臂从自己的入口继续，其守卫由区域切点认证。
+                arms[side].push(arm);
+                continue;
+            }
+            let tx = solver.start_transaction_with_guard(Some(guard));
+            if let Some(ConsumerRetry::Operand { split: Some((sym, values)), .. }) = &consumer {
+                let bound = if side == 0 { &values[..1] } else { &values[1..] };
+                solver.set_operand_bound(*sym, info, bound.to_vec());
             }
             if solver.with_logical_arm(owner, |solver| {
                 advance_region_arm(
@@ -1421,6 +1473,7 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         promote_initials(&mut base, fragment, solver);
                     }
                 }
+                cut = arms[side].iter().any(prefix_commit::is_cut);
             } else if consumer.is_some()
                 || crate::config::RegionOptions::current().arm_error_leaf
                 || state.observe_assertion_failures
@@ -1436,6 +1489,9 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         local(None)?;
     }
     live_forks.set(arms.iter().map(Vec::len).sum::<usize>().saturating_sub(1));
+    if cut {
+        return Ok(prefix_commit::prepare_frontiers(frame, arms));
+    }
     if let Some(catcher) = catcher {
         if arms.iter().flatten().any(|arm| matches!(arm.instrs[arm.pc], Instr::Arbitrary)) {
             return exception_continuation::finish_catch(
@@ -1444,7 +1500,20 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             );
         }
     }
-    finish_arrivals(record_id, condition, &region, consumer.is_some(), &base, arms, frame, state, shared, solver, info)
+    finish_arrivals(
+        record_id,
+        condition,
+        &region,
+        consumer.is_some(),
+        frame.region_execution.is_none(),
+        &base,
+        arms,
+        frame,
+        state,
+        shared,
+        solver,
+        info,
+    )
 }
 
 /// 执行前只校验显式 Force 命中的结构；调用方负责配置名称、源码范围和哈希校验。
@@ -1566,6 +1635,7 @@ pub(super) fn fold_loop_exit<'ir, B: BV>(
     history_ids: &mut Option<HashSet<usize>>,
     base: &LocalFrame<'ir, B>,
     region: &Region,
+    loop_writes_memory: bool,
     state: &TaskState<B>,
     shared: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
@@ -1577,7 +1647,7 @@ pub(super) fn fold_loop_exit<'ir, B: BV>(
         let access = exit.local_state.speculative_access.as_ref().unwrap();
         if !matches!(exit.instrs.get(exit.pc), Some(Instr::End))
             || (access.ordered_events && !access.global_state && !access.writes.modified_regs.is_empty())
-            || (solver.transaction_has_memory_writes()
+            || (loop_writes_memory
                 && !(crate::config::RegionOptions::current().loop_fold_shapes && exit.memory.ram_version().is_some()))
         {
             let error = reject(exit, SpeculativeRejectReason::StateEffect);
@@ -1740,11 +1810,6 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     info: SourceLoc,
 ) -> Result<RegionResult, ExecError> {
     use smtlib::Exp::{And, Not, Var};
-    let eligible = can_segment(frame, state, base.region_execution.as_ref().unwrap().mode)
-        && match region.join {
-            RegionPoint::FunctionExit => true,
-            RegionPoint::Instruction(pc) => matches!(frame.instrs.get(pc), Some(Instr::End)),
-        };
     let iterative = can_fold_iterations(state, base.region_execution.as_ref().unwrap().mode)
         && match region.join {
             RegionPoint::FunctionExit => true,
@@ -1805,15 +1870,26 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             if back_edges.contains(&work.target) && !back_edges.contains(&(work.original.pc + 1)) {
                 work.arms.swap(0, 1);
             }
-            let segmented_root = parent.is_none() && continuation.is_some();
-            if segmented_root {
-                // 暂保留退出组的访问记录，交由根分组出口统一投影。
-                work.original.region_execution = work.base.region_execution.clone();
-                work.original.region_arm = Some(solver.new_logical_arm(work.parent_arm));
-                let mut access = work.base.local_state.speculative_access.as_ref().unwrap().clone();
-                access.guard = Some(Var(return_guard.unwrap()));
-                cost::make_mut(&mut work.original.local_state).speculative_access = Some(access);
+            let finishing_segment = parent.is_none() && continuation.is_some();
+            let mut guard = work.base.local_state.speculative_access.as_ref().unwrap().guard.clone();
+            if let Some(returned) = return_guard {
+                guard = Some(match guard {
+                    Some(parent) => And(Box::new(parent), Box::new(Var(returned))),
+                    None => Var(returned),
+                });
             }
+            let owner = if finishing_segment {
+                // 退出组暂时保留访问记录，最后连同继续片段交给父层或普通调度器。
+                let owner = solver.new_logical_arm(work.parent_arm);
+                work.original.region_execution = work.base.region_execution.clone();
+                work.original.region_arm = Some(owner);
+                let mut access = work.base.local_state.speculative_access.as_ref().unwrap().clone();
+                access.guard = guard.clone();
+                cost::make_mut(&mut work.original.local_state).speculative_access = Some(access);
+                Some(owner)
+            } else {
+                work.parent_arm
+            };
             // 子循环段已提交为完整条件保护的约束；汇合时也保留所属臂条件。
             let finish = |solver: &mut Solver<B>| {
                 finish_arrivals(
@@ -1821,6 +1897,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     work.condition,
                     &work.region,
                     false,
+                    parent.is_none() && original_frame.region_execution.is_none(),
                     &work.base,
                     work.arms,
                     &mut work.original,
@@ -1830,18 +1907,11 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     work.info,
                 )
             };
-            let mut guard = work.base.local_state.speculative_access.as_ref().unwrap().guard.clone();
-            if let Some(returned) = return_guard {
-                guard = Some(match guard {
-                    Some(parent) => And(Box::new(parent), Box::new(Var(returned))),
-                    None => Var(returned),
-                });
-            }
             let finish_with_guard = |solver: &mut Solver<B>| match guard {
                 Some(guard) => solver.with_transaction_condition(&guard, finish),
                 None => finish(solver),
             };
-            let result = match work.parent_arm {
+            let result = match owner {
                 Some(owner) => solver.with_logical_arm(owner, finish_with_guard),
                 None => finish_with_guard(solver),
             }?;
@@ -1863,7 +1933,10 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             parent.arms[side].push(fragment);
                         }
                     }
-                    RegionResult::Rejected | RegionResult::Suspended | RegionResult::GuardedExits => {
+                    RegionResult::Rejected
+                    | RegionResult::Suspended
+                    | RegionResult::GuardedExits
+                    | RegionResult::VerifiedPrefix(_) => {
                         panic!("子循环汇合结果必须已经收尾")
                     }
                 }
@@ -1882,13 +1955,19 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         RegionResult::Separate { .. } => std::mem::take(&mut work.original.region_arrivals),
                         _ => panic!("分段出口必须已经收尾"),
                     };
-                    continued.region_execution = None;
-                    continued.speculation_mode = original_frame.speculation_mode;
-                    for group in &mut groups {
-                        group.region_execution = None;
-                        group.speculation_mode = original_frame.speculation_mode;
+                    if original_frame.region_execution.is_none() {
+                        // 普通调度器在继续 PC 投影这组的事件；此片段尚未到达真实循环出口。
+                        let continuation_region =
+                            Region { join: RegionPoint::Instruction(continued.pc), ..(*root_region).clone() };
+                        record_projected_arrival(&mut continued, &original_base, &continuation_region, solver, info);
+                    } else if !groups.is_empty() {
+                        charge_fragment_growth(&original_base, 1)?;
                     }
                     groups.push(continued);
+                    for group in &mut groups {
+                        group.region_execution = original_frame.region_execution.clone();
+                        group.speculation_mode = original_frame.speculation_mode;
+                    }
                     frame.region_arrivals = groups;
                     return Ok(RegionResult::GuardedExits);
                 }
@@ -1907,6 +1986,8 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     return Ok(result);
                 }
                 if !exit_prefix.is_empty() {
+                    // 折叠另开计划保存点，须在此前读取本循环层已提交的写入。
+                    let loop_writes_memory = solver.transaction_has_memory_writes();
                     match result {
                         RegionResult::Merged => append_loop_exit(
                             &mut exit_prefix,
@@ -1920,6 +2001,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                     ids,
                                     &original_base,
                                     &root_region,
+                                    loop_writes_memory,
                                     state,
                                     shared,
                                     solver,
@@ -1940,6 +2022,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         condition,
                         &root_region,
                         false,
+                        restored.region_execution.is_none(),
                         &original_base,
                         [exit_prefix, Vec::new()],
                         &mut restored,
@@ -1958,7 +2041,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         }
         let completed_exits = pending.ancestors(frontier).count();
         let single_work = completed_exits == 1;
-        let exit_spine = (eligible || iterative)
+        let exit_spine = iterative
             && continuation.is_none()
             && pending.ancestors(frontier).all(|work| {
                 work.completed == 1
@@ -2019,6 +2102,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     }
                 }
                 let access = arm.local_state.speculative_access.as_ref().unwrap();
+                let loop_writes_memory = exit_spine && solver.transaction_has_memory_writes();
                 let fold_writes =
                     !access.ordered_events || access.global_state || access.writes.modified_regs.is_empty();
                 if iterative
@@ -2026,7 +2110,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     && exit_spine
                     && region.branch_pc == root_branch
                     && fold_writes
-                    && ((expanded && arm.memory.ram_version().is_some()) || !solver.transaction_has_memory_writes())
+                    && ((expanded && arm.memory.ram_version().is_some()) || !loop_writes_memory)
                 {
                     let children = pending.drain_spine(&mut frontier);
                     let work = pending.work_mut(frontier);
@@ -2046,6 +2130,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                     ids,
                                     &original_base,
                                     &root_region,
+                                    loop_writes_memory,
                                     state,
                                     shared,
                                     solver,
@@ -2162,12 +2247,11 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 if !exit_prefix.is_empty() && !(expanded && region.branch_pc != root_branch) {
                     return Err(reject(&arm, SpeculativeRejectReason::StateEffect));
                 }
-                if eligible
-                    && exit_prefix.is_empty()
+                if exit_prefix.is_empty()
                     && exit_spine
                     && region.branch_pc == root_branch
                     && fold_writes
-                    && !solver.transaction_has_memory_writes()
+                    && !loop_writes_memory
                     && largest_round > 0
                     && remaining
                         .as_ref()
@@ -2194,7 +2278,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     arm.pending_retry_operand = Some((arm.pc, Val::Symbolic(condition)));
                     continuation = Some(arm);
                     return_guard = Some(returned);
-                    // 继续臂已单独保存；这里只折叠已完成出口，补集将在最外层提交后成为普通任务。
+                    // 继续臂单独保存；当前层只折叠已完成出口，两类片段在本层边界一起交付。
                     work.completed += 1;
                     work.active_arm = None;
                     continue;
@@ -2300,7 +2384,7 @@ pub(super) fn concrete_consumer<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + 
         }),
     };
     let record_start = frame.region_merge_records.len();
-    let pending_errors = ArmErrorSink::new();
+    let mut pending_errors = ArmErrorSink::new();
     let tx = solver.start_transaction();
     let mut candidate = frame.clone();
     candidate.pending_retry_operand.get_or_insert((pc, Val::Unit));
@@ -2308,6 +2392,9 @@ pub(super) fn concrete_consumer<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + 
         ConsumerRetry::Choice(guard) => *guard,
         ConsumerRetry::Operand { guards: [selected, _], .. } => solver.define_const(selected.clone(), info),
     };
+    let can_split_locally = nested
+        && crate::config::RegionOptions::current().partial_commit_retry_operand
+        && !matches!(&retry, ConsumerRetry::Operand { split: Some(_), .. });
     let mut result = match execute_region(
         condition,
         pc,
@@ -2332,6 +2419,10 @@ pub(super) fn concrete_consumer<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + 
         Ok(output) => output,
         Err(error) => {
             solver.rollback_transaction(tx);
+            if can_split_locally && error.rejection_reason() == Some(SpeculativeRejectReason::RetryOperand) {
+                // 原来的具体化入口仍持有完整的互补守卫和操作数。
+                return Ok(None);
+            }
             if nested || !matches!(error, ExecError::SpeculativeReject { .. }) {
                 return Err(error);
             }
@@ -2362,21 +2453,32 @@ pub(super) fn concrete_consumer<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + 
             }
         }
     }
-    let grouped_root = !nested && matches!(result, RegionResult::Separate { .. });
-    if !grouped_root {
-        solver.commit_transaction();
-    }
-    *frame = candidate;
-    if nested {
-        pending_errors.forward(sink);
-    } else {
-        publish_arm_errors(frame, pending_errors.tasks.into_inner().unwrap(), solver, fraction, sink, shared);
-        if grouped_root {
-            publish_join_groups(frame, record_start, task_id, fraction, stop, sink, state, shared, solver, info);
-        } else {
-            publish_committed_records(frame, record_start, task_id, shared, solver);
+    if let RegionResult::VerifiedPrefix(error) = &result {
+        record_local_rejection(frame, state, shared, error);
+        if let Err(error) = prefix_commit::certify_groups(&mut candidate, solver, info, timeout) {
+            solver.rollback_transaction(tx);
+            if !nested && matches!(error, ExecError::SpeculativeReject { .. }) {
+                return Ok(None);
+            }
+            return Err(error);
         }
     }
+    let dead_prefix = matches!(result, RegionResult::VerifiedPrefix(_)) && candidate.region_arrivals.is_empty();
+    *frame = candidate;
+    delivery::finish(
+        &result,
+        frame,
+        record_start,
+        &mut pending_errors,
+        task_id,
+        fraction,
+        stop,
+        sink,
+        state,
+        shared,
+        solver,
+        info,
+    );
     match result {
         RegionResult::Merged => {
             frame.pending_retry_operand = None;
@@ -2385,6 +2487,7 @@ pub(super) fn concrete_consumer<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + 
             local.expression_retry_operands = None;
             Ok(Some(true))
         }
+        RegionResult::VerifiedPrefix(_) => Ok(Some(!dead_prefix)),
         RegionResult::Separate { .. } => Ok(Some(true)),
         RegionResult::Dead => Ok(Some(false)),
         _ => panic!("具体消费者区域必须完成或全死"),

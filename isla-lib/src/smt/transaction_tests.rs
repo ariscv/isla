@@ -90,7 +90,7 @@ fn 根事务可导入重命名后的远端臂后缀() {
         })
         .collect::<Vec<_>>();
 
-    solver.import_arm_suffix(arm_b, &suffix);
+    solver.import_arm_suffix(arm_b, suffix);
     assert_eq!(solver.fresh(), Sym::from_u32(21), "导入后不得复用远端已定义的编号");
     assert!(matches!(solver.check_sat(SourceLoc::unknown()), SmtResult::Sat));
     solver.commit_transaction();
@@ -113,8 +113,188 @@ fn 远端臂导入保留寄存器读取投影序号() {
     let mut target = Solver::<B64>::new(&ctx);
     target.start_transaction();
     let target_arm = target.new_logical_arm(None);
-    target.import_arm_suffix(target_arm, &suffix);
+    target.import_arm_suffix(target_arm, suffix);
     assert_eq!(target.export_arm_suffix(target_arm).unwrap()[0].register_read_occurrence, Some(7));
+}
+
+#[test]
+fn nested_remote_suffix_is_relative_to_the_savepoint_and_rolls_back_with_the_parent() {
+    configure_tastic(Tactic::Qfaufbv);
+    let loc = SourceLoc::unknown();
+    let ctx = Context::new(Config::new());
+    let mut receiver = Solver::<B64>::new(&ctx);
+    let parent_guard = receiver.declare_const(Ty::Bool, loc);
+    let child_guard = receiver.declare_const(Ty::Bool, loc);
+    let value = receiver.declare_const(Ty::Bool, loc);
+    let entry = receiver.arm_entry_checkpoint();
+    let mut config = Config::new();
+    config.solver_options.finite_domain_enumeration = true;
+    let remote_ctx = Context::new(config);
+    let mut remote = Solver::from_checkpoint(&remote_ctx, entry.clone());
+    let root = remote.start_transaction();
+    let parent = remote.new_logical_arm(None);
+    let suffix = remote.with_logical_arm(parent, |remote| {
+        remote.add_event(Event::Instr(Val::I64(10)));
+        remote.cycle_count();
+        let region = remote.start_transaction();
+        let child = remote.new_logical_arm(Some(parent));
+        remote.start_transaction_with_guard(Some(Var(child_guard)));
+        remote.with_logical_arm(child, |remote| {
+            remote.add_region_register_read(Event::ReadReg(Name::from_u32(40), vec![], Val::I64(4)), 7);
+            remote.cycle_count();
+            let alias = remote.define_const(Var(value), loc);
+            remote.assert(Var(alias));
+            remote.commit_transaction();
+        });
+        let suffix = remote.export_arm_suffix(child).unwrap();
+        assert_eq!(suffix.len(), 4);
+        assert!(suffix.iter().all(|item| item.guard == Some(Var(child_guard))));
+        remote.rollback_transaction(region);
+        suffix
+    });
+    remote.rollback_transaction(root);
+
+    let imported = Sym::from_u32(20);
+    let remote_symbol = suffix.iter().find_map(|item| item.event.defines()).unwrap();
+    let remap = SymRemap::from_pairs([(remote_symbol, imported)]);
+    let suffix: Vec<_> = suffix
+        .into_iter()
+        .map(|item| ArmSuffixEvent {
+            guard: item.guard.as_ref().map(|guard| remap.exp(guard)),
+            event: remap.event(&item.event),
+            ..item
+        })
+        .collect();
+    let reject_value = Not(Box::new(Var(value)));
+    let opposite_child = Not(Box::new(Var(child_guard)));
+    for commit in [false, true] {
+        let mut receiver = Solver::from_checkpoint(&ctx, entry.clone());
+        let root = receiver.start_transaction_with_guard(Some(Var(parent_guard)));
+        let parent = receiver.new_logical_arm(None);
+        let child = receiver.new_logical_arm(Some(parent));
+        let sibling = receiver.new_logical_arm(Some(parent));
+        receiver.with_logical_arm(parent, |receiver| {
+            receiver.cycle_count();
+            receiver.add_event(Event::Instr(Val::I64(10)));
+            receiver.start_transaction();
+            receiver.import_arm_suffix(child, suffix.iter().cloned());
+            assert_eq!(receiver.current_logical_arm(), Some(parent));
+            assert!(receiver.decls.contains_key(&imported));
+            let reject_in_child = And(Box::new(Var(child_guard)), Box::new(reject_value.clone()));
+            assert_eq!(receiver.check_sat_with(&reject_in_child, loc), Unsat);
+            assert_eq!(
+                receiver.check_sat_with(&And(Box::new(opposite_child.clone()), Box::new(reject_value.clone())), loc),
+                Sat
+            );
+            assert!(receiver.export_arm_suffix(sibling).is_none(), "兄弟臂不能导出远端臂的执行事件");
+            let snapshot = receiver.with_logical_arm(sibling, |s| s.arm_error_snapshot(sibling).0);
+            assert_eq!(snapshot.cycles, 1);
+            assert!(snapshot.trace().as_ref().unwrap().events_rev().all(|event| !matches!(event, Event::ReadReg(..))));
+            receiver.commit_transaction();
+            assert_eq!(receiver.get_cycle_count(), 2);
+            assert!(receiver.trace.head.is_empty(), "内层交付不能发布迹");
+            assert!(receiver.committed_transaction_events().is_empty());
+        });
+        if commit {
+            receiver.commit_transaction();
+            assert_eq!(receiver.get_cycle_count(), 2);
+            assert!(receiver.committed_transaction_events().iter().any(|(guard, event)| {
+                matches!(event, Event::ReadReg(..))
+                    && *guard == Some(And(Box::new(Var(parent_guard)), Box::new(Var(child_guard))))
+            }));
+        } else {
+            receiver.rollback_transaction(root);
+            assert_eq!(receiver.get_cycle_count(), 0);
+            assert!(!receiver.decls.contains_key(&imported));
+            assert!(receiver.transaction_events.is_empty());
+        }
+        let reject_in_parent_and_child =
+            And(Box::new(And(Box::new(Var(parent_guard)), Box::new(Var(child_guard)))), Box::new(reject_value.clone()));
+        assert_eq!(receiver.check_sat_with(&reject_in_parent_and_child, loc), if commit { Unsat } else { Sat });
+        let reject_in_other_parent = And(
+            Box::new(And(Box::new(Not(Box::new(Var(parent_guard)))), Box::new(Var(child_guard)))),
+            Box::new(reject_value.clone()),
+        );
+        assert_eq!(receiver.check_sat_with(&reject_in_other_parent, loc), Sat);
+    }
+}
+
+#[test]
+fn nested_remote_obligations_and_input_facts_use_the_local_ancestor_guard() {
+    configure_tastic(Tactic::Qfaufbv);
+    let loc = SourceLoc::unknown();
+    let ctx = Context::new(Config::new());
+    let remote_ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let parent = solver.declare_const(Ty::Bool, loc);
+    let child = solver.declare_const(Ty::Bool, loc);
+    let input_fact = solver.declare_const(Ty::Bool, loc);
+    let root = solver.start_transaction();
+    solver.with_deferred_region_queries(|solver| {
+        let owner = solver.new_logical_arm(None);
+        solver.start_transaction_with_guard(Some(Var(parent)));
+        solver.with_logical_arm(owner, |solver| {
+            let mut worker =
+                Solver::from_checkpoint(&remote_ctx, crate::executor::region_arm::capture_arm_entry_checkpoint(solver));
+            let remote_root = worker.start_transaction();
+            let (mut suffix, obligations) = worker.with_deferred_region_queries(|worker| {
+                let arm = worker.new_logical_arm(None);
+                worker.start_transaction_with_guard(Some(Var(child)));
+                worker.with_logical_arm(arm, |worker| {
+                    worker.defer_assertion(Var(parent), loc);
+                    worker.assert_region_input_fact(Var(input_fact));
+                    worker.commit_transaction();
+                });
+                (worker.export_arm_suffix(arm).unwrap(), worker.take_arm_assertions())
+            });
+            worker.rollback_transaction(remote_root);
+            let start = solver.next_join_symbol();
+            solver.reserve_join_symbols(start, worker.next_join_symbol());
+            let arm = solver.new_logical_arm(Some(owner));
+            solver.import_arm_assertions(obligations, &mut suffix);
+            solver.import_arm_suffix(arm, suffix);
+            solver.commit_transaction();
+        });
+        assert_eq!(solver.check_deferred_assertions(loc), Some(Unsat), "远端义务只覆盖父臂的到达域");
+
+        let sibling = And(Box::new(Not(Box::new(Var(parent)))), Box::new(Var(child)));
+        solver.start_transaction_with_guard(Some(sibling));
+        solver.defer_assertion(Var(input_fact), loc);
+        solver.commit_transaction();
+        assert_eq!(solver.check_deferred_assertions(loc), Some(Sat), "远端输入事实不能证明父臂外的义务");
+    });
+    solver.rollback_transaction(root);
+}
+
+#[test]
+fn nested_region_groups_remain_owned_by_the_parent_until_publication() {
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let root = solver.start_transaction();
+    solver.cycle_count();
+    let parent = solver.new_logical_arm(None);
+    let sibling = solver.new_logical_arm(None);
+    solver.with_logical_arm(parent, |solver| {
+        solver.start_transaction();
+        let a = solver.new_logical_arm(Some(parent));
+        let b = solver.new_logical_arm(Some(parent));
+        solver.with_logical_arm(a, |s| s.cycle_count());
+        solver.with_logical_arm(b, |s| s.add_event(Event::Instr(Val::I64(2))));
+        assert!(solver.commit_region_groups(&[a, b]).is_none());
+        assert_eq!(solver.transaction_depth(), 1);
+        assert!(solver.trace.head.is_empty());
+        assert_eq!(solver.with_logical_arm(a, |s| s.arm_error_snapshot(a).0).cycles, 2);
+        let own = solver.with_logical_arm(b, |s| s.arm_error_snapshot(b).0);
+        assert_eq!(own.cycles, 1);
+        assert!(own.trace().as_ref().unwrap().events_rev().any(|event| matches!(event, Event::Instr(Val::I64(2)))));
+    });
+    let sibling = solver.with_logical_arm(sibling, |s| s.arm_error_snapshot(sibling).0);
+    assert_eq!(sibling.cycles, 1);
+    assert!(sibling.trace().as_ref().unwrap().events_rev().all(|event| !matches!(event, Event::Instr(_))));
+    solver.rollback_transaction(root);
+    assert!(solver.trace.head.is_empty());
+    assert_eq!(solver.get_cycle_count(), 0);
 }
 
 #[test]
@@ -1211,7 +1391,7 @@ fn region_arm_deferred_input_fact_and_exit_marker() {
         deferred.remap_symbols(&remap);
         let arm = a.new_logical_arm(None);
         a.import_arm_assertions(Some(deferred), &mut suffix);
-        a.import_arm_suffix(arm, &suffix);
+        a.import_arm_suffix(arm, suffix);
         certify(a)
     });
     a.rollback_transaction(root);

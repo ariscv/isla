@@ -581,16 +581,31 @@ impl AttemptGuard {
         ATTEMPTS.with(|stack| stack.borrow_mut().last_mut().unwrap().outcome = "segmented");
     }
 
+    pub fn finish_verified_prefix(&mut self, error: &ExecError, symtab: &Symtab) {
+        self.finish_with_rejection(FailurePhase::ArmExecution, error, error, symtab, "partial_commit_prefix");
+    }
+
     pub fn finish_success(&mut self, dead: bool) {
         self.timing.finish("success".into());
         ATTEMPTS.with(|stack| stack.borrow_mut().last_mut().unwrap().outcome = if dead { "dead" } else { "success" });
     }
 
     pub fn finish_rejected(&mut self, phase: FailurePhase, rejection: &ExecError, error: &ExecError, symtab: &Symtab) {
+        self.finish_with_rejection(phase, rejection, error, symtab, "rejected");
+    }
+
+    fn finish_with_rejection(
+        &mut self,
+        phase: FailurePhase,
+        rejection: &ExecError,
+        error: &ExecError,
+        symtab: &Symtab,
+        outcome: &'static str,
+    ) {
         let ExecError::SpeculativeReject { reason, function, pc, .. } = rejection else {
             unreachable!("区域拒绝必须携带执行位置");
         };
-        self.timing.finish(reason.to_string());
+        self.timing.finish(if outcome == "rejected" { reason.to_string() } else { outcome.to_owned() });
         if MODE.load(Ordering::Relaxed) != 2 {
             return;
         }
@@ -620,7 +635,7 @@ impl AttemptGuard {
                 .map_or(phase, |(_, _, _, phase)| phase);
             attempt.rejection_reason = Some(*reason);
             let reason = json!(reason);
-            attempt.outcome = "rejected";
+            attempt.outcome = outcome;
             // 只沿同一次拒绝向外关联，已处理的子区域失败不能覆盖外层的退出认证。
             attempt.failure = attempt
                 .nested_failure
@@ -660,7 +675,7 @@ impl Drop for AttemptGuard {
                 }
                 return;
             }
-            let first_indeterminate = if attempt.outcome == "rejected"
+            let first_indeterminate = if matches!(attempt.outcome, "rejected" | "partial_commit_prefix")
                 && attempt.rejection_reason.is_some_and(super::SpeculativeRejectReason::is_indeterminate)
             {
                 attempt.first_indeterminate.clone()
@@ -706,6 +721,23 @@ pub(crate) fn emit(mut record: Value) {
     if let Some(line) = COUNTS.get().unwrap().lock().unwrap().record(&record) {
         eprintln!("{line}");
     }
+}
+
+pub(crate) fn record_prefix_commit(rejection: &ExecError, records: usize, symtab: &Symtab) {
+    let ExecError::SpeculativeReject { reason, function, pc, location, .. } = rejection else {
+        unreachable!("切点必须报告失败指令");
+    };
+    let (attempt, parent_attempt) =
+        ATTEMPTS.with(|stack| stack.borrow().last().map_or((None, None), |attempt| (Some(attempt.id), attempt.parent)));
+    eprintln!(
+        "{}",
+        json!({
+            "schema":1,"kind":"partial_commit_prefix","fixed_records":records,
+            "reason":format!("SpeculativeRejectReason::{reason:?}"), "function":name_string(*function,symtab),
+            "pc":pc,"location":location,"cause":rejection.query_failure().map(|cause|cause.diagnostic()),
+            "attempt":attempt,"parent_attempt":parent_attempt
+        })
+    );
 }
 /// 每次真实区域尝试都记一票；关闭合并诊断时调用方不加锁。
 pub(crate) fn record_depth(depth: usize, call_depth: usize, transaction_depth: usize) {

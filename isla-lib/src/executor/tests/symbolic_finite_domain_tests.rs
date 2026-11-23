@@ -202,6 +202,7 @@ fn symbolic_finite_domain_region_preserves_retry_and_rollback() {
         mode: crate::config::MergeMode::Adaptive,
         origin: (frame.function_name, 0, info()),
         pending_branch: None,
+        verified_prefix: None,
     });
 
     let shared = empty_shared_state();

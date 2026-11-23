@@ -20,6 +20,7 @@ enum Body {
     Inline,
     Call,
     Nested,
+    NestedAssert,
     ThreeLevels,
     OrderedReads,
     Loop,
@@ -70,6 +71,19 @@ fn diamond_case(
                 } else {
                     set(b_result)
                 },
+                Instr::End,
+            ],
+            Body::NestedAssert => vec![
+                Instr::Jump(Exp::Id(input), 4, info()),
+                Instr::PrimopUnary(
+                    Loc::Id(RETURN),
+                    primop::assume::<B64>,
+                    Exp::Call(Op::Not, vec![Exp::Id(flag)]),
+                    info(),
+                ),
+                set(Exp::Id(flag)),
+                Instr::Goto(5),
+                set(b_result),
                 Instr::End,
             ],
             Body::ThreeLevels => vec![
@@ -255,6 +269,7 @@ fn ordered(
         match fail {
             "call" => Body::Call,
             "nested" => Body::Nested,
+            "nested_assert" => Body::NestedAssert,
             "loop" => Body::Loop,
             "three" => Body::ThreeLevels,
             "ordered_reads" => Body::OrderedReads,
@@ -546,7 +561,11 @@ fn check_deferred_indices(nested: bool, name: &str) {
         .unwrap();
         assert_eq!(matches!(result, region_merge::RegionResult::Merged), safe);
         assert_eq!(frame.region_replay.is_some(), !safe, "越界时应按符号断言拒绝");
-        assert_eq!(imported.load(Ordering::Relaxed), usize::from(parallel), "B 必须被 A 实际导入");
+        assert_eq!(
+            imported.load(Ordering::Relaxed),
+            usize::from(parallel) * (1 + usize::from(nested)),
+            "B 必须被 A 实际导入"
+        );
         solver
             .trace()
             .events_with_guards_rev()
@@ -585,7 +604,7 @@ fn check_nested_b(body: Body, label: &'static str) {
     let imports = log.iter().filter(|(point, _)| point == "imported").count();
     let minimum = match body {
         Body::ThreeLevels => 3,
-        Body::Nested => 2,
+        Body::Nested | Body::NestedAssert => 2,
         _ => 1,
     };
     assert!(imports >= minimum, "{imports} 次导入");
@@ -598,9 +617,17 @@ fn region_arm_nested_two_arms() {
 }
 
 #[test]
+fn region_arm_nested_imports_guarded_assertions() {
+    check_nested_b(Body::NestedAssert, "nested_assert");
+}
+
+#[test]
 fn region_arm_nested_preserves_repeated_register_reads() {
-    let baseline = diamond_case(4, false, None, Body::OrderedReads, None).0;
-    let (out, log, _) = ordered(4, "worker_claimed", "a_join", "ordered_reads");
+    let mut baseline = diamond_case(4, false, None, Body::OrderedReads, None).0;
+    let (mut out, log, _) = ordered(4, "worker_claimed", "a_join", "ordered_reads");
+    // 逐项比较终态及其迹，任务完成顺序由调度决定。
+    baseline.sort_by(|a, b| a.results.cmp(&b.results));
+    out.sort_by(|a, b| a.results.cmp(&b.results));
     assert_eq!(out, baseline);
     assert!(out.iter().any(|o| o.events.iter().filter(|e| e.contains("ReadReg")).count() > 1));
     assert_eq!(log.iter().filter(|(p, _)| p == "imported").count(), 2);

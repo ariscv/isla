@@ -256,13 +256,12 @@ pub(crate) fn remap_region_arm_symbols(first_target: Sym, arms: Vec<(RegionId, A
     SymRemap::for_region_arms(first_target, arms)
 }
 
-/// 在根事务创建前取得远端 B 臂的重放入口。
-///
-/// 这个边界故意单独命名：阶段 3 的 `RegionArmJob` 只能保存它，不能保存活动
-/// 事务的 Solver 状态。
+/// 冻结远端臂的重放入口。活动父臂使用带完整到达条件的快照。
 pub(crate) fn capture_arm_entry_checkpoint<B: BV>(solver: &mut Solver<B>) -> Checkpoint<B> {
-    assert_eq!(solver.transaction_depth(), 0, "远端臂入口必须位于根事务之前");
-    solver.arm_entry_checkpoint()
+    match solver.current_logical_arm() {
+        Some(arm) => solver.arm_error_snapshot(arm).0,
+        None => solver.arm_entry_checkpoint(),
+    }
 }
 
 /// B worker 交付给固定 A 汇合者的纯 Rust 数据。它不携带 Z3 AST、Solver 或 Context。

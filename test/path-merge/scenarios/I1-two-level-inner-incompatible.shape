@@ -1,0 +1,4 @@
+(declare-const path_a (_ BitVec 1))
+(declare-const path_z (_ BitVec 1))
+(or (and (= path_a #b0) (= path_z #b0)) (= path_a #b1))
+(and (= path_a #b0) (= path_z #b1))

@@ -5,7 +5,7 @@ use super::*;
 use crate::config::RegionOptions;
 use serde_json::Value;
 
-type Program = Vec<Instr<Name, B64>>;
+pub(super) type Program = Vec<Instr<Name, B64>>;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Strategy {
@@ -33,7 +33,7 @@ impl Strategy {
 }
 
 #[derive(Debug)]
-struct Observation {
+pub(super) struct Observation {
     paths: (usize, usize),
     records: Vec<(Name, usize, bool)>,
     root_function: String,
@@ -42,11 +42,11 @@ struct Observation {
 }
 
 impl Observation {
-    fn committed(&self, function: Name, branch_pc: usize) -> bool {
+    pub(super) fn committed(&self, function: Name, branch_pc: usize) -> bool {
         self.records.iter().any(|&(name, pc, _)| name == function && pc == branch_pc)
     }
 
-    fn assert_root(&self, forked_paths: usize) {
+    pub(super) fn assert_root(&self, forked_paths: usize) {
         let committed = self.records.contains(&(TOP_LEVEL_LET, 0, true));
         let rejected = self.rejections["top"]
             .as_array()
@@ -70,7 +70,7 @@ impl Observation {
         assert!(!self.records.is_empty(), "单条完成路径必须保留合并记录");
     }
 
-    fn assert_local_rejection(&self, function: &str, branch_pc: usize, reason: &str) {
+    pub(super) fn assert_local_rejection(&self, function: &str, branch_pc: usize, reason: &str) {
         assert!(
             self.stats["failure_reasons"][reason].as_u64().unwrap_or(0) > 0
                 && self.rejections["top"].as_array().unwrap().iter().any(|row| {
@@ -82,7 +82,12 @@ impl Observation {
     }
 }
 
-fn observe(mut shared: SharedState<'static, B64>, program: Program, inputs: usize, strategy: Strategy) -> Observation {
+pub(super) fn observe(
+    mut shared: SharedState<'static, B64>,
+    program: Program,
+    inputs: usize,
+    strategy: Strategy,
+) -> Observation {
     shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
     let run = |code, limits| paths_with_state(code, &shared, inputs, limits, crate::memory::Memory::new(), |_| ());
     let forked = run(program.clone(), ExecutionLimits::default().with_path_merging(false));
@@ -105,7 +110,7 @@ fn observe(mut shared: SharedState<'static, B64>, program: Program, inputs: usiz
     }
 }
 
-fn copy_return(value: Exp<Name>) -> Instr<Name, B64> {
+pub(super) fn copy_return(value: Exp<Name>) -> Instr<Name, B64> {
     Instr::Copy(Loc::Id(RETURN), value, info())
 }
 
@@ -113,7 +118,7 @@ fn eq(lhs: Exp<Name>, rhs: Exp<Name>) -> Exp<Name> {
     Exp::Call(Op::Eq, vec![lhs, rhs])
 }
 
-fn read_string(dest: Name, slot: Name) -> Instr<Name, B64> {
+pub(super) fn read_string(dest: Name, slot: Name) -> Instr<Name, B64> {
     Instr::PrimopBinary(
         Loc::Id(dest),
         primop::binary_primops()["eq_string"],
@@ -127,7 +132,7 @@ fn string_arm(slot: Name, value: &str) -> Instr<Name, B64> {
     Instr::Copy(Loc::Id(slot), Exp::String(value.into()), info())
 }
 
-fn string_region(pc: usize, condition: Exp<Name>, slot: Name, different: bool) -> Program {
+pub(super) fn string_region(pc: usize, condition: Exp<Name>, slot: Name, different: bool) -> Program {
     vec![
         Instr::Decl(slot, Ty::String, info()),
         Instr::Jump(condition, pc + 4, info()),
@@ -606,5 +611,85 @@ fn unknown_z3_exit_obligation_replays_and_drops_per_path() {
         assert_eq!(diagnostics["failure_reasons"]["unknown_z3"], 1);
         let drops = shared.execution_stats.solver_path_drops_since(0);
         assert!(drops.first_locations.iter().all(|drop| drop.purpose == "assertion"));
+    }
+}
+
+#[test]
+fn partial_commit_nested_retry_operand_keeps_root() {
+    const CHILD: &str = "ISLA_TEST_PARTIAL_COMMIT_RETRY_OPERAND";
+    let enabled = match std::env::var(CHILD).as_deref() {
+        Ok("true") => true,
+        Ok("false") => false,
+        Ok(value) => panic!("无效的测试开关 {value}"),
+        Err(_) => {
+            let name = concat!(module_path!(), "::partial_commit_nested_retry_operand_keeps_root");
+            let (_, name) = name.split_once("::").unwrap();
+            for setting in ["false", "true"] {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", name, "--nocapture", "--test-threads=1"])
+                    .env(CHILD, setting)
+                    .output()
+                    .unwrap();
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert!(
+                    output.status.success()
+                        && stdout.lines().any(|line| line.starts_with("test result: ok. 1 passed;")),
+                    "{setting}\n{stdout}{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            return;
+        }
+    };
+    RegionOptions { partial_commit_retry_operand: enabled, ..Default::default() }.configure();
+    use smtlib::Exp::{Ite, Var};
+    for strategy in strategies() {
+        let mut shared = empty_shared_state();
+        let exponent = shared.symtab.intern("znested_exponent");
+        let power = shared.symtab.intern("znested_power");
+        let program = vec![
+            Instr::Jump(input(0), 3, info()),
+            copy_return(Exp::Bool(false)),
+            Instr::Goto(11),
+            Instr::Jump(input(1), 6, info()),
+            copy_return(Exp::Bool(false)),
+            Instr::Goto(11),
+            Instr::Decl(exponent, Ty::I128, info()),
+            Instr::Decl(power, Ty::I128, info()),
+            Instr::PrimopReset(
+                Loc::Id(exponent),
+                Arc::new(|_, _, solver| {
+                    Ok(Val::Symbolic(solver.define_bitvector(
+                        Ite(
+                            Box::new(Var(Sym::from_u32(2))),
+                            Box::new(crate::primop_util::smt_i128(1)),
+                            Box::new(crate::primop_util::smt_i128(0)),
+                        ),
+                        info(),
+                    )))
+                }),
+                primop::Effect::Pure,
+                info(),
+            ),
+            Instr::PrimopBinary(
+                Loc::Id(power),
+                primop::binary_primops()["pow_int"],
+                Exp::I128(-1),
+                Exp::Id(exponent),
+                info(),
+            ),
+            copy_return(eq(Exp::Id(power), Exp::I128(-1))),
+            Instr::End,
+        ];
+        let observation = observe(shared, program, 3, strategy);
+        let reason = SpeculativeRejectReason::RetryOperand.to_string();
+        if enabled {
+            observation.assert_root(4);
+            observation.assert_local_rejection(&observation.root_function, 9, &reason);
+        } else {
+            assert_eq!(observation.paths, (4, 4));
+            assert!(!observation.committed(TOP_LEVEL_LET, 0));
+            observation.assert_local_rejection(&observation.root_function, 0, &reason);
+        }
     }
 }

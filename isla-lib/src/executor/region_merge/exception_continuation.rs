@@ -14,14 +14,16 @@ pub(super) fn find_catcher<'ir, B: BV>(
     callee_region: &Region,
     shared: &SharedState<'ir, B>,
 ) -> Option<Catcher<'ir, B>> {
-    // 活动的父区域仍负责其自己的边界，不能在这里越过。
-    if frame.region_execution.is_some()
-        || !callee_region.nodes.iter().any(|pc| matches!(frame.instrs[*pc], Instr::Arbitrary))
+    if frame.stack_call.is_none() || !callee_region.nodes.iter().any(|pc| matches!(frame.instrs[*pc], Instr::Arbitrary))
     {
         return None;
     }
-    let &(function, caller_pc) = frame.backtrace.last()?;
+    let (&(function, caller_pc), ancestry) = frame.backtrace.split_last()?;
+    let caller_depth = ancestry.len();
     let &(_, _, instrs) = shared.functions.get(&function)?;
+    if !matches!(instrs.get(caller_pc), Some(Instr::Call(_, _, callee, ..)) if *callee == frame.function_name) {
+        return None;
+    }
     let start = caller_pc + 1;
     let is_exception_check =
         |pc| matches!(instrs.get(pc), Some(Instr::Jump(exp, ..)) if exception_polarity(exp, HAVE_EXCEPTION).is_some());
@@ -52,16 +54,33 @@ pub(super) fn find_catcher<'ir, B: BV>(
         region.local_variables.extend(&next.local_variables);
         region.join = next.join;
     }
-    if !matches!(region.join, RegionPoint::Instruction(_))
-        || !region
-            .nodes
-            .iter()
-            .any(|pc| matches!(&instrs[*pc], Instr::Copy(Loc::Id(HAVE_EXCEPTION), Exp::Bool(false), _)))
+    let RegionPoint::Instruction(join) = region.join else { return None };
+    if !region.nodes.iter().any(|pc| matches!(&instrs[*pc], Instr::Copy(Loc::Id(HAVE_EXCEPTION), Exp::Bool(false), _)))
     {
         return None;
     }
     // 延续从实际返回位置进入，第一条异常检查也要执行。
     region.nodes.insert(start);
+    if let Some(parent) = &frame.region_execution {
+        let &(_, parent_call) = frame.backtrace.get(parent.entry_depth)?;
+        if !parent.region.nodes.contains(&parent_call) || parent.region.join == RegionPoint::Instruction(parent_call) {
+            return None;
+        }
+        if caller_depth == parent.entry_depth {
+            let parent_exit = |pc| {
+                parent.region.join == RegionPoint::Instruction(pc)
+                    || (parent.region.join == RegionPoint::FunctionExit
+                        && (matches!(instrs.get(pc), Some(Instr::End))
+                            || (parent.catch_return.is_some() && matches!(instrs.get(pc), Some(Instr::Arbitrary)))))
+            };
+            // 捕获可以恰好到父出口。父出口上的指令仍交回父组织者执行。
+            if region.nodes.iter().any(|pc| !parent.region.nodes.contains(pc) || parent_exit(*pc))
+                || !(parent_exit(join) || parent.region.nodes.contains(&join))
+            {
+                return None;
+            }
+        }
+    }
     Some(Catcher { function, instrs, region: Arc::new(region), start })
 }
 
@@ -87,7 +106,9 @@ pub(super) fn finish_catch<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Size
     let mut execution = base.region_execution.take().unwrap();
     execution.region = Arc::clone(&catcher.region);
     execution.entry_depth -= 1;
-    execution.write_depth = execution.entry_depth;
+    if frame.region_execution.is_none() {
+        execution.write_depth = execution.entry_depth;
+    }
 
     let mut reached = [Vec::new(), Vec::new()];
     for (side, arrivals) in arms.into_iter().enumerate() {
@@ -145,6 +166,7 @@ pub(super) fn finish_catch<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Size
         condition,
         &catcher.region,
         false,
+        restored.region_execution.is_none(),
         &caller,
         reached,
         &mut restored,

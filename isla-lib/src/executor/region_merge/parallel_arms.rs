@@ -83,11 +83,7 @@ pub(super) fn entry<'a, 'ir: 'a, 'task, B: BV>(
         region_arm::observe(state, "no_slot").expect("名额观察点不可失败");
         return None;
     };
-    let checkpoint = match solver.current_logical_arm() {
-        Some(arm) => solver.arm_error_snapshot(arm).0,
-        None => region_arm::capture_arm_entry_checkpoint(solver),
-    };
-    Some((slot, checkpoint))
+    Some((slot, region_arm::capture_arm_entry_checkpoint(solver)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -126,7 +122,6 @@ fn run_b<'ir, B: BV>(
             );
         }
         let region = RegionId::new(vec![base.function_name.as_u32() as usize, execution.region.branch_pc]);
-        let execution_depth = execution.depth;
         let entry_depth = execution.entry_depth;
         let outer_region = execution.region.clone();
         let owner = solver.new_logical_arm(None);
@@ -200,8 +195,6 @@ fn run_b<'ir, B: BV>(
             {
                 return Ok(None);
             }
-        } else if execution_depth > 1 && !transferable_nested_suffix(&suffix, start) {
-            return Ok(None);
         }
         let ordered_reads = base.local_state.speculative_access.as_ref().unwrap().ordered_events;
         if !errors.tasks.get_mut().unwrap().iter().all(|task| transferable_error(task, &prefix, ordered_reads, start)) {
@@ -245,20 +238,6 @@ fn guard_available(guard: &smtlib::Exp<Sym>, start: u32, defined: &HashSet<Sym>)
     available
 }
 
-/// 活动祖先的断言已在重放前缀。新的断言须由本层 A 按完整作用域重新冻结前序。
-fn transferable_nested_suffix<B: BV>(suffix: &[ArmSuffixEvent<B>], start: u32) -> bool {
-    let mut defined = HashSet::new();
-    for item in suffix {
-        if matches!(item.event, Event::Smt(smtlib::Def::Assert(_), ..))
-            || item.guard.as_ref().is_some_and(|g| !guard_available(g, start, &defined))
-        {
-            return false;
-        }
-        defined.extend(item.event.defines());
-    }
-    true
-}
-
 /// 叶快照只交付入口检查点后的本段。没有读取序号的冻结叶仅接纳每个字段的一次读取。
 fn transferable_error<B: BV>(
     task: &Task<B>,
@@ -298,30 +277,6 @@ fn transferable_error<B: BV>(
     true
 }
 
-/// 相邻事件共用同一守卫时只进入一次条件作用域，读取仍按原序号登记。
-fn replay_events<B: BV>(solver: &mut Solver<B>, events: impl Iterator<Item = ArmSuffixEvent<B>>) {
-    let mut events = events.peekable();
-    while let Some(mut first) = events.next() {
-        let guard = first.guard.take();
-        let append = |solver: &mut Solver<B>| {
-            let mut item = first;
-            loop {
-                match item.register_read_occurrence {
-                    Some(index) => solver.add_region_register_read(item.event, index),
-                    None if item.cycle => solver.cycle_count(),
-                    None => solver.add_event(item.event),
-                }
-                let Some(next) = events.next_if(|next| next.guard == guard) else { break };
-                item = next;
-            }
-        };
-        match &guard {
-            Some(guard) => solver.with_transaction_condition(guard, append),
-            None => append(solver),
-        }
-    }
-}
-
 /// 在 A 的 B 入口重新投影错误叶。A 更早产生的定义和可复用读取位置必须进入冻结前缀。
 fn import_error<'ir, 'task, B: BV>(
     leaf: ErrorLeaf<'ir, B>,
@@ -340,8 +295,8 @@ fn import_error<'ir, 'task, B: BV>(
     let (conditions, body) = events.split_at(condition_count);
     let tx = solver.start_transaction();
     let (checkpoint, memory_guards) = solver.with_logical_arm(owner, |solver| {
-        replay_events(
-            solver,
+        solver.import_arm_suffix(
+            owner,
             body.iter().rev().map(|&(event, guard)| ArmSuffixEvent {
                 guard: guard.map(|g| remap.exp(g)),
                 event: remap.event(event),
@@ -553,20 +508,11 @@ pub(super) fn receive<'ir, 'task, B: BV>(
         ));
     }
     solver.import_arm_assertions(packet.deferred, &mut packet.suffix);
+    solver.import_arm_suffix(owner, packet.suffix);
     if packet.dead {
-        let guard = packet.suffix.pop().unwrap().guard;
-        solver.with_logical_arm(owner, |solver| {
-            solver.start_transaction_with_guard(guard);
-            solver.commit_dead_transaction();
-        });
         solver.discard_logical_arm_effects(owner);
         region_arm::observe(state, "imported")?;
         return Ok(Received::Dead);
-    }
-    if parent.is_some() {
-        solver.with_logical_arm(owner, |solver| replay_events(solver, packet.suffix.into_iter()));
-    } else {
-        solver.import_arm_suffix(owner, &packet.suffix);
     }
     packet.frame.region_execution.as_mut().unwrap().remote_cancel =
         base.region_execution.as_ref().unwrap().remote_cancel.clone();

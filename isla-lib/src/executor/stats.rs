@@ -248,6 +248,8 @@ impl ExecutionStats {
         if self.enabled {
             eprintln!("[MERGE_STATS] {}", self.merge_json());
             eprintln!("[FORK_STATS] {}", self.fork_json(&shared.symtab));
+        }
+        if self.enabled || !self.rejections.lock().unwrap().is_empty() {
             eprintln!("[SPECULATION_REJECT_STATS] {}", self.arm_unsupported_json(&shared.symtab));
         }
     }
@@ -316,7 +318,10 @@ impl ExecutionStats {
         else {
             panic!("统计必须记录推演拒绝");
         };
-        if self.enabled {
+        // 启用部分提交时，即使关闭性能统计，收尾仍须保留未判定的原因和位置。
+        if self.enabled
+            || (reason.is_indeterminate() && reason.verified_prefix(crate::config::RegionOptions::current()))
+        {
             *self.merge.lock().unwrap().failure_reasons.entry(*reason).or_default() += 1;
             *self
                 .rejections

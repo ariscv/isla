@@ -14,11 +14,15 @@ fn limits(strategy: MergeStrategy) -> ExecutionLimits {
 }
 
 fn width_candidates(frame: &mut LocalFrame<'static, B64>) {
+    set_width_candidates(frame, Val::I64);
+}
+
+fn set_width_candidates(frame: &mut LocalFrame<'static, B64>, mut value: impl FnMut(i64) -> Val<B64>) {
     let guard = |frame: &LocalFrame<B64>, i: u32| match &frame.vars()[&test_name(900 + i)] {
         UVal::Init(Val::Symbolic(symbol)) => *symbol,
         _ => unreachable!(),
     };
-    let low = |a, b| Val::Guarded(guard(frame, 1), Box::new((Val::I64(a), Val::I64(b))));
+    let mut low = |a, b| Val::Guarded(guard(frame, 1), Box::new((value(a), value(b))));
     let width = Val::Guarded(guard(frame, 0), Box::new((low(32, 39), low(48, 57))));
     frame.vars_mut().insert(test_name(1800), UVal::Init(width));
 }
@@ -217,5 +221,77 @@ fn region_consumer_preserves_candidate_assertion_failure() {
         let mut outcomes = outcomes.into_inner().unwrap();
         outcomes.sort_unstable();
         assert_eq!(outcomes, [false, true], "{strategy:?}");
+    }
+}
+
+#[test]
+fn region_consumer_uses_callee_local_last_use() {
+    let mut shared = empty_shared_state();
+    let callee = shared.symtab.intern("zcallee_width_consumer");
+    let [width, bits, length] = [1800, 1801, 1802].map(test_name);
+    // 被调函数的最后使用和汇合点在 PC 5、6，超出调用者的指令范围。
+    let body = vec![
+        Instr::Decl(bits, Ty::AnyBits, info()),
+        Instr::Decl(length, Ty::I128, info()),
+        Instr::Decl(test_name(1803), Ty::Unit, info()),
+        Instr::Decl(test_name(1804), Ty::Unit, info()),
+        Instr::PrimopBinary(
+            Loc::Id(bits),
+            primop::binary_primops()["vector_access"],
+            Exp::Id(width),
+            Exp::I128(0),
+            info(),
+        ),
+        Instr::PrimopUnary(Loc::Id(length), primop::length, Exp::Id(bits), info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::Eq, vec![Exp::Id(length), Exp::I128(32)]), info()),
+        Instr::End,
+    ];
+    let parameter_ty = Box::leak(Box::new(Ty::Vector(Box::new(Ty::AnyBits))));
+    shared.functions.insert(callee, (vec![(width, parameter_ty)], &Ty::Bool, Box::leak(body.into_boxed_slice())));
+    let code = vec![
+        Instr::Jump(input(2), 3, info()),
+        Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+        Instr::Goto(4),
+        Instr::Call(Loc::Id(RETURN), false, callee, vec![Exp::Id(width)], info()),
+        Instr::End,
+    ];
+    let expected = paths(
+        vec![
+            Instr::Copy(
+                Loc::Id(RETURN),
+                Exp::Call(Op::And, vec![Exp::Call(Op::And, vec![input(0), input(1)]), input(2)]),
+                info(),
+            ),
+            Instr::End,
+        ],
+        &shared,
+        3,
+        false,
+    );
+    for strategy in strategies() {
+        let (merged, _, _) = paths_with_solver_state(
+            code.clone(),
+            &shared,
+            3,
+            limits(strategy),
+            crate::memory::Memory::new(),
+            |frame, solver| {
+                // 这些 SMT 值没有 Sail 位向量标记，生产点因此得保留四个不同位宽的到达项。
+                set_width_candidates(frame, |width| {
+                    Val::Vector(vec![Val::Symbolic(solver.declare_const(smtlib::Ty::BitVec(width as u32), info()))])
+                });
+            },
+            false,
+        );
+        assert_eq!(equivalent_paths(&expected, &merged, 3, true), (1, 1), "{strategy:?}");
+        assert!(
+            merged[0].records.iter().any(|record| {
+                record.function == callee
+                    && record.branch_pc == 4
+                    && record.join == crate::ir::regions::RegionPoint::Instruction(6)
+                    && record.parent_record.is_some()
+            }),
+            "不同位宽应在被调函数最后一次使用之后汇合，{strategy:?}"
+        );
     }
 }

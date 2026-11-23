@@ -73,6 +73,13 @@ pub enum SpeculativeRejectReason {
     Exit,
 }
 
+#[derive(PartialEq, Eq)]
+enum PrefixRecovery {
+    Disabled,
+    Ordinary,
+    Nested,
+}
+
 impl SpeculativeRejectReason {
     pub(crate) fn is_indeterminate(self) -> bool {
         matches!(
@@ -93,6 +100,93 @@ impl SpeculativeRejectReason {
             Self::Z3Timeout => options.partial_commit_z3_timeout,
             Self::Z3ResourceExhausted => options.partial_commit_z3_resource_exhausted,
             Self::UnknownDeferredMode => options.partial_commit_deferred_mode,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn verified_prefix(self, options: &crate::config::RegionOptions) -> bool {
+        self.prefix_recovery(options) != PrefixRecovery::Disabled
+    }
+
+    pub(super) fn nested_verified_prefix(self, options: &crate::config::RegionOptions) -> bool {
+        self.prefix_recovery(options) == PrefixRecovery::Nested
+    }
+
+    fn prefix_recovery(self, options: &crate::config::RegionOptions) -> PrefixRecovery {
+        use PrefixRecovery::{Disabled, Nested, Ordinary};
+        if !options.partial_commit_prefix {
+            return Disabled;
+        }
+        let (enabled, recovery) = match self {
+            Self::UnknownFiniteDomain
+            | Self::UnknownZ3
+            | Self::Z3Timeout
+            | Self::Z3ResourceExhausted
+            | Self::UnknownDeferredMode => (self.partial_commit(options), Nested),
+            Self::Monomorphize
+            | Self::ExpressionRetry
+            | Self::UnaryRetry
+            | Self::BinaryRetry
+            | Self::VariadicRetry
+            | Self::SpecialCallRetry
+            | Self::IntegerConversion
+            | Self::RetryCondition
+            | Self::SymbolicValueEnumeration
+            | Self::RetryOperand => (options.partial_commit_retry_operand, Nested),
+            // RegionEscaped 可在执行前检查被调函数时产生；已越界的帧没有指令保存点。
+            Self::NoJoin | Self::HasBackEdge | Self::ExceptionCheck | Self::NestingLimit | Self::RegionEscaped => {
+                (options.partial_commit_structure, Ordinary)
+            }
+            Self::StateEffect
+            | Self::UnknownExtern
+            | Self::CalleeStateWrite
+            | Self::RegisterReadAfterWrite
+            | Self::RepeatedRegisterWrite
+            | Self::RegisterReadWrite => (options.partial_commit_state_effect, Ordinary),
+            Self::PolicyOff => (options.partial_commit_control, Nested),
+            // 这些指令在普通根前沿重试，保留原有控制、事件和终态处理。
+            Self::Interrupt | Self::ZeroInstruction | Self::Assume | Self::Assert | Self::Arbitrary | Self::Exit => {
+                (options.partial_commit_control, Ordinary)
+            }
+            // 安全义务、预算、动态越界及汇合错误不等于某一条可重试指令。
+            Self::ExitUnsat
+            | Self::SymbolicAssertion
+            | Self::PathTimeout
+            | Self::StepBudget
+            | Self::FragmentLimit
+            | Self::StackEscaped
+            | Self::RegisterSequence
+            | Self::RelaxedRegister
+            | Self::IncompatibleState
+            | Self::UnionPayload
+            | Self::DepthMismatch
+            | Self::LoopHistoryMismatch
+            | Self::SamplingState
+            // 这些条件没有可用的普通前缀恢复入口。
+            | Self::RecursiveEffect
+            | Self::SymbolicJump
+            | Self::AnnouncePc
+            | Self::LimitSampling
+            | Self::LimitTruncation => return Disabled,
+        };
+        if enabled {
+            recovery
+        } else {
+            Disabled
+        }
+    }
+
+    /// 准入拒绝时尚在分叉指令，父区域仍有完整的臂与预算。
+    pub(super) fn split_admission(self, options: &crate::config::RegionOptions) -> bool {
+        match self {
+            // 同一标签也用于执行中越过区域边界。只有准入检查可直接拆分。
+            Self::NoJoin
+            | Self::HasBackEdge
+            | Self::ExceptionCheck
+            | Self::NestingLimit
+            | Self::RegionEscaped
+            | Self::StateEffect
+            | Self::CalleeStateWrite => self.verified_prefix(options),
             _ => false,
         }
     }
@@ -147,7 +241,122 @@ impl SpeculationStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::RegionOptions;
     use serde_json::json;
+
+    #[test]
+    fn verified_prefix_requires_master_and_the_specific_reason_category() {
+        use SpeculativeRejectReason::*;
+        type Enable = fn(&mut RegionOptions);
+        let categories: [(Enable, &[SpeculativeRejectReason]); 9] = [
+            (|options| options.partial_commit_finite_domain = true, &[UnknownFiniteDomain]),
+            (|options| options.partial_commit_unknown_z3 = true, &[UnknownZ3]),
+            (|options| options.partial_commit_z3_timeout = true, &[Z3Timeout]),
+            (|options| options.partial_commit_z3_resource_exhausted = true, &[Z3ResourceExhausted]),
+            (|options| options.partial_commit_deferred_mode = true, &[UnknownDeferredMode]),
+            (
+                |options| options.partial_commit_retry_operand = true,
+                &[
+                    Monomorphize,
+                    ExpressionRetry,
+                    UnaryRetry,
+                    BinaryRetry,
+                    VariadicRetry,
+                    SpecialCallRetry,
+                    IntegerConversion,
+                    RetryCondition,
+                    SymbolicValueEnumeration,
+                    RetryOperand,
+                ],
+            ),
+            (
+                |options| options.partial_commit_structure = true,
+                &[NoJoin, HasBackEdge, ExceptionCheck, NestingLimit, RegionEscaped],
+            ),
+            (
+                |options| options.partial_commit_state_effect = true,
+                &[
+                    StateEffect,
+                    UnknownExtern,
+                    CalleeStateWrite,
+                    RegisterReadAfterWrite,
+                    RepeatedRegisterWrite,
+                    RegisterReadWrite,
+                ],
+            ),
+            (
+                |options| options.partial_commit_control = true,
+                &[PolicyOff, Interrupt, ZeroInstruction, Assume, Assert, Arbitrary, Exit],
+            ),
+        ];
+        let excluded = [
+            ExitUnsat,
+            SymbolicAssertion,
+            PathTimeout,
+            StackEscaped,
+            StepBudget,
+            FragmentLimit,
+            RecursiveEffect,
+            RegisterSequence,
+            RelaxedRegister,
+            IncompatibleState,
+            UnionPayload,
+            DepthMismatch,
+            LoopHistoryMismatch,
+            SamplingState,
+            SymbolicJump,
+            AnnouncePc,
+            LimitSampling,
+            LimitTruncation,
+        ];
+        let reasons: Vec<_> =
+            categories.iter().flat_map(|(_, reasons)| reasons.iter()).chain(&excluded).copied().collect();
+        let master = RegionOptions { partial_commit_prefix: true, ..RegionOptions::default() };
+        for reason in &reasons {
+            assert!(!reason.verified_prefix(&RegionOptions::default()), "{reason:?}");
+            assert!(!reason.verified_prefix(&master), "{reason:?}");
+            assert!(!reason.split_admission(&RegionOptions::default()), "{reason:?}");
+            assert!(!reason.split_admission(&master), "{reason:?}");
+        }
+        for (enable, accepted) in categories {
+            let mut options = RegionOptions::default();
+            enable(&mut options);
+            for reason in &reasons {
+                assert!(!reason.verified_prefix(&options), "{reason:?}");
+                assert!(!reason.nested_verified_prefix(&options), "{reason:?}");
+                assert!(!reason.split_admission(&options), "{reason:?}");
+            }
+            options.partial_commit_prefix = true;
+            for reason in &reasons {
+                assert_eq!(reason.verified_prefix(&options), accepted.contains(reason), "{reason:?}");
+                let nested = accepted.contains(reason)
+                    && (reason.is_indeterminate()
+                        || matches!(
+                            reason,
+                            Monomorphize
+                                | ExpressionRetry
+                                | UnaryRetry
+                                | BinaryRetry
+                                | VariadicRetry
+                                | SpecialCallRetry
+                                | IntegerConversion
+                                | RetryCondition
+                                | SymbolicValueEnumeration
+                                | RetryOperand
+                                | PolicyOff
+                        ));
+                assert_eq!(reason.nested_verified_prefix(&options), nested, "{reason:?}");
+                let admission = match reason {
+                    NoJoin | HasBackEdge | ExceptionCheck | RegionEscaped | NestingLimit => {
+                        options.partial_commit_structure
+                    }
+                    StateEffect | CalleeStateWrite => options.partial_commit_state_effect,
+                    _ => false,
+                };
+                assert_eq!(reason.split_admission(&options), admission, "{reason:?}");
+            }
+        }
+    }
 
     #[test]
     fn speculation_stats_disabled_does_not_count() {

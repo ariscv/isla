@@ -19,7 +19,7 @@ python3 test/path-merge/run_scenarios.py --bitvector both \
   --output-dir "$scenario_out/runs" --markdown "$scenario_out/scenarios.md"
 ```
 
-`--path-merge-filter '^(C8|C9|C10|D6)-'` 只运行逐事件守卫的四个场景。`--path-merge-filter '^D'` 只选 D 组。默认运行 B64，`--bitvector 129` 选 B129，`--bitvector both` 运行两种位向量实现。每次 property 执行固定 `-T 2`。`--timeout` 给每个 Sail、property、Z3 或形状检查命令设墙钟外限，默认 30 秒。`--scenarios-dir` 可指定独立场景目录。`--plugin` 可选已构建的兼容插件。每个实际运行的场景保留 Sail 编译日志、IR、三种配置、路径 JSON 和日志。
+`--path-merge-filter '^(C8|C9|C10|D6)-'` 只运行逐事件守卫的四个场景。`--path-merge-filter '^I' --bitvector 64` 运行内层拒绝、片段分组和已完成前缀的场景。默认运行 B64，`--bitvector 129` 选 B129，`--bitvector both` 运行两种位向量实现。每次 property 执行固定 `-T 2`。`--timeout` 给每个 Sail、property、Z3 或形状检查命令设墙钟外限，默认 30 秒。`--scenarios-dir` 可指定独立场景目录。`--plugin` 可选已构建的兼容插件。每个实际运行的场景保留 Sail 编译日志、IR、三种配置、路径 JSON 和日志。
 
 纯 JSON 夹具可用同一个 Z3 运行，无需编译 Sail 或 property。
 
@@ -29,7 +29,7 @@ python3 -m unittest discover -s test/path-merge
 
 ## 新增场景
 
-用 `A1-concrete-diff-bits.sail` 的 [完整样例](scenarios/A1-concrete-diff-bits.sail) 起步。编号由 A–H 组字母、组内正整数编号和短英文名组成。源码通常 5–20 行，使用 Sail 标准库和 property 的共用配置。
+用 `A1-concrete-diff-bits.sail` 的 [完整样例](scenarios/A1-concrete-diff-bits.sail) 起步。编号由 A–I 组字母、组内正整数编号和短英文名组成。源码通常 5–20 行，使用 Sail 标准库和 property 的共用配置。
 
 1. 把输入位写到专用寄存器。在 TOML 的 `inputs` 中按位宽登记这些寄存器。符号条件和影响观测的自由选择都应有对应输入。场景会穷举登记的有限输入域，通常只需几位。
 2. 在 `prop` 中执行候选代码，把它的返回值写入 `out_value`，再返回布尔性质。可以用无分叉的独立规格校验候选返回值。复合值在 Sail 里投影成可区别各结果的整数、布尔值或位向量。把要比较的后态寄存器写入 `registers`。这些寄存器在每条完成路径上都应已初始化。
@@ -52,7 +52,9 @@ python3 -m unittest discover -s test/path-merge
 | `initialized_registers` | 比较所列寄存器的逐输入初始化位。缺省为空。 |
 | `assertion_failures` | 断言失败对应的完整输入列表，顺序与 `inputs` 相同。失败叶独立导出，完成路径计数只统计正常返回。 |
 | `reverse_region_ready` | 另用同一份 IR 逆序选择每次同时就绪的片段，比较守卫划分和观测。缺省关闭。 |
-| `merge_concrete_values` | 省略时使用执行器缺省值。本组场景使用缺省开启的具体值合并。 |
+| `merge_concrete_values` | 省略时使用执行器缺省值。I1–I4 显式关闭，保留不同字符串造成的状态不兼容。 |
+| `expect_local_rejection` | 递归和平铺模式均须观察到指定枚举原因的内层区域拒绝。通过 property 共用的 `--merge-diagnostics detail` 读取拒绝诊断。 |
+| `expect_prefix_rejection` | 支持 `UnknownDeferredMode`。递归和平铺都启用延后检查和前缀提交，验证指定拒绝后的固化诊断、完成路径中的合并记录及失败点之前的区域运行次数。 |
 | `status`、`reason` | 默认 `ready`。标 `todo` 或 `xfail` 时填写原因。 |
 
 访存事件比较地址、宽度、读写数据、标签及访问类型。遇到抽象内存的读值时，把能决定该字节的自由量登记为输入。C3 把高七位限制为零，将最低位作为输入。C10 检查 `x=1` 恰好有一笔读，`x=0` 的访存序列为空。D6 检查四个路径组的每个可达输入都恰好读一次 `R`。[C3](scenarios/C3-symbolic-memory-read.sail) · [C10](scenarios/C10-load-conditional.sail) · [D6](scenarios/D6-four-register-reads.sail)
@@ -186,3 +188,11 @@ A3 在旧缺省下有两条完成路径，标为 XFAIL。缺省开启且字符�
 
 - [H1 读取一或两字节](scenarios/H1-symbolic-read-size.sail)
 - [H2 写入一或两字节](scenarios/H2-symbolic-write-size.sail)
+
+## I 组 内层拒绝与已完成前缀
+
+- [I1 内层字符串不兼容，外层仍合并兼容片段](scenarios/I1-two-level-inner-incompatible.sail)
+- [I2 四层嵌套中保留深层合并与外层分组](scenarios/I2-four-level-middle-incompatible.sail)
+- [I3 双臂各产生两个到达片段，同标签的片段合为两组](scenarios/I3-fewest-paths-equivalent-fragments.sail)
+- [I4 三种不同标签分为三组](scenarios/I4-no-over-merge-distinct-labels.sail)
+- [I5 已完成内层汇合后，恢复执行一次需要模型的格式化原语](scenarios/I5-prefix-kept-after-midregion-failure.sail)

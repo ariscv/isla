@@ -167,6 +167,7 @@ pub struct Frame<'ir, B> {
     pub(super) speculation_mode: SpeculationMode,
     // 符号悲观断言拒绝后，按普通分叉重跑到原区域汇合点。
     pub(super) region_replay: Option<(usize, crate::ir::regions::RegionPoint)>,
+    pub(super) prefix_resume: Option<super::region_engine::prefix_resume::Site>,
     pub(super) region_execution: Option<super::region_merge::RegionExecution>,
     pub(super) region_merge_records: super::MergeHistory<B>,
     pub(super) arm_error: Option<(ExecError, bool)>,
@@ -208,6 +209,7 @@ pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
         pc: frame.pc,
         speculation_mode: frame.speculation_mode,
         region_execution: frame.region_execution.clone(),
+        prefix_resume: frame.prefix_resume,
         region_replay: frame.region_replay,
         region_merge_records: frame.region_merge_records.clone(),
         region_arrivals: Vec::new(),
@@ -243,6 +245,7 @@ pub struct LocalFrame<'ir, B> {
     // 符号悲观断言拒绝后，按普通分叉重跑到原区域汇合点。
     pub(super) region_replay: Option<(usize, crate::ir::regions::RegionPoint)>,
     pub(super) region_execution: Option<super::region_merge::RegionExecution>,
+    pub(super) prefix_resume: Option<super::region_engine::prefix_resume::Site>,
     /// 未能汇合的已到达片段，仅在活动区域的挂起边界上传递。
     pub(super) region_arrivals: Vec<LocalFrame<'ir, B>>,
     pub(super) region_arm: Option<crate::smt::LogicalArm>,
@@ -298,6 +301,7 @@ impl<'ir, B: Clone> Clone for LocalFrame<'ir, B> {
             function_name: self.function_name,
             pc: self.pc,
             speculation_mode: self.speculation_mode,
+            prefix_resume: self.prefix_resume,
             region_replay: self.region_replay,
             region_execution: self.region_execution.clone(),
             region_arrivals: Vec::new(),
@@ -339,6 +343,7 @@ pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
         pc: frame.pc,
         speculation_mode: frame.speculation_mode,
         region_execution: frame.region_execution.clone(),
+        prefix_resume: frame.prefix_resume,
         region_replay: frame.region_replay,
         region_merge_records: frame.region_merge_records.clone(),
         arm_error: frame.arm_error.clone(),
@@ -654,6 +659,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             region_execution: None,
             region_arrivals: Vec::new(),
             region_arm: None,
+            prefix_resume: None,
             region_replay: None,
             region_merge_records: super::MergeHistory::default(),
             arm_error: None,

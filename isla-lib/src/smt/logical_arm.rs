@@ -28,14 +28,18 @@ pub(super) struct LogicalArms {
 
 impl LogicalArms {
     pub(super) fn record_event(&mut self) {
-        if !self.arms.is_empty() {
+        if !self.arms.is_empty() || !self.owners.is_empty() {
             self.owners.push(EffectOwner { arm: self.active, ..EffectOwner::default() });
         }
     }
 
-    pub(super) fn mark_cycle(&mut self) {
-        if !self.arms.is_empty() {
-            self.owners.last_mut().expect("周期计数必须有缓冲事件").cycle = true;
+    pub(super) fn mark_cycle(&mut self, events_len: usize) {
+        if events_len != 0 {
+            // 区域公共前缀也会产生周期，先登记它们，再分配逻辑臂。
+            if self.owners.is_empty() {
+                self.owners.resize(events_len, EffectOwner::default());
+            }
+            self.owners.last_mut().unwrap().cycle = true;
         }
     }
 
@@ -54,7 +58,7 @@ impl LogicalArms {
     }
 
     pub(super) fn record_global_event(&mut self) {
-        if !self.arms.is_empty() {
+        if !self.arms.is_empty() || !self.owners.is_empty() {
             self.owners.push(EffectOwner::default());
         }
     }

@@ -12,6 +12,7 @@ pub(super) mod join_groups;
 mod join_terms;
 mod organizer;
 mod poison_slots;
+pub(super) mod prefix_resume;
 pub(super) use dependencies::LoopDependencies;
 pub(super) use organizer::ReadyFragments;
 
@@ -56,7 +57,10 @@ pub(super) fn advance_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized
     tx: crate::smt::SolverTransaction,
     info: SourceLoc,
 ) -> Result<Option<bool>, ExecError> {
-    let result = run_loop(tid, task_id, fraction, timeout, stop, sink, arm, state, shared, solver);
+    let resuming = prefix_resume::active(arm);
+    let mut run =
+        |solver: &mut Solver<B>| run_loop(tid, task_id, fraction, timeout, stop, sink, arm, state, shared, solver);
+    let result = if resuming { solver.with_region_resume_queries(run) } else { run(solver) };
     if let Err(error) = &result {
         let assertion = matches!(error, ExecError::AssertionFailure(..));
         let keep_error = ((consumer || crate::config::RegionOptions::current().arm_error_leaf)
@@ -131,6 +135,11 @@ pub(super) fn close_arm<B: BV>(
     info: SourceLoc,
 ) -> Result<bool, ExecError> {
     match result {
+        Ok(Run::Suspended) if region_merge::prefix_commit::is_cut(arm) => {
+            // 失败指令已撤销。各组使用各自完整守卫，在区域边界统一认证。
+            solver.commit_transaction();
+            Ok(true)
+        }
         Ok(Run::Suspended) => {
             let close_scope = super::stats::region_progress::QueryScope::enter("arm_close");
             let close_result = solver.check_sat_for_arm(info);
@@ -229,6 +238,16 @@ pub(super) fn publish_committed_records<B: BV>(
             .filter_map(|(i, (guard, event))| guard.as_ref().map(|guard| (offset + i, guard.clone(), event.clone())))
             .collect();
     }
+    publish_region_records(frame, start, task, shared, solver);
+}
+
+pub(super) fn publish_region_records<B: BV>(
+    frame: &mut LocalFrame<B>,
+    start: usize,
+    task: TaskId,
+    shared: &SharedState<B>,
+    solver: &Solver<B>,
+) {
     if super::merge_record::enabled() {
         frame.region_merge_records.edit_suffix(start, |records| {
             super::merge_record::publish(records, &frame.local_state.pure_definitions, task, shared, solver)
@@ -294,6 +313,9 @@ fn is_join_rejection(reason: SpeculativeRejectReason) -> bool {
             | SpeculativeRejectReason::RegisterSequence
             | SpeculativeRejectReason::RelaxedRegister
             | SpeculativeRejectReason::LoopHistoryMismatch
+            // 到达汇合点的独立组仍保留各自的控制流计数和 PC。
+            | SpeculativeRejectReason::DepthMismatch
+            | SpeculativeRejectReason::SamplingState
     )
 }
 
@@ -316,6 +338,7 @@ pub(super) fn finish_arrivals<'ir, B: BV>(
     condition: Sym,
     region: &Region,
     consumer: bool,
+    project_groups: bool,
     base: &LocalFrame<'ir, B>,
     arms: [Vec<LocalFrame<'ir, B>>; 2],
     frame: &mut LocalFrame<'ir, B>,
@@ -333,14 +356,7 @@ pub(super) fn finish_arrivals<'ir, B: BV>(
             "finish_arrivals",
         );
     }
-    let nested = frame.region_execution.is_some();
-    let keep_separate = consumer
-        || (nested || count > 2)
-            && frame
-                .region_execution
-                .as_ref()
-                .is_none_or(|execution| execution.mode == crate::config::MergeMode::Adaptive)
-            && base.region_execution.as_ref().unwrap().mode == crate::config::MergeMode::Adaptive;
+    let keep_separate = consumer || base.region_execution.as_ref().unwrap().mode == crate::config::MergeMode::Adaptive;
     let arrivals = arms
         .into_iter()
         .enumerate()
@@ -370,7 +386,7 @@ pub(super) fn finish_arrivals<'ir, B: BV>(
             state.speculation_stats.record_reject(reason);
             let mut separate = Vec::with_capacity(groups.len());
             for (mut fragment, combined) in groups {
-                if !nested && !combined {
+                if project_groups && !combined {
                     record_projected_arrival(&mut fragment, base, region, solver, info);
                 }
                 fragment.region_execution = frame.region_execution.clone();
@@ -775,6 +791,7 @@ fn prepare_state<'ir, B: BV>(
     let at_end = matches!(left.instrs.get(left.pc), Some(Instr::End));
     // 活跃的区域局部槽位必须两臂存在；静态证明离开区域不再读取的槽位直接删除。
     for lets in [false, true] {
+        let poison_limits = poison_limits.filter(|_| !lets);
         let a = if lets { left.lets() } else { left.vars() };
         let b = if lets { right.lets() } else { right.vars() };
         let original = if lets { base.lets() } else { base.vars() };
@@ -806,6 +823,21 @@ fn prepare_state<'ir, B: BV>(
                 }
                 continue;
             }
+            let reads_guarded = |payload: Option<(&[crate::ir::regions::SlotProjection], Name)>| {
+                poison_limits.is_some_and(|limits| {
+                    let cache = shared.function_regions.lock().unwrap();
+                    cache[&(base.function_name, limits.region_loop_analysis)].slot_reads_guarded(
+                        region.join,
+                        name,
+                        payload,
+                    )
+                })
+            };
+            if let Some(ty) = poison_slots::dead_uninit_union(left_slot, right_slot, || reads_guarded(None)) {
+                // 覆盖赋值仍需要旧槽存在。先保留槽位，避免为不可读的载荷创建新标签和字段。
+                merged.vars_mut().insert(name, UVal::Uninit(ty));
+                continue;
+            }
             let (mut va, mut vb) = (left_slot.map(Cow::Borrowed), right_slot.map(Cow::Borrowed));
             let ty = match (base_slot, left_slot, right_slot) {
                 (Some(UVal::Uninit(ty)), _, _) => Some(*ty),
@@ -816,21 +848,14 @@ fn prepare_state<'ir, B: BV>(
                 .filter(|_| matches!(left_slot, Some(UVal::Uninit(_))) || matches!(right_slot, Some(UVal::Uninit(_))))
                 .map(|ty| symbolic_terms(ty, shared.typedefs(), solver, info))
                 .transpose()?;
-            if let Some(limits) = poison_limits.filter(|_| !lets) {
+            if poison_limits.is_some() {
                 let dead_uninit = poison_slots::prepare_local(
                     &mut va,
                     &mut vb,
                     matches!(initial, Some(Val::Poison)),
                     condition,
                     solver,
-                    |payload| {
-                        let cache = shared.function_regions.lock().unwrap();
-                        cache[&(base.function_name, limits.region_loop_analysis)].slot_reads_guarded(
-                            region.join,
-                            name,
-                            payload,
-                        )
-                    },
+                    reads_guarded,
                 );
                 if let Some(ty) = dead_uninit {
                     // 普通赋值需要原槽位，保留其类型和存在性，只跳过旧内容的合并。

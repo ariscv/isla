@@ -177,3 +177,64 @@ pub(super) fn check_symmetric_top_merge(mut limits: ExecutionLimits) {
     assert!(records.iter().any(|r| r.branch_pc == top && !r.dead), "顶层必须实际完成合并");
     assert!(!records.iter().any(|r| inner_pcs.contains(&r.branch_pc)), "内层失败不能生成成功记录");
 }
+
+#[test]
+fn incompatible_root_two_arrivals_keep_the_completed_child() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    for strategy in [crate::config::MergeStrategy::Recursive, crate::config::MergeStrategy::Flat] {
+        let shared = empty_shared_state();
+        let [text, chosen, ignored, matched] = [1920, 1921, 1922, 1923].map(test_name);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observe = Arc::clone(&calls);
+        let copy = |name, exp| Instr::Copy(Loc::Id(name), exp, info());
+        let program = vec![
+            Instr::Decl(text, Ty::String, info()),
+            Instr::Decl(chosen, Ty::Bool, info()),
+            Instr::Decl(ignored, Ty::Unit, info()),
+            Instr::Decl(matched, Ty::Bool, info()),
+            Instr::Jump(input(0), 8, info()),
+            copy(text, Exp::String("其他".into())),
+            copy(chosen, Exp::Bool(false)),
+            Instr::Goto(14),
+            Instr::Jump(input(1), 11, info()),
+            copy(chosen, Exp::Bool(false)),
+            Instr::Goto(12),
+            copy(chosen, Exp::Bool(true)),
+            Instr::PrimopReset(
+                Loc::Id(ignored),
+                Arc::new(move |_, _, solver| {
+                    observe.fetch_add(1, Ordering::Relaxed);
+                    solver.cycle_count();
+                    Ok(Val::Unit)
+                }),
+                primop::Effect::Pure,
+                info(),
+            ),
+            copy(text, Exp::String("进入".into())),
+            Instr::PrimopBinary(
+                Loc::Id(matched),
+                primop::binary_primops()["eq_string"],
+                Exp::Id(text),
+                Exp::String("其他".into()),
+                info(),
+            ),
+            copy(RETURN, Exp::Call(Op::Or, vec![Exp::Id(chosen), Exp::Id(matched)])),
+            Instr::End,
+        ];
+        let plain = paths(program.clone(), &shared, 2, false);
+        calls.store(0, Ordering::Relaxed);
+        let mut limits = ExecutionLimits::default().with_path_merging(true);
+        limits.merge_concrete_values = false;
+        limits.merge_strategy = strategy;
+        let merged = paths_with_state(program, &shared, 2, limits, crate::memory::Memory::new(), |_| ());
+        assert_eq!(equivalent_paths(&plain, &merged, 2, true), (3, 2));
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "两个不兼容组应保留已完成子区域的状态");
+        let child = merged
+            .iter()
+            .find(|path| path.records.iter().any(|record| record.branch_pc == 8))
+            .expect("根区挑选组时不能丢弃已完成的子区域");
+        assert_eq!(child.events.iter().filter(|event| matches!(event, Event::Cycle)).count(), 1);
+        assert!(merged.iter().all(|path| path.records.iter().any(|record| record.branch_pc == 4)));
+    }
+}

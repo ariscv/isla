@@ -103,6 +103,9 @@ pub(super) fn retry_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Size
     shared: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
 ) -> Result<Option<bool>, ExecError> {
+    if super::region_engine::prefix_resume::active(frame) {
+        return Ok(None);
+    }
     let result = region_merge::concrete_consumer(
         retry, info, tid, task_id, fraction, timeout, stop, sink, frame, state, shared, solver,
     );
@@ -166,6 +169,21 @@ pub(super) fn retry<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             .insert(guard, yes);
         frame.pending_retry_operand.get_or_insert((frame.pc, Val::Unit));
         solver.assert(if yes { positive } else { negative });
+        return Ok(true);
+    }
+    let resume = super::region_engine::prefix_resume::active(frame);
+    if frame.region_execution.is_some()
+        && (resume || crate::config::RegionOptions::current().partial_commit_retry_operand)
+    {
+        frame.pending_retry_operand.get_or_insert((frame.pc, Val::Unit));
+        if resume {
+            super::region_engine::prefix_resume::split_operand([positive, negative], frame, solver)?;
+        } else {
+            region_merge::separate_nested_retry([positive, negative], frame, state, shared, solver)?;
+        }
+        for (side, part) in frame.region_arrivals.iter_mut().enumerate() {
+            cost::make_mut(&mut part.local_state).concrete_choices.as_mut().unwrap().insert(guard, side == 0);
+        }
         return Ok(true);
     }
     branch_decision(frame, state, SpeculativeRejectReason::RetryOperand)?;

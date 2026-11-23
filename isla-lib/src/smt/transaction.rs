@@ -1,4 +1,4 @@
-//! 求解器保存点及旧单层事务接口。日志共用一个缓冲，各层只保存起始偏移。
+//! 求解器保存点及事务交付。日志共用一个缓冲，各层保存自己的起始偏移。
 use super::*;
 use finite_domain::BUFFERED;
 use std::cell::OnceCell;
@@ -10,7 +10,7 @@ static NEXT_TRANSACTION_ID: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SolverTransaction {
     id: u64,
-    depth: usize,
+    has_parent: bool,
     pub(super) head_len: usize,
 }
 
@@ -71,7 +71,7 @@ pub(super) struct SolverSavepoint<'ctx, B> {
     condition_depth: usize,
     guard: Option<Exp<Sym>>,
     order_register_reads: bool,
-    deferred_obligations_len: usize,
+    pub(super) deferred_obligations_len: usize,
     deferred_input_facts_len: usize,
 }
 
@@ -176,10 +176,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             id: NEXT_TRANSACTION_ID
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
                 .expect("保存点编号溢出"),
-            depth: self.transaction_depth() + 1,
+            has_parent: !self.savepoints.is_empty(),
             head_len: self.trace.head.len(),
         };
-        if self.savepoints.is_empty() {
+        if !token.has_parent {
             assert!(self.transaction_events.is_empty(), "保存点栈与缓冲必须同时清空");
             assert!(self.transaction_event_guards.is_empty(), "事件及其条件必须同时清空");
             assert!(self.declaration_undo.is_empty(), "根保存点之间不得保留声明撤销记录");
@@ -527,10 +527,15 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         // 内层提交保留定义、带条件事件与统计；父层回滚仍可完整撤销。
     }
 
-    pub(crate) fn commit_region_groups(&mut self, arms: &[LogicalArm]) -> Vec<RegionGroupEffects<B>> {
-        let [root] = self.savepoints.as_slice() else { panic!("只能从最外层事务交付多个汇合组") };
-        assert!(!root.order_register_reads);
-        let prefix = root.token.head_len;
+    /// 内层各组保留逻辑臂身份，供父层继续执行和回滚。发布独立迹需要关闭全部保存点。
+    pub(crate) fn commit_region_groups(&mut self, arms: &[LogicalArm]) -> Option<Vec<RegionGroupEffects<B>>> {
+        let savepoint = self.savepoints.last().expect("交付汇合组必须位于保存点内");
+        if savepoint.token.has_parent {
+            self.commit_transaction();
+            return None;
+        }
+        assert!(!savepoint.order_register_reads && savepoint.guard.is_none(), "组迹从无条件区域入口分离");
+        let prefix = savepoint.token.head_len;
         let groups = arms.iter().map(|arm| self.project_logical_arm(*arm)).collect();
         self.commit_transaction();
         self.remove_published_suffix(prefix);
@@ -538,7 +543,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.trace.event_guards.retain(|(index, _)| *index < prefix);
         self.trace.checkpoint(self.next_var);
         self.last_committed_transaction = None;
-        groups
+        Some(groups)
     }
 
     fn project_logical_arm(&self, arm: LogicalArm) -> RegionGroupEffects<B> {
@@ -547,6 +552,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         RegionGroupEffects { events, cycles }
     }
 
+    /// 冻结或发布的迹包含逻辑臂的共同前缀，周期也从已发布迹的末尾起算。
     fn visit_logical_arm(&self, arm: LogicalArm, mut visit: impl FnMut(usize, &Event<B>, Option<&Exp<Sym>>)) -> i128 {
         assert_eq!(self.transaction_events.len(), self.transaction_event_guards.len());
         let mut cycles = self.savepoints.first().expect("投影必须处于区域事务中").cycles;
@@ -575,14 +581,12 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.logical_arms.mark_register_read(occurrence);
     }
 
-    /// 将已 alpha 重命名的远端臂事件加入当前最外层区域事务。
+    /// 将已 alpha 重命名的远端臂事件加入当前保存点。
     ///
-    /// 后缀由另一 Context 生成，故这里只接收纯 Rust 的 SMTLIB/执行迹数据。调用
-    /// 者必须在导入前完成重命名；本函数只恢复逻辑臂归属和事件守卫，并推进本地
-    /// 编号，绝不接收 Z3 AST 或远端 Solver。
-    pub(crate) fn import_arm_suffix(&mut self, arm: LogicalArm, suffix: &[ArmSuffixEvent<B>]) {
-        assert_eq!(self.transaction_depth(), 1, "远端臂只能导入最外层区域事务");
-        assert!(self.current_logical_arm().is_none(), "导入远端臂前不得保留活动逻辑臂");
+    /// 后缀携带纯 SMTLIB 和执行迹数据，断言已应用远端臂的守卫。当前保存点提交时
+    /// 再应用本地守卫，事件仍由它的父保存点管理。
+    pub(crate) fn import_arm_suffix(&mut self, arm: LogicalArm, suffix: impl IntoIterator<Item = ArmSuffixEvent<B>>) {
+        assert!(!self.savepoints.is_empty() && !self.transaction_invalid(), "远端臂需要有效的保存点");
         let mut next_var = self.next_var;
         self.with_logical_arm(arm, |solver| {
             for item in suffix {
@@ -599,26 +603,26 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 if let Some(symbol) = event.defines() {
                     next_var = next_var.max(symbol.id.checked_add(1).expect("远端符号编号溢出"));
                 }
-                solver.add_event(event.clone());
-                *solver.transaction_event_guards.last_mut().expect("导入事件必须进入根事务缓冲") = item.guard.clone();
+                solver.add_event(item.event);
+                *solver.transaction_event_guards.last_mut().expect("导入事件必须进入事务缓冲") = item.guard;
                 if let Some(occurrence) = item.register_read_occurrence {
                     solver.logical_arms.mark_register_read(occurrence);
                 }
                 if item.cycle {
-                    solver.logical_arms.mark_cycle();
+                    solver.logical_arms.mark_cycle(solver.transaction_events.len());
                 }
             }
         });
         self.next_var = next_var;
     }
 
-    /// 导出当前根事务内一个逻辑臂可见的纯数据后缀及读取投影元数据。
+    /// 导出当前保存点内一个逻辑臂可见的纯数据后缀及读取投影元数据。
     pub(crate) fn export_arm_suffix(&self, arm: LogicalArm) -> Option<Vec<ArmSuffixEvent<B>>> {
-        assert_eq!(self.transaction_depth(), 1, "远端臂只能从最外层区域事务导出");
-        self.transaction_events
+        let start = self.savepoints.last().expect("远端臂导出必须位于保存点内").events_len;
+        self.transaction_events[start..]
             .iter()
-            .zip(&self.transaction_event_guards)
-            .zip(self.logical_arms.group_events(Some(arm)))
+            .zip(&self.transaction_event_guards[start..])
+            .zip(self.logical_arms.group_events(Some(arm)).skip(start))
             .map(|((event, guard), (selected, cycle, read))| {
                 // 死臂也可能定义存活义务引用的符号。未选中的非 SMT 事件需要原来的投影位置。
                 (selected || matches!(event, Event::Smt(..))).then(|| ArmSuffixEvent {
@@ -755,6 +759,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     /// 各组共用事务前的迹和已提交 SMT 约束，分别发布组内非 SMT 事件。
     pub(crate) fn select_region_group(&mut self, effects: RegionGroupEffects<B>) {
+        assert!(self.savepoints.is_empty(), "切换已发布的组迹需要关闭全部保存点");
         self.remove_published_suffix(0);
         self.trace.head = effects.events.iter().map(|(_, event)| event.clone()).collect();
         self.trace.event_guards.clear();
@@ -765,6 +770,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     pub(crate) fn region_group_checkpoint(&self) -> Checkpoint<B> {
+        assert!(self.savepoints.is_empty(), "普通任务检查点需要关闭全部保存点");
         let mut point = self.trace.clone().checkpoint(self.next_var);
         point.cycles = self.cycles;
         point
@@ -793,15 +799,13 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
     }
 
-    /// 最近一次最外层提交在发布时的带条件事件快照，供合并记录读取。
-    /// 主迹仍按访问足迹并集发布；快照不受旧执行器提交后替换寄存器事件的影响。
-    /// 开始下一个最外层事务或发布检查点时清空；嵌套条件以合取表示。
-    /// SMT 声明与定义仍无条件生效，其事件 guard 只记录分支来源。
-    /// 只读检查待提交前缀，不改变查询、见证或事务状态。
+    /// 读取当前层可能随事务交付的内存写入。
     pub(crate) fn transaction_has_memory_writes(&self) -> bool {
-        self.transaction_events.iter().any(Event::is_memory_write)
+        let start = self.savepoints.last().expect("检查事务效果需要活动保存点").events_len;
+        self.transaction_events[start..].iter().any(Event::is_memory_write)
     }
 
+    /// 最近一次最外层提交的带条件事件，用于收集合并记录。新根事务或普通检查点发布后清空。
     pub fn committed_transaction_events(&self) -> &[(Option<Exp<Sym>>, Event<B>)] {
         &self.committed_transaction_events
     }
@@ -874,7 +878,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     /// 同时保留旧执行器在提交后补发合并寄存器事件、再调用此方法的契约。
     #[cfg(test)]
     pub(crate) fn order_transaction_register_reads(&mut self, tx: SolverTransaction) {
-        if tx.depth != 1 {
+        if tx.has_parent {
             return;
         }
         if let Some(savepoint) = self.savepoints.first_mut() {

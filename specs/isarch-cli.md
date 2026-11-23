@@ -554,9 +554,14 @@ partial_commit_unknown_z3 = false
 partial_commit_z3_timeout = false
 partial_commit_z3_resource_exhausted = false
 partial_commit_deferred_mode = false
+partial_commit_retry_operand = false
+partial_commit_prefix = false
+partial_commit_structure = false
+partial_commit_state_effect = false
+partial_commit_control = false
 ```
 
-对应的 CLI 为 `--partial-commit-finite-domain`、`--partial-commit-unknown-z3`、`--partial-commit-z3-timeout`、`--partial-commit-z3-resource-exhausted` 和 `--partial-commit-deferred-mode`，各自接受 `=true|false`。旧字段 `partial_commit_solver` 和 `partial_commit_solver_unknown` 及其 CLI 拼写均报错。路径到限使用独立的 `on_path_timeout` 处置。
+对应的 CLI 为 `--partial-commit-finite-domain`、`--partial-commit-unknown-z3`、`--partial-commit-z3-timeout`、`--partial-commit-z3-resource-exhausted`、`--partial-commit-deferred-mode` 和 `--partial-commit-retry-operand`，各自接受 `=true|false`。旧字段 `partial_commit_solver` 和 `partial_commit_solver_unknown` 及其 CLI 拼写均报错。路径到限使用独立的 `on_path_timeout` 处置。
 
 使用线程中断功能构建时，`--smt-timeout` 设置单次 Z3 调用的软中断限时，省略时不限。终态查询的专用限时独立生效。直接调用构建没有这两种单次限时。
 

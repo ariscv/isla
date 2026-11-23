@@ -2185,6 +2185,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     // 路径级 SMT 调用本身以线程局部方式计时；调度器会在 fork 时把累计值冻结在 Frame，
     // 因此任务恢复时必须先还原公共前缀，避免诊断漏掉 fork 前的求解时间。
     crate::smt::restore_path_smt_stats(frame.path_smt_stats.clone());
+    let mut instruction = None;
     loop {
         if frame.local_state.expression_retry_operands.is_some() {
             cost::make_mut(&mut frame.local_state).expression_retry_operands = None;
@@ -2200,10 +2201,23 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             task_state,
             shared_state,
             solver,
+            &mut instruction,
         ) {
-            Ok(result) => return Ok(result),
+            Ok(result) => {
+                if let Some(saved) = instruction.take() {
+                    saved.commit(frame, solver, fork_sink)?;
+                }
+                return Ok(result);
+            }
             Err(error) => error,
         };
+        if let Some(rejection) = instruction
+            .as_ref()
+            .and_then(|_| region_merge::prefix_commit::Instruction::rejection(&error, frame, timeout))
+        {
+            instruction.take().unwrap().roll_back(rejection, frame, solver);
+            return Ok(Run::Suspended);
+        }
         if matches!(error, ExecError::SolverDroppedPath)
             || stats::solver_failures::handle_solver_path_failure(
                 solver.exploration_on_unknown(),
@@ -2212,8 +2226,12 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 shared_state,
             )
         {
+            if let Some(saved) = instruction.take() {
+                saved.commit(frame, solver, fork_sink)?;
+            }
             return Ok(Run::Dead);
         }
+        let retry_sink: &dyn ForkSink<'ir, 'task, B> = instruction.as_ref().map_or(fork_sink, |saved| &saved.errors);
         let retry = if let ExecError::ConcreteChoice(guard, info) = error {
             concrete_values::retry(
                 guard,
@@ -2223,14 +2241,19 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 task_fraction,
                 timeout,
                 stop_conditions,
-                fork_sink,
+                retry_sink,
                 frame,
                 task_state,
                 shared_state,
                 solver,
             )
         } else {
-            let Some(operands) = frame.local_state.expression_retry_operands.clone() else { return Err(error) };
+            let Some(operands) = frame.local_state.expression_retry_operands.clone() else {
+                if let Some(saved) = instruction.take() {
+                    saved.commit(frame, solver, fork_sink)?;
+                }
+                return Err(error);
+            };
             if matches!(
                 &error,
                 ExecError::SymbolicLength(..) | ExecError::IntegerConversion(..) | ExecError::RetryCondition(..)
@@ -2245,13 +2268,22 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 task_id,
                 task_fraction,
                 stop_conditions,
-                fork_sink,
+                retry_sink,
                 frame,
                 task_state,
                 solver,
                 shared_state,
             )
         };
+        if let Some(saved) = instruction.take() {
+            if let Err(error) = &retry {
+                if let Some(rejection) = region_merge::prefix_commit::Instruction::rejection(error, frame, timeout) {
+                    saved.roll_back(rejection, frame, solver);
+                    return Ok(Run::Suspended);
+                }
+            }
+            saved.commit(frame, solver, fork_sink)?;
+        }
         match retry {
             Ok(true) if !frame.region_arrivals.is_empty() => return Ok(Run::Suspended),
             Ok(true) => (),
@@ -2272,22 +2304,27 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
+fn run_loop_inner<'ir, 'task, B: BV>(
     tid: usize,
     task_id: TaskId,
     task_fraction: &mut Fraction,
     timeout: PathTimeout,
     stop_conditions: Option<&'task StopConditions>,
-    fork_sink: &S,
+    fork_sink: &dyn ForkSink<'ir, 'task, B>,
     frame: &mut LocalFrame<'ir, B>,
     task_state: &'task TaskState<B>,
     shared_state: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
+    instruction: &mut Option<Box<region_merge::prefix_commit::Instruction<'ir, 'task, B>>>,
 ) -> Result<Run<B>, ExecError> {
     let mut last_z3_reset = Instant::now();
     let limit_handler = task_state.execution_limits.as_ref().map(ExecutionLimitHandler::new);
 
     'main_loop: loop {
+        region_engine::prefix_resume::next_instruction(frame, solver);
+        if let Some(saved) = instruction.take() {
+            saved.commit(frame, solver, fork_sink)?;
+        }
         if !frame.region_arrivals.is_empty() {
             return Ok(Run::Suspended);
         }
@@ -2300,6 +2337,8 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         if region_step? {
             return Ok(Run::Suspended);
         }
+        *instruction = region_merge::prefix_commit::Instruction::start(frame, solver);
+        let fork_sink: &dyn ForkSink<'ir, 'task, B> = instruction.as_ref().map_or(fork_sink, |saved| &saved.errors);
         if frame.pc < frame.instrs.len() {
             if stats::merge_diagnostics::enabled() && frame.region_execution.is_some() {
                 stats::merge_diagnostics::record_current_site(frame.function_name, frame.pc, &shared_state.symtab);
@@ -2515,7 +2554,8 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             Ok(feasible) => feasible,
                             Err(error @ ExecError::SpeculativeReject { reason, .. })
                                 if frame.region_execution.is_some()
-                                    && reason.partial_commit(crate::config::RegionOptions::current()) =>
+                                    && reason.partial_commit(crate::config::RegionOptions::current())
+                                    && !region_merge::prefix_commit::can_capture(frame, reason) =>
                             {
                                 // 内层区域尚未创建自己的事务；当前臂事务保留此前的推演，
                                 // 两个片段从这个分叉继续，仍由外层区域的工作栈持有。
@@ -2531,7 +2571,8 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                             Ok(feasible) => feasible,
                             Err(error @ ExecError::SpeculativeReject { reason, .. })
                                 if frame.region_execution.is_some()
-                                    && reason.partial_commit(crate::config::RegionOptions::current()) =>
+                                    && reason.partial_commit(crate::config::RegionOptions::current())
+                                    && !region_merge::prefix_commit::can_capture(frame, reason) =>
                             {
                                 // 同上：不可行性查询尚未进入内层区域事务，不能回滚外层臂。
                                 shared_state.execution_stats.merge_rejected(frame.function_name, frame.pc, &error);
@@ -2546,15 +2587,28 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         drop(branch_queries);
                         solver.note_jump_results(v, can_be_true, can_be_false);
                         if can_be_true && can_be_false {
+                            let prefix_resume = region_engine::prefix_resume::active(frame);
                             let mode = region_merge::policy(frame, task_state, *info);
-                            if mode == crate::config::MergeMode::Off && frame.region_execution.is_some() {
-                                let error = region_merge::reject(frame, SpeculativeRejectReason::PolicyOff);
+                            if !prefix_resume
+                                && mode == crate::config::MergeMode::Off
+                                && frame.region_execution.is_some()
+                            {
+                                let reason = SpeculativeRejectReason::PolicyOff;
+                                let error = region_merge::reject(frame, reason);
                                 if frame.region_execution.as_ref().unwrap().mode == crate::config::MergeMode::Force {
                                     speculation::force_failure(frame, task_state, shared_state, *info, &error);
                                 }
+                                if reason.verified_prefix(crate::config::RegionOptions::current())
+                                    && region_merge::can_split_nested_branch(frame, task_state)
+                                    && !region_merge::prefix_commit::can_capture(frame, reason)
+                                {
+                                    region_merge::separate_nested_branch(v, *target, frame, solver)?;
+                                    region_merge::record_local_rejection(frame, task_state, shared_state, &error);
+                                    return Ok(Run::Suspended);
+                                }
                                 return Err(error);
                             }
-                            if mode != crate::config::MergeMode::Off {
+                            if !prefix_resume && mode != crate::config::MergeMode::Off {
                                 match region_merge::try_region(
                                     v,
                                     *target,
@@ -2575,7 +2629,10 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                     region_merge::RegionResult::Suspended
                                     | region_merge::RegionResult::Separate { .. } => return Ok(Run::Suspended),
                                     region_merge::RegionResult::Rejected => (),
-                                    region_merge::RegionResult::GuardedExits => unreachable!("根区域必须发布分组出口"),
+                                    region_merge::RegionResult::GuardedExits
+                                    | region_merge::RegionResult::VerifiedPrefix(_) => {
+                                        unreachable!("区域必须发布分组出口")
+                                    }
                                 }
                             }
 
@@ -2624,6 +2681,14 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                                 log_from!(tid, log::FORK, info.location_string(shared_state.symtab.files()));
                                 probe::taint_info(log::FORK, v, Some(shared_state), solver)
                             });
+
+                            if prefix_resume && frame.region_execution.is_some() {
+                                region_merge::separate_nested_branch(v, *target, frame, solver)?;
+                                for (side, part) in frame.region_arrivals.iter_mut().enumerate() {
+                                    cost::make_mut(&mut part.execution_limit_state).advance_path_signature(side == 0);
+                                }
+                                return Ok(Run::Suspended);
+                            }
 
                             let point = checkpoint(solver);
                             frame.capture_path_smt_stats();
@@ -3533,6 +3598,11 @@ fn run_loop_inner<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     let remainder = Neq(Box::new(Var(v)), Box::new(result_exp.clone()));
                     let has_remainder = region_merge::feasible(frame, solver, &remainder, *info, shared_state)?;
                     if has_remainder {
+                        if frame.region_execution.is_some() && region_engine::prefix_resume::active(frame) {
+                            let selected = Eq(Box::new(Var(v)), Box::new(result_exp));
+                            region_engine::prefix_resume::split_operand([selected, remainder], frame, solver)?;
+                            return Ok(Run::Suspended);
+                        }
                         branch_decision(frame, task_state, SpeculativeRejectReason::Monomorphize)?;
                         let decision = match limit_handler.as_ref() {
                             Some(handler) => handler.on_monomorphize_fork_at(
@@ -4491,6 +4561,7 @@ mod tests {
     mod nested_enum_tests;
     mod nested_merge_failure_tests;
     mod read_size_tests;
+    mod region_any_depth_tests;
     mod region_arm_runtime_tests;
     mod region_arm_tests;
     mod region_join_plan_tests;
@@ -13436,6 +13507,7 @@ fn zcaller(za, zb) {
             region_merge::RegionResult::Dead | region_merge::RegionResult::Rejected => None,
             region_merge::RegionResult::Suspended
             | region_merge::RegionResult::GuardedExits
+            | region_merge::RegionResult::VerifiedPrefix(_)
             | region_merge::RegionResult::Separate { .. } => {
                 panic!("最外层不能挂起区域片段")
             }

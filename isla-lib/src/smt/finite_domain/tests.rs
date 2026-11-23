@@ -115,7 +115,7 @@ fn finite_domain_prefix_follows_trace_compaction_and_group_selection() {
     solver.discard_logical_arm_effects(discarded);
     values(&solver, alias, &[5]);
 
-    for group in solver.commit_region_groups(&[left, right]) {
+    for group in solver.commit_region_groups(&[left, right]).unwrap() {
         solver.select_region_group(group);
         values(&solver, alias, &[5]);
         let replayed = Solver::<B64>::from_checkpoint(&context, solver.region_group_checkpoint());

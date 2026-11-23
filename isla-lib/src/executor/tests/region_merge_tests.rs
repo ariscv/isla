@@ -35,6 +35,9 @@ mod filtered_exception_tests;
 #[path = "region_exception_catch_tests.rs"]
 mod exception_catch_tests;
 
+#[path = "region_admission_tests.rs"]
+mod admission_tests;
+
 // 调试构建的真实执行循环需要大于 libtest 默认线程栈。只扩大已复现的深夹具，
 // 不改变整个测试进程或产品的栈设置。
 fn run_deep_region_test(test: impl FnOnce() + Send + 'static) {
@@ -67,7 +70,7 @@ pub(super) struct Path {
     pub(super) records: MergeHistory<B64>,
     pub(super) value: Val<B64>,
     exception: Option<Val<B64>>,
-    events: Vec<Event<B64>>,
+    pub(super) events: Vec<Event<B64>>,
     variables: Bindings<'static, B64>,
     registers: RegisterBindings<'static, B64>,
     lets: Bindings<'static, B64>,
@@ -96,7 +99,29 @@ pub(super) fn paths_with_state(
     memory: crate::memory::Memory<B64>,
     configure: impl FnOnce(&mut LocalFrame<'static, B64>),
 ) -> Vec<Path> {
-    paths_with_solver_state(instrs, shared, inputs, limits, memory, |frame, _| configure(frame), false).0
+    paths_with_state_in_order(instrs, shared, inputs, limits, memory, configure, false)
+}
+
+pub(super) fn paths_with_state_in_order(
+    instrs: Vec<Instr<Name, B64>>,
+    shared: &SharedState<'static, B64>,
+    inputs: usize,
+    limits: ExecutionLimits,
+    memory: crate::memory::Memory<B64>,
+    configure: impl FnOnce(&mut LocalFrame<'static, B64>),
+    reverse: bool,
+) -> Vec<Path> {
+    paths_with_solver_state_in_order(
+        instrs,
+        shared,
+        inputs,
+        limits,
+        memory,
+        |frame, _| configure(frame),
+        false,
+        reverse,
+    )
+    .0
 }
 
 fn paths_with_solver_state(
@@ -107,6 +132,20 @@ fn paths_with_solver_state(
     memory: crate::memory::Memory<B64>,
     configure: impl FnOnce(&mut LocalFrame<'static, B64>, &mut Solver<B64>),
     collect_type_errors: bool,
+) -> (Vec<Path>, usize, serde_json::Value) {
+    paths_with_solver_state_in_order(instrs, shared, inputs, limits, memory, configure, collect_type_errors, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paths_with_solver_state_in_order(
+    instrs: Vec<Instr<Name, B64>>,
+    shared: &SharedState<'static, B64>,
+    inputs: usize,
+    limits: ExecutionLimits,
+    memory: crate::memory::Memory<B64>,
+    configure: impl FnOnce(&mut LocalFrame<'static, B64>, &mut Solver<B64>),
+    collect_type_errors: bool,
+    reverse: bool,
 ) -> (Vec<Path>, usize, serde_json::Value) {
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
@@ -122,7 +161,7 @@ fn paths_with_solver_state(
         frame.vars_mut().insert(test_name(900 + index as u32), UVal::Init(Val::Symbolic(symbol)));
     }
     configure(&mut frame, &mut solver);
-    let mut state = TaskState::new().with_execution_limits(limits);
+    let mut state = TaskState::new().with_execution_limits(limits).with_region_observations(reverse, false);
     state.speculation_stats = speculation::SpeculationStats::new(true);
     let output = Mutex::new((Vec::new(), 0));
     start_single(
@@ -587,7 +626,7 @@ fn check_group_register_reads(repeated: bool, omit_one: bool) {
 }
 
 /// 每条分叉路径都与覆盖它的合并路径比较完整最终寄存器映射，结构字段递归展开。
-fn equivalent_register_paths(forked: &[Path], merged: &[Path], inputs: usize) {
+pub(super) fn equivalent_register_paths(forked: &[Path], merged: &[Path], inputs: usize) {
     use smtlib::Exp::*;
     fn fields(value: &Val<B64>, result: &mut Vec<Formula>) {
         match value {
@@ -1809,6 +1848,7 @@ fn region_merge_unique_retry_gate_preserves_guard_checkpoint_and_fraction() {
         mode: crate::config::MergeMode::Adaptive,
         origin: (frame.function_name, 0, info()),
         pending_branch: None,
+        verified_prefix: None,
     });
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let context = Context::new(Config::new());
@@ -5060,9 +5100,16 @@ fn merge_diagnostics_execution_is_observational() {
     let exclusive_queries: u64 = outcomes.iter().map(|row| row["exclusive"]["queries"]["sum"].as_u64().unwrap()).sum();
     assert_eq!(root_queries, exclusive_queries);
     assert_eq!(root_queries + timing["outside_smt"]["queries"]["sum"].as_u64().unwrap(), on_queries as u64);
-    assert!(timing["outcomes"].as_array().unwrap().iter().any(|row| row["outcome"] == "incompatible_state"));
+    let incompatible = SpeculativeRejectReason::IncompatibleState.to_string();
+    assert!(outcomes.iter().any(|row| row["outcome"] == incompatible));
     assert_eq!(measured["differences"]["concrete_required"], 1);
-    assert_eq!(measured["keys"][0]["key"]["slot"]["name"], "diagnostic_slot");
+    let cause = measured["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["key"]["difference"] == "concrete_required")
+        .expect("必须保留实际拒绝的槽位诊断");
+    assert_eq!(cause["key"]["slot"]["name"], "diagnostic_slot");
     diag::configure("off").unwrap();
     assert_eq!(off.len(), 2);
     assert_eq!(on.len(), off.len());
@@ -6427,3 +6474,6 @@ fn region_merge_checks_callee_state_effect_when_reached() {
 
 #[path = "region_union_width_tests.rs"]
 mod region_union_width_tests;
+
+#[path = "region_prefix_commit_tests.rs"]
+mod region_prefix_commit_tests;

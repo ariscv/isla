@@ -2776,6 +2776,13 @@ end_column = 0
 
     #[test]
     fn region_options_toml_accepts_switches_and_limits() {
+        assert!(!RegionOptions::default().partial_commit_retry_operand);
+        assert!(!RegionOptions::default().partial_commit_prefix);
+        assert!(!RegionOptions::default().partial_commit_structure);
+        assert!(!RegionOptions::default().partial_commit_state_effect);
+        assert!(!RegionOptions::default().partial_commit_control);
+        let retry = merge_config("[execution_limits.path_merge]\npartial_commit_retry_operand=true").unwrap();
+        assert!(RegionOptions::from_config(&retry).partial_commit_retry_operand);
         assert!(merge_config(
             "[execution_limits.path_merge]\ndefer_exit_check=true\npartial_commit_unknown_z3=true\nwitness_eval=true\n[execution_limits.solver]\nbool_proof_rlimit=1"
         )
@@ -2894,6 +2901,11 @@ obligation_dump_dir = "obligations"
                 partial_commit_z3_timeout: false,
                 partial_commit_z3_resource_exhausted: false,
                 partial_commit_deferred_mode: false,
+                partial_commit_retry_operand: false,
+                partial_commit_prefix: false,
+                partial_commit_structure: false,
+                partial_commit_state_effect: false,
+                partial_commit_control: false,
                 lazy_z3_scope: true,
                 witness_eval: true,
                 prefix_compact: true,

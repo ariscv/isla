@@ -30,14 +30,13 @@ fn prune_inactive<B: BV>(
         Val::SymbolicCtor(tag, payloads) => {
             payloads.retain(|ctor, payload| {
                 if contains_poison(payload) {
-                    let active = Eq(Box::new(Var(*tag)), Box::new(ctor.to_smt()));
-                    if solver.structural_bool(&And(Box::new(guard.clone()), Box::new(active))) == Some(false)
-                        && reads_guarded(path, *ctor)
-                    {
+                    let tag_matches = Eq(Box::new(Var(*tag)), Box::new(ctor.to_smt()));
+                    let active = And(Box::new(guard.clone()), Box::new(tag_matches));
+                    if solver.structural_bool(&active) == Some(false) && reads_guarded(path, *ctor) {
                         return false;
                     }
                     path.push(SlotProjection::Ctor(*ctor));
-                    prune_inactive(payload, guard, path, solver, reads_guarded);
+                    prune_inactive(payload, &active, path, solver, reads_guarded);
                     path.pop();
                 }
                 true
@@ -58,6 +57,19 @@ fn prune_inactive<B: BV>(
             }
         }
         _ => (),
+    }
+}
+
+/// 未初始化联合的新鲜标签可以取任一构造子。仅在旧内容不可读时保留原未初始化槽。
+pub(super) fn dead_uninit_union<'ir, B: BV>(
+    a: Option<&UVal<'ir, B>>,
+    b: Option<&UVal<'ir, B>>,
+    unread: impl FnOnce() -> bool,
+) -> Option<&'ir Ty<Name>> {
+    match (a, b) {
+        (Some(UVal::Uninit(ty @ Ty::Union(_))), Some(UVal::Init(_)))
+        | (Some(UVal::Init(_)), Some(UVal::Uninit(ty @ Ty::Union(_)))) => unread().then_some(*ty),
+        _ => None,
     }
 }
 
@@ -90,5 +102,40 @@ pub(super) fn prepare_local<'slot, 'ir, B: BV>(
             None
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bitvector::b64::B64;
+    use crate::smt::{Config, Context};
+    use smtlib::Exp::Ite;
+
+    #[test]
+    fn region_merge_poison_slots_nested_constructor_activation() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let loc = SourceLoc::unknown();
+        let branch = Var(solver.declare_const(smtlib::Ty::Bool, loc));
+        let wrapper_active = Var(solver.declare_const(smtlib::Ty::Bool, loc));
+        let [wrapper, other, field, ok, err] = [90, 91, 92, 93, 94].map(Name::from_u32);
+        let tag = |guard, yes: Name, no: Name| Ite(Box::new(guard), Box::new(yes.to_smt()), Box::new(no.to_smt()));
+        let outer_tag = solver.define_const(tag(wrapper_active.clone(), wrapper, other), loc);
+        for (when_active, when_inactive) in [(err, ok), (ok, err)] {
+            let inner_tag = solver.define_const(tag(wrapper_active.clone(), when_active, when_inactive), loc);
+            let inner = Val::SymbolicCtor(inner_tag, [(ok, Val::Poison), (err, Val::Unit)].into_iter().collect());
+            let payloads = [(wrapper, Val::Struct([(field, inner)].into_iter().collect())), (other, Val::Unit)];
+            let mut value = Val::SymbolicCtor(outer_tag, payloads.into_iter().collect());
+            prune_inactive(&mut value, &branch, &mut Vec::new(), &solver, &|path, ctor| {
+                path == [SlotProjection::Ctor(wrapper), SlotProjection::Field(field)] && ctor == ok
+            });
+            let Val::SymbolicCtor(_, outer) = value else { unreachable!() };
+            let Val::Struct(fields) = &outer[&wrapper] else { unreachable!() };
+            let Val::SymbolicCtor(_, inner) = &fields[&field] else { unreachable!() };
+            assert_eq!(inner.contains_key(&ok), when_active == ok);
+            assert_eq!(inner[&err], Val::Unit);
+        }
     }
 }

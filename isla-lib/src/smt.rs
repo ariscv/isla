@@ -2107,6 +2107,7 @@ pub struct Solver<'ctx, B> {
     knowledge: dedup::Knowledge,
     /// 活动区域尚未在出口验证；内部查询只允许返回 Unknown。
     deferred_region_queries: bool,
+    ordinary_region_resume_queries: bool,
     boolean_proof_active: bool,
     deferred_assertions: Option<deferred_assertions::DeferredAssertions<B>>,
     /// 最近一次返回 Sat 的 check 所产生的模型（已 inc_ref）。断言集此后未变时
@@ -2667,13 +2668,14 @@ fn z3_reason_unknown(ctx: &Context, solver: Z3_solver) -> String {
 
 #[cfg(test)]
 pub(crate) mod test_queries {
-    use super::SolverOptions;
+    use super::{SolverOptions, SourceLoc};
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
 
     thread_local! {
         static OPTIONS: Cell<Option<SolverOptions>> = const { Cell::new(None) };
         static RESULTS: RefCell<VecDeque<Option<z3_sys::Z3_lbool>>> = const { RefCell::new(VecDeque::new()) };
+        static OBSERVED_BRANCHES: RefCell<Option<ObservedBranches>> = const { RefCell::new(None) };
         static PURPOSES: RefCell<VecDeque<&'static str>> = const { RefCell::new(VecDeque::new()) };
     }
 
@@ -2729,11 +2731,56 @@ pub(crate) mod test_queries {
         result
     }
 
-    pub(super) fn take_unknown_purpose() -> bool {
+    #[derive(Default)]
+    pub(crate) struct ObservedBranches {
+        pub(crate) queried: Vec<SourceLoc>,
+        pub(crate) rejected: Option<SourceLoc>,
+        inject: Option<(usize, &'static str)>,
+    }
+
+    pub(crate) fn with_observed_branches<T>(inject: Option<usize>, run: impl FnOnce() -> T) -> (T, ObservedBranches) {
+        with_observed_branch_failure(inject.map(|query| (query, "测试注入")), run)
+    }
+
+    pub(crate) fn with_observed_branch_failure<T>(
+        inject: Option<(usize, &'static str)>,
+        run: impl FnOnce() -> T,
+    ) -> (T, ObservedBranches) {
+        assert!(OBSERVED_BRANCHES.replace(Some(ObservedBranches { inject, ..Default::default() })).is_none());
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                OBSERVED_BRANCHES.take();
+            }
+        }
+        let _reset = Reset;
+        let result = run();
+        (result, OBSERVED_BRANCHES.take().unwrap())
+    }
+
+    pub(super) fn take_unknown_reason(info: SourceLoc) -> Option<&'static str> {
         let label = crate::executor::stats::region_progress::query_label();
+        if label == "branch_feasibility" && info != SourceLoc::unknown() {
+            let reason = OBSERVED_BRANCHES.with_borrow_mut(|slot| {
+                let observed = slot.as_mut()?;
+                let sequence = observed.queried.len();
+                observed.queried.push(info);
+                let (_, reason) = observed.inject.filter(|(query, _)| *query == sequence)?;
+                observed.rejected = Some(info);
+                Some(reason)
+            });
+            if reason.is_some() {
+                return reason;
+            }
+        }
         PURPOSES.with(|slot| {
             let mut list = slot.borrow_mut();
-            list.front().is_some_and(|purpose| *purpose == label) && list.pop_front().is_some()
+            if list.front().is_some_and(|purpose| *purpose == label) {
+                list.pop_front();
+                Some("测试注入")
+            } else {
+                None
+            }
         })
     }
 
@@ -2885,6 +2932,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 last_check_sat: false,
                 knowledge: dedup::Knowledge::default(),
                 deferred_region_queries: false,
+                ordinary_region_resume_queries: false,
                 boolean_proof_active: false,
                 deferred_assertions: None,
                 stashed_model: None,
@@ -3492,7 +3540,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     pub fn cycle_count(&mut self) {
         self.cycles += 1;
         self.add_event(Event::Cycle);
-        self.logical_arms.mark_cycle();
+        self.logical_arms.mark_cycle(self.transaction_events.len());
     }
 
     pub fn get_cycle_count(&self) -> i128 {
@@ -3710,7 +3758,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         if self.no_smt() && !matches!(purpose, query::QueryPurpose::BooleanProof) {
             return Error(self.no_smt_cannot_continue("mandatory_query", info));
         }
-        if self.deferred_region_queries {
+        if self.deferred_region_queries
+            && (!self.ordinary_region_resume_queries || matches!(purpose, query::QueryPurpose::BooleanProof))
+        {
             if !matches!(purpose, query::QueryPurpose::BooleanProof) {
                 self.note_deferred_mandatory_query(label, info, true);
             }
@@ -3718,8 +3768,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
         let query_scope = crate::executor::stats::region_progress::QueryScope::fallback(label);
         #[cfg(test)]
-        if test_queries::take_unknown_purpose() {
-            return Error(z3_query_error(info, Duration::ZERO, None, "测试注入".into(), false));
+        if let Some(reason) = test_queries::take_unknown_reason(info) {
+            return Error(z3_query_error(info, Duration::ZERO, None, reason.into(), false));
         }
 
         let proof_limit = if matches!(&purpose, query::QueryPurpose::BooleanProof) && self.transaction_depth() > 0 {
@@ -3874,7 +3924,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         if self.no_smt() && !self.boolean_proof_active {
             return Error(self.no_smt_cannot_continue("model_or_general_query", info));
         }
-        if self.deferred_region_queries {
+        if self.deferred_region_queries && !self.ordinary_region_resume_queries {
             self.note_deferred_mandatory_query("model_or_general", info, true);
             return Unproven(SmtError::DeferredQuery { source_loc: info, purpose: "model_or_general" });
         }
@@ -4011,7 +4061,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         if self.no_smt() && !self.boolean_proof_active {
             return Error(self.no_smt_cannot_continue("model_query_deadline", info));
         }
-        if self.deferred_region_queries {
+        if self.deferred_region_queries && !self.ordinary_region_resume_queries {
             self.note_deferred_mandatory_query("model_or_general", info, true);
             return Unproven(SmtError::DeferredQuery { source_loc: info, purpose: "model_or_general" });
         }
@@ -4123,7 +4173,7 @@ pub(crate) fn take_smtperf_report() -> Option<String> {
 }
 
 pub fn checkpoint<B: BV>(solver: &mut Solver<B>) -> Checkpoint<B> {
-    assert_eq!(solver.transaction_depth(), 0, "保存点内不能发布检查点");
+    assert!(solver.savepoints.is_empty(), "普通任务检查点需要关闭全部保存点");
     solver.last_committed_transaction = None;
     solver.committed_transaction_events.clear();
     solver.trace.checkpoint(solver.next_var)

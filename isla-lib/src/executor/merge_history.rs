@@ -73,6 +73,28 @@ impl<B> MergeHistory<B> {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    pub(super) fn has_live_closed_tail_since(&self, start: usize) -> bool {
+        if self.len() <= start || self.0.closed_from.is_none() {
+            return false;
+        }
+        let mut current = self;
+        let mut index = self.len() - 1;
+        loop {
+            match current.0.items.as_ref().unwrap() {
+                Items::Leaf(records) => return !records[index].dead,
+                Items::Concat(left, _) if index < left.len() => current = left,
+                Items::Concat(left, right) => {
+                    current = right;
+                    index -= left.len();
+                }
+                Items::Range(source, offset) => {
+                    current = source;
+                    index += offset;
+                }
+            }
+        }
+    }
     #[cfg(test)]
     pub(super) fn retained_record_slots(&self) -> usize {
         self.retained_storage().1

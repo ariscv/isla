@@ -703,6 +703,8 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
         let in_region = frame.region_execution.is_some();
         if !bounded
             && in_region
+            && !super::region_engine::prefix_resume::active(frame)
+            && !crate::config::RegionOptions::current().partial_commit_retry_operand
             && (consumer.is_none()
                 || !task_state.execution_limits.as_ref().is_some_and(|limits| limits.merge_concrete_values))
         {
@@ -917,7 +919,7 @@ fn retry_partition<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
 }
 
 /// 两种重试都保存操作数，并沿用同一套执行限制和检查点语义。
-/// 区域中两个守卫皆可达时拒绝本次推演，由普通执行用原前缀提交互补的两臂。
+/// 区域中两个守卫皆可达时，按配置在当前臂内保留互补片段，或拒绝本次推演。
 /// 两个守卫皆不可达时直接报告路径死亡。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn fork_retry_operand<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
@@ -940,7 +942,17 @@ pub(super) fn fork_retry_operand<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> +
         let selected = super::region_merge::feasible(frame, solver, &equal, info, shared)?;
         let other = super::region_merge::feasible(frame, solver, &remainder, info, shared)?;
         if selected && other {
-            return Err(super::region_merge::reject(frame, SpeculativeRejectReason::RetryOperand));
+            if super::region_engine::prefix_resume::active(frame) {
+                cache_retry_operand(frame, operands);
+                super::region_engine::prefix_resume::split_operand([equal, remainder], frame, solver)?;
+                return Ok(true);
+            }
+            if !crate::config::RegionOptions::current().partial_commit_retry_operand {
+                return Err(super::region_merge::reject(frame, SpeculativeRejectReason::RetryOperand));
+            }
+            cache_retry_operand(frame, operands);
+            super::region_merge::separate_nested_retry([equal, remainder], frame, task_state, shared, solver)?;
+            return Ok(true);
         }
         if !selected && !other {
             return Ok(false);

@@ -116,6 +116,11 @@ pub struct PathMergeConfig {
     pub partial_commit_z3_timeout: bool,
     pub partial_commit_z3_resource_exhausted: bool,
     pub partial_commit_deferred_mode: bool,
+    pub partial_commit_retry_operand: bool,
+    pub partial_commit_prefix: bool,
+    pub partial_commit_structure: bool,
+    pub partial_commit_state_effect: bool,
+    pub partial_commit_control: bool,
     /// 分支入口识别布尔恒值；默认开启。
     pub prune_constant_branches: bool,
     /// 保留独立执行错误叶，默认关闭。
@@ -158,6 +163,11 @@ impl Default for PathMergeConfig {
             partial_commit_z3_timeout: false,
             partial_commit_z3_resource_exhausted: false,
             partial_commit_deferred_mode: false,
+            partial_commit_retry_operand: false,
+            partial_commit_prefix: false,
+            partial_commit_structure: false,
+            partial_commit_state_effect: false,
+            partial_commit_control: false,
             prune_constant_branches: true,
             arm_error_leaf: false,
             merge_concrete_values: true,

@@ -56,37 +56,59 @@ impl DeferredArmAssertions {
     }
 }
 
+// 前序断言与臂守卫都从 true 左折叠，替换起点即可恢复串行顺序。
+fn prepend_conjunction(exp: &mut Exp<Sym>, prefix: &Exp<Sym>) {
+    let mut first = exp;
+    while let Exp::And(left, _) = first {
+        first = left;
+    }
+    assert_eq!(*first, Exp::Bool(true), "远端合取必须从 true 开始");
+    *first = prefix.clone();
+}
+
 impl<B: BV> Solver<'_, B> {
     pub(crate) fn take_arm_assertions(&mut self) -> Option<DeferredArmAssertions> {
         self.deferred_assertions.as_mut().map(|state| std::mem::take(&mut state.arm))
     }
 
-    /// B 冻结前序时看不到 A。把串行时排在整个 B 之前的断言接在 B 每个前序的开头，
-    /// 保留 B 内各自的时间边界，再把这些定义与后缀一起登记到 A 的 solver。
+    /// B 从私有检查点执行。补齐 A 中排在 B 前面的断言和活动的祖先守卫，
+    /// 保留每项义务和类型域事实在臂内的执行边界。
     pub(crate) fn import_arm_assertions(
         &mut self,
         remote: Option<DeferredArmAssertions>,
         suffix: &mut [ArmSuffixEvent<B>],
     ) {
         assert_eq!(self.deferred_assertions.is_some(), remote.is_some(), "两臂的延后查询模式必须一致");
-        let Some(remote) = remote else { return };
+        let Some(mut remote) = remote else { return };
+        let ancestors = (!self.transaction_conditions.is_empty()).then(|| {
+            self.transaction_conditions.iter().cloned().fold(Exp::Bool(true), |a, b| Exp::And(Box::new(a), Box::new(b)))
+        });
         if !remote.obligations.is_empty() {
             let mut prefixes: HashSet<_> = remote.obligations.iter().map(|item| item.prefix).collect();
+            let mut bad: HashSet<_> =
+                ancestors.iter().flat_map(|_| remote.obligations.iter().map(|item| item.bad)).collect();
             let prior = self.preceding_assertions();
             for item in suffix {
                 if let Event::Smt(Def::DefineConst(sym, exp), ..) = &mut item.event {
                     if prefixes.remove(sym) {
-                        // preceding_assertions 从 true 左折叠。替换起点即得到逐项相同的串行定义。
-                        let mut first = exp;
-                        while let Exp::And(left, _) = first {
-                            first = left;
-                        }
-                        assert_eq!(*first, Exp::Bool(true), "义务前序必须从 true 开始");
-                        *first = prior.clone();
+                        prepend_conjunction(exp, &prior);
+                    } else if bad.remove(sym) {
+                        let Exp::And(_, rest) = exp else { unreachable!("义务反例必须包含前序断言") };
+                        let Exp::And(guard, _) = rest.as_mut() else { unreachable!("义务反例必须包含守卫") };
+                        prepend_conjunction(guard, ancestors.as_ref().unwrap());
                     }
                 }
             }
-            assert!(prefixes.is_empty(), "每项义务的前序定义必须随臂交付");
+            assert!(prefixes.is_empty() && bad.is_empty(), "每项义务的前序和反例定义必须随臂交付");
+        }
+        if let Some(ancestors) = &ancestors {
+            for fact in &mut remote.input_facts {
+                let Exp::Or(negated_guard, _) = fact else { unreachable!("类型域事实必须包含守卫") };
+                let Exp::Not(guard) = negated_guard.as_mut() else {
+                    unreachable!("类型域事实必须由守卫推出")
+                };
+                prepend_conjunction(guard, ancestors);
+            }
         }
         let local = &mut self.deferred_assertions.as_mut().unwrap().arm;
         local.obligations.extend(remote.obligations);
@@ -135,6 +157,22 @@ impl<B: BV> Solver<'_, B> {
             Ok(value) => value,
             Err(error) => std::panic::resume_unwind(error),
         }
+    }
+
+    /// 仅选中的区域指令可做必需查询，求解器条件和义务集合沿用活动前缀。
+    pub(crate) fn with_region_resume_queries<R>(&mut self, run: impl FnOnce(&mut Self) -> R) -> R {
+        let previous = self.ordinary_region_resume_queries;
+        self.ordinary_region_resume_queries = !self.no_smt();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(self)));
+        self.ordinary_region_resume_queries = previous;
+        match result {
+            Ok(value) => value,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    pub(crate) fn end_region_resume_queries(&mut self) {
+        self.ordinary_region_resume_queries = false;
     }
 
     pub(crate) fn note_deferred_mandatory_query(
@@ -275,17 +313,26 @@ impl<B: BV> Solver<'_, B> {
     }
 
     pub(crate) fn check_deferred_assertions(&mut self, info: SourceLoc) -> Option<SmtResult> {
+        self.check_deferred_assertions_from(0, info)
+    }
+
+    pub(crate) fn check_deferred_assertions_since_savepoint(&mut self, info: SourceLoc) -> Option<SmtResult> {
+        let start = self.savepoints.last().expect("前缀认证必须在活动保存点内").deferred_obligations_len;
+        self.check_deferred_assertions_from(start, info)
+    }
+
+    fn check_deferred_assertions_from(&mut self, start: usize, info: SourceLoc) -> Option<SmtResult> {
         if !self.validates_candidates() {
             return None;
         }
         let state = self.deferred_assertions.as_ref().expect("验证必须在活动义务作用域中");
-        if state.arm.obligations.is_empty() {
+        let obligations = &state.arm.obligations[start..];
+        let obligation_count = obligations.len();
+        if obligations.is_empty() {
             return Some(Unsat);
         }
         let started = Instant::now();
-        let bad = state
-            .arm
-            .obligations
+        let bad = obligations
             .iter()
             .map(|item| Exp::Var(item.bad))
             .fold(Exp::Bool(false), |a, b| Exp::Or(Box::new(a), Box::new(b)));
@@ -326,7 +373,7 @@ impl<B: BV> Solver<'_, B> {
         if diagnostic {
             eprintln!(
                 "{}",
-                serde_json::json!({"kind":"region_assert_obligation_start", "obligations":state.arm.obligations.len(), "definition_events":count, "definition_expression_nodes":definition_nodes, "obligation_expression_nodes":crate::executor::stats::memory_stats::exp_stats(&bad).0})
+                serde_json::json!({"kind":"region_assert_obligation_start", "obligations":obligation_count, "definition_events":count, "definition_expression_nodes":definition_nodes, "obligation_expression_nodes":crate::executor::stats::memory_stats::exp_stats(&bad).0})
             );
         }
         let replay_started = Instant::now();
@@ -336,7 +383,7 @@ impl<B: BV> Solver<'_, B> {
         let result = verifier.check_sat_with(&bad, info);
         let check_seconds = check_started.elapsed().as_secs_f64();
         // 仅显式诊断开关导出少量小检查；旧日志没有这些dump，不能冒充旧查询重放。
-        if matches!(result, Sat) && state.arm.obligations.len() <= 8 {
+        if matches!(result, Sat) && obligation_count <= 8 {
             if let Some(directory) = &crate::config::RegionOptions::current().obligation_dump_dir {
                 static DUMPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
                 let ordinal = DUMPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -379,7 +426,7 @@ impl<B: BV> Solver<'_, B> {
         if diagnostic {
             eprintln!(
                 "{}",
-                serde_json::json!({"kind":"region_assert_obligation_check","obligations":state.arm.obligations.len(),"definition_events":count,"definition_expression_nodes":definition_nodes,"obligation_expression_nodes":crate::executor::stats::memory_stats::exp_stats(&bad).0,"seconds":seconds,"replay_seconds":replay_seconds,"check_seconds":check_seconds,"result":format!("{result:?}")})
+                serde_json::json!({"kind":"region_assert_obligation_check","obligations":obligation_count,"definition_events":count,"definition_expression_nodes":definition_nodes,"obligation_expression_nodes":crate::executor::stats::memory_stats::exp_stats(&bad).0,"seconds":seconds,"replay_seconds":replay_seconds,"check_seconds":check_seconds,"result":format!("{result:?}")})
             );
         }
         Some(result)

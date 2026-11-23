@@ -46,6 +46,12 @@ impl<B: BV> Solver<'_, B> {
         self.validates_candidates().then(|| self.check_sat_with(condition, info))
     }
 
+    pub(crate) fn check_region_prefix_candidate(&mut self, guard: &Exp<Sym>, info: SourceLoc) -> SmtResult {
+        self.with_region_resume_queries(|solver| {
+            solver.check_candidate_sat_with(guard, info).expect("区域前缀必须经过求解器认证")
+        })
+    }
+
     pub(crate) fn validates_candidates(&self) -> bool {
         !self.no_smt()
     }

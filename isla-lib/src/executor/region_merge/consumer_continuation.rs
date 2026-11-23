@@ -19,8 +19,14 @@ pub(super) fn try_join_after_last_use<'ir, 'task, B: BV>(
 ) -> Result<Option<RegionResult>, ExecError> {
     let pc = frame.pc;
     let parent = frame.region_execution.as_ref();
-    // 同一操作数继续枚举出的子区域须先把所有候选交给最外层生产指令。
-    if parent.is_some_and(|execution| execution.region.branch_pc == pc) {
+    let call_depth = frame.backtrace.len();
+    if parent.is_some_and(|execution| call_depth < execution.entry_depth) {
+        return Ok(None);
+    }
+    // 父区域的指令位置只适用于它所在的调用帧。
+    let local_parent = parent.filter(|execution| call_depth == execution.entry_depth);
+    // 当前生产指令仍有同一操作数的父枚举时，先将候选交回父层，再越过下一条指令。
+    if local_parent.is_some_and(|execution| execution.region.branch_pc == pc) {
         return Ok(None);
     }
     let dest = match &frame.instrs[pc] {
@@ -37,7 +43,7 @@ pub(super) fn try_join_after_last_use<'ir, 'task, B: BV>(
     if frame.region_arrivals.iter().any(|part| part.pc != pc + 1) {
         return Ok(None);
     }
-    let mut width = |part: &LocalFrame<'ir, B>| match part.vars().get(&dest) {
+    let width = |part: &LocalFrame<'ir, B>| match part.vars().get(&dest) {
         Some(UVal::Init(value)) => crate::primop_util::merge_bit_width(value, solver, info).ok().flatten(),
         _ => None,
     };
@@ -50,7 +56,7 @@ pub(super) fn try_join_after_last_use<'ir, 'task, B: BV>(
     let summaries = state.region_effect_summaries.get_or_init(|| function_effect_summaries(shared, global));
     let Some(join) = with_function_regions(frame, shared, summaries, true, |analysis| {
         for next in pc + 1..frame.instrs.len() {
-            if parent.is_some_and(|execution| !execution.region.nodes.contains(&next)) {
+            if local_parent.is_some_and(|execution| !execution.region.nodes.contains(&next)) {
                 break;
             }
             if analysis.slot_unused_at(next, dest) {
@@ -122,6 +128,7 @@ pub(super) fn try_join_after_last_use<'ir, 'task, B: BV>(
             condition,
             &region,
             true,
+            candidate.region_execution.is_none(),
             &base,
             [reached, Vec::new()],
             &mut candidate,

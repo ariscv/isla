@@ -308,7 +308,7 @@ pub fn path<B: BV>(
             _ => (),
         }
     }
-    let memory = events.into_iter().rev().filter(|event| event.is_memory_read_or_write()).cloned().collect();
+    let memory: Vec<_> = events.into_iter().rev().filter(|event| event.is_memory_read_or_write()).cloned().collect();
     let post = frame
         .regs()
         .iter()
@@ -321,12 +321,22 @@ pub fn path<B: BV>(
     pre.insert("$instruction".into(), instruction.clone());
     // 注意（ATTENTION）：合并路径的内存读取为并集语义；需要精确内存读序列时不可信。
     // 按访存条件投影实际执行的读写。写后读取由样本校验按字节绑定最近一次写。
-    let memory_guards = frame
+    let mut memory_guards: BTreeMap<_, _> = frame
         .region_merge_records()
         .iter()
         .flat_map(|record| record.memory_reads.iter().map(|(index, guard, _)| (*index, guard.clone())))
         .chain(frame.arm_error_memory_guards().iter().cloned())
         .collect();
+    if isla_lib::config::RegionOptions::current().partial_commit_prefix {
+        // 切点保留已有合并记录。补录来自主迹、尚未由记录覆盖的访存守卫。
+        for (index, (_, guard)) in
+            trace.events_with_guards_rev().filter(|(event, _)| event.is_memory_read_or_write()).enumerate()
+        {
+            if let Some(guard) = guard {
+                memory_guards.entry(memory.len() - 1 - index).or_insert_with(|| guard.clone());
+            }
+        }
+    }
     SamplePath {
         terminal: if let Some(error) = frame.arm_error() {
             use isla_lib::error::IslaError;

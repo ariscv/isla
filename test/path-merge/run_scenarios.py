@@ -40,6 +40,8 @@ DEFAULTS = {
     "assertion_failures": [],
     "initialized_registers": [],
     "merge_concrete_values": None,
+    "expect_local_rejection": None,
+    "expect_prefix_rejection": None,
 }
 
 
@@ -59,7 +61,7 @@ def read_scene(path):
     metadata = tomllib.loads("\n".join(line[2:].removeprefix(" ") for line in header[1].splitlines()))
     require(not (metadata.keys() - DEFAULTS.keys() - {"id", "group"}), "存在未知元数据字段")
     scene = {**DEFAULTS, "id": path.stem, "group": path.stem[0], **metadata}
-    require(re.fullmatch(r"[A-H][1-9]\d*-[a-z0-9]+(?:-[a-z0-9]+)*", path.stem), "场景文件名无效")
+    require(re.fullmatch(r"[A-I][1-9]\d*-[a-z0-9]+(?:-[a-z0-9]+)*", path.stem), "场景文件名无效")
     require(scene["id"] == path.stem and scene["group"] == path.stem[0], "id、group 须与文件名一致")
     for key in ("title", "intent", "reason", "must_merge", "must_not_merge"):
         require(isinstance(scene[key], str), f"{key} 须是字符串")
@@ -79,6 +81,11 @@ def read_scene(path):
             "register_reads 须是寄存器名到非负读取次数的表")
     merge_concrete = scene["merge_concrete_values"]
     require(merge_concrete is None or type(merge_concrete) is bool, "merge_concrete_values 须是布尔值")
+    local_rejection = scene["expect_local_rejection"]
+    require(local_rejection is None or (isinstance(local_rejection, str) and NAME.fullmatch(local_rejection)),
+            "expect_local_rejection 须为区域拒绝枚举名")
+    require(scene["expect_prefix_rejection"] in (None, "UnknownDeferredMode"),
+            "expect_prefix_rejection 当前支持 UnknownDeferredMode")
     inputs = scene["inputs"]
     require(isinstance(inputs, dict) and all(NAME.fullmatch(name) and type(width) is int and width > 0
                                              for name, width in inputs.items()), "inputs 须是寄存器名到正位宽的表")
@@ -291,6 +298,12 @@ class ModeResult:
     assertions: list = field(default_factory=list)
 
 
+def rejects_as(row, reason):
+    # 旧日志用下划线分词，固化诊断也可携带枚举限定名。
+    observed = (row.get("reason") or "").rsplit("::", 1)[-1]
+    return observed.replace("_", "").casefold() == reason.casefold()
+
+
 def run_mode(scene, shape, mode, binary, directory, seconds, *, reverse=False):
     result = ModeResult()
     output_name = f"{mode}-reverse" if reverse else mode
@@ -311,11 +324,16 @@ def run_mode(scene, shape, mode, binary, directory, seconds, *, reverse=False):
     expected_failures = scene["assertion_inputs"]
     if expected_failures is not None:
         settings += "arm_error_leaf = true\n"
+    local_rejection = scene["expect_local_rejection"] if enabled else None
+    prefix_rejection = scene["expect_prefix_rejection"] if enabled else None
+    if prefix_rejection is not None:
+        settings += "defer_exit_check = true\npartial_commit_deferred_mode = true\npartial_commit_prefix = true\n"
     config.write_text(settings, encoding="utf-8")
     try:
         command = [str(binary), "-A", str(directory / "model.ir"), "-C", str(config), "-p", "prop", "-T", "2",
                    "--expect-paths", str(expected), "--dump-paths", str(target), "--scenario-observations",
                    *(["--sequential-ram"] if scene["sequential_ram"] else []),
+                   *(["--merge-diagnostics", "detail"] if local_rejection or prefix_rejection else []),
                    *(["--observe-assertion-failures"] if scene["assertion_failures"] else []),
                    *(["--reverse-region-ready"] if reverse else [])]
         if expected_failures is not None:
@@ -346,6 +364,23 @@ def run_mode(scene, shape, mode, binary, directory, seconds, *, reverse=False):
             require(checked.returncode in (0, 2), f"形状检查器失败\n{checked.stdout}{checked.stderr}")
             if checked.returncode == 2:
                 result.assertions.append(checked.stderr.strip())
+        if local_rejection or prefix_rejection:
+            diagnostic_rows = [json.loads(line) for line in process.stderr.splitlines() if line.startswith('{"')]
+            if local_rejection:
+                require(any(row.get("kind") == "merge_value_reject" and row.get("stage") == "local_join_rejected"
+                            and rejects_as(row, local_rejection) and row.get("parent_attempt") is not None
+                            for row in diagnostic_rows),
+                        f"未观察到内层区域拒绝 {local_rejection}，见 {log}")
+            if prefix_rejection:
+                prefixes = [row for row in diagnostic_rows if row.get("kind") == "partial_commit_prefix"
+                            and rejects_as(row, prefix_rejection) and row.get("fixed_records", 0) > 0]
+                require(len(prefixes) == 1, f"期望 {prefix_rejection} 后固化一次合并记录，见 {log}")
+                prefix = prefixes[0]
+                started = [row for row in diagnostic_rows if row.get("kind") == "merge_root_start"
+                           and row["origin"]["function"] == prefix["function"] and row["origin"]["pc"] < prefix["pc"]]
+                require(len(started) == 1, f"失败点之前的区域被重新执行或未运行，见 {log}")
+                require(any(path.get("merge_records", 0) >= prefix["fixed_records"] for path in paths),
+                        f"固化的合并记录未到达完成路径，见 {target}")
     except (CheckError, OSError, ValueError, KeyError, TypeError) as error:
         result.errors.append(str(error))
     return result

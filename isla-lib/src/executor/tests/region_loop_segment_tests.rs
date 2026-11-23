@@ -13,7 +13,7 @@ pub(super) fn segment_paths(
     segment_paths_with_solver(instrs, shared, inputs, limits, budget, memory, |frame, _| configure(frame), |_, _| {})
 }
 
-fn segment_paths_with_solver(
+pub(super) fn segment_paths_with_solver(
     instrs: Vec<Instr<Name, B64>>,
     shared: &SharedState<'static, B64>,
     inputs: usize,
@@ -162,10 +162,18 @@ pub(super) fn scan_paths_with_limits(
     )
 }
 pub(super) fn equivalent_scalar_paths(off: &[Path], on: &[Path], n: usize) {
+    equivalent_scalar_paths_for_inputs(off, on, std::iter::repeat_n(smtlib::Ty::Bool, n));
+}
+
+pub(super) fn equivalent_scalar_paths_for_inputs(
+    off: &[Path],
+    on: &[Path],
+    input_types: impl IntoIterator<Item = smtlib::Ty>,
+) {
     use smtlib::Exp::*;
     let ctx = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&ctx);
-    let inputs = (0..n).map(|_| solver.declare_const(smtlib::Ty::Bool, info())).collect::<Vec<_>>();
+    let inputs = input_types.into_iter().map(|ty| solver.declare_const(ty, info())).collect::<Vec<_>>();
     let result = solver.declare_const(smtlib::Ty::BitVec(128), info());
     let relation = |paths: &[Path], solver: &mut Solver<B64>| {
         let mut covered = Bool(false);
