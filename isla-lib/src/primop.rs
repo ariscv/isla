@@ -1399,6 +1399,10 @@ pub(crate) fn proven_symbolic_i128<B: BV>(
     if solver.no_smt() {
         return Ok(solver.structural_i128(sym));
     }
+    if solver.region_queries_deferred() && matches!(domain, FiniteDomain::Bounded(_)) {
+        // 多值上界不能证明唯一，延后区域也无法取模型。把原符号交给消费者按守卫重试。
+        return Ok(None);
+    }
 
     // 取模型前必须先 check-sat；路径已经不可满足时没有模型可取，保持符号量交给调用方。
     match solver.check_sat(info) {

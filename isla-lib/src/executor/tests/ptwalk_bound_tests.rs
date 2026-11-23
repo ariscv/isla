@@ -133,3 +133,165 @@ fn ptwalk_bound_signed_thresholds_allow_wraparound() {
     // -128 减一在八位位向量上回绕到 127；另一候选 0 减一得到 -1。
     assert_eq!(solver.structural_bool(&Bvsgt(decremented(128, 0), zero())), None);
 }
+
+// 页表递归保留 IR 中的 128 位减法和 64 位回写。
+fn superpage_level(solver: &mut Solver<B64>, decrements: usize) -> (Sym, Sym, Sym) {
+    use smtlib::bits64;
+    use smtlib::Exp::*;
+    let sv39 = solver.declare_const(smtlib::Ty::Bool, info());
+    let sv48 = solver.declare_const(smtlib::Ty::Bool, info());
+    let rest =
+        solver.define_const(Ite(Box::new(Var(sv48)), Box::new(bits64(3, 128)), Box::new(bits64(4, 128))), info());
+    let mut level =
+        solver.define_const(Ite(Box::new(Var(sv39)), Box::new(bits64(2, 128)), Box::new(Var(rest))), info());
+    for _ in 0..decrements {
+        let prev = solver.define_const(Bvsub(Box::new(Var(level)), Box::new(bits64(1, 128))), info());
+        let lo = solver.define_const(Extract(63, 0, Box::new(Var(prev))), info());
+        level = solver.define_const(SignExtend(64, Box::new(Var(lo))), info());
+    }
+    (sv39, sv48, level)
+}
+
+#[test]
+fn ptwalk_zeros_positive_arm_projects_level() {
+    if !run_in_diagnostics_process(concat!(module_path!(), "::ptwalk_zeros_positive_arm_projects_level")) {
+        return;
+    }
+    run_deep_region_test(|| {
+        use smtlib::bits64;
+        use smtlib::Exp as F;
+
+        crate::config::RegionOptions { defer_exit_check: true, ..Default::default() }.configure();
+        let (mut shared, _, _) = shared_state_and_bindings_from_ir(
+            r#"
+val zwiden = "%i64->%i" : (%i64) -> %i
+val znarrow = "%i->%i64" : (%i) -> %i64
+val zgt = "gt" : (%i,%i) -> %bool
+val zmul = "mult_int" : (%i,%i) -> %i
+val zzeros = "zeros" : (%i) -> %bv
+val zlength = "length" : (%bv) -> %i
+val zwalk : (%i64) -> %i
+fn zwalk(zlevel) {
+    zwide : %i;
+    zwide = zwiden(zlevel);
+    zc : %i;
+    zc = zwiden(0);
+    zp : %bool;
+    zp = zgt(zwide, zc);
+    jump zp goto 9;
+    return = zc;
+    goto 18;
+    zc = zwiden(9);
+    zn : %i;
+    zn = zmul(zwide, zc);
+    zsmall : %i64;
+    zsmall = znarrow(zn);
+    zn = zwiden(zsmall);
+    zb : %bv;
+    zb = zzeros(zn);
+    return = zlength(zb);
+    end;
+}
+"#,
+        );
+        let walk = shared.symtab.lookup("zwalk");
+        let level = shared.symtab.intern("zinput_level");
+        let prog = vec![Instr::Call(Loc::Id(RETURN), false, walk, vec![Exp::Id(level)], info()), Instr::End];
+        crate::smt::reset_test_mandatory_query_count();
+        for (decrements, exclude_long) in [(3, false), (2, false), (2, true)] {
+            let mut input = None;
+            let (paths, _, rejects) = paths_with_solver_state(
+                prog.clone(),
+                &shared,
+                0,
+                ExecutionLimits::default().with_path_merging(true),
+                crate::memory::Memory::new(),
+                |frame, solver| {
+                    let (sv39, sv48, wide_level) = superpage_level(solver, decrements);
+                    let other = solver.declare_bitvector(64, info());
+                    solver.assert(F::Bvule(Box::new(F::Var(other)), Box::new(bits64(100, 64))));
+                    if exclude_long {
+                        // 在保留原前缀的独立认证中，sv48=false 与 other 的两条范围约束矛盾。
+                        solver.assert(F::Or(
+                            Box::new(F::Var(sv48)),
+                            Box::new(F::Bvugt(Box::new(F::Var(other)), Box::new(bits64(200, 64)))),
+                        ));
+                    }
+                    input = Some((sv39, sv48));
+                    let value = solver.define_const(F::Extract(63, 0, Box::new(F::Var(wide_level))), info());
+                    frame.vars_mut().insert(level, UVal::Init(Val::Symbolic(value)));
+                },
+                false,
+            );
+            assert_eq!(crate::smt::test_mandatory_query_count(), 0, "{rejects}");
+            let ctx = Context::new(Config::new());
+            let (sv39, sv48) = input.unwrap();
+            for (a, b, initial) in [(true, true, 2usize), (true, false, 2), (false, true, 3), (false, false, 4)] {
+                let n = (initial.saturating_sub(decrements) * 9) as u64;
+                let mut reached = false;
+                for p in &paths {
+                    let mut v = Solver::from_checkpoint(&ctx, p.checkpoint.clone());
+                    v.assert_eq(F::Var(sv39), F::Bool(a));
+                    v.assert_eq(F::Var(sv48), F::Bool(b));
+                    let good = F::Eq(Box::new(smt_value(&p.value, info()).unwrap()), Box::new(bits64(n, 128)));
+                    assert!(v.check_sat_with(&F::Not(Box::new(good.clone())), info()).is_unsat().unwrap());
+                    reached |= v.check_sat_with(&good, info()).is_sat().unwrap();
+                }
+                assert_eq!(reached, !exclude_long || b);
+            }
+        }
+    });
+}
+
+#[test]
+fn finite_domain_ptwalk_zeros_projects_signed_arm_through_narrowing() {
+    use crate::smt::FiniteDomain;
+    use smtlib::bits64;
+    use smtlib::Exp::*;
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    let mut cfg = Config::new();
+    cfg.solver_options.finite_domain_enumeration = true;
+    let ctx = Context::new(cfg);
+    let mut solver = Solver::<B64>::new(&ctx);
+    let (_, _, level) = superpage_level(&mut solver, 3);
+    let positive = solver.define_const(Bvsgt(Box::new(Var(level)), Box::new(bits64(0, 128))), info());
+    let product = solver.define_const(Bvmul(Box::new(bits64(9, 128)), Box::new(Var(level))), info());
+    let lo = solver.define_const(Extract(63, 0, Box::new(Var(product))), info());
+    let width = solver.define_const(SignExtend(64, Box::new(Var(lo))), info());
+    let lengths = |values: &[i128]| values.iter().copied().map(crate::primop_util::smt_i128).collect::<Vec<_>>();
+    let original = solver.finite_domain(width);
+    let tx = solver.start_transaction_with_guard(Some(Var(positive)));
+    assert_eq!(solver.finite_domain(width), FiniteDomain::Bounded(lengths(&[-9, 0, 9])));
+    solver.rollback_transaction(tx);
+
+    for residual in [false, true] {
+        if residual {
+            let other = solver.declare_bitvector(64, info());
+            solver.assert(Bvule(Box::new(Var(other)), Box::new(bits64(100, 64))));
+        }
+        let expected = |values: &[i128]| {
+            if residual {
+                FiniteDomain::Bounded(lengths(values))
+            } else {
+                FiniteDomain::Known(lengths(values))
+            }
+        };
+        solver.with_deferred_region_queries(|solver| {
+            let tx = solver.start_transaction_with_guard(Some(Var(positive)));
+            crate::smt::reset_test_mandatory_query_count();
+            assert_eq!(solver.finite_domain(width), expected(&[9]));
+            assert_eq!(
+                primop::unary_primops()["zeros"](Val::Symbolic(width), solver, info()).unwrap(),
+                Val::Bits(B64::zeros(9))
+            );
+            assert_eq!(crate::smt::test_mandatory_query_count(), 0);
+            solver.rollback_transaction(tx);
+            let sibling = solver.start_transaction_with_guard(Some(Not(Box::new(Var(positive)))));
+            assert_eq!(solver.finite_domain(width), expected(&[-9, 0]));
+            solver.rollback_transaction(sibling);
+        });
+        if !residual {
+            assert_eq!(solver.finite_domain(width), original);
+        }
+    }
+}

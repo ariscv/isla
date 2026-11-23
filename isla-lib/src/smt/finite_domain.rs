@@ -389,9 +389,15 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             match self.project_finite_values(&prefix, sym, subject, candidates) {
                 known @ FiniteDomain::Known(_) => return known,
                 bounded @ FiniteDomain::Bounded(_) if matches!(best, FiniteDomain::Unknown) => best = bounded,
-                FiniteDomain::Bounded(values) => {
-                    if matches!(&best, FiniteDomain::Bounded(previous) if values.len() < previous.len()) {
-                        best = FiniteDomain::Bounded(values);
+                FiniteDomain::Bounded(mut values) => {
+                    let FiniteDomain::Bounded(previous) = &mut best else { unreachable!() };
+                    if values.len() < previous.len() {
+                        std::mem::swap(previous, &mut values);
+                    }
+                    if self.region_queries_deferred() {
+                        // 各锚点都覆盖全部可行值。取交集保证一个锚点缩短后，
+                        // 不会因它取代了原先较短的上界而重新引入另一锚点已排除的值。
+                        previous.retain(|value| values.contains(value));
                     }
                 }
                 FiniteDomain::Unknown => (),
@@ -456,6 +462,51 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         value
     }
 
+    /// 只把本候选已求出的值代回活动比较。两个操作数可能经过单独的位宽转换。
+    fn project_order_guard(
+        &self,
+        guard: &Exp<Sym>,
+        prefix: &PathConditions<'_, B>,
+        projected: &mut HashMap<Sym, Option<Exp<Sym>>>,
+    ) -> Option<bool> {
+        use Exp::*;
+        let mut atom = resolve(guard, prefix);
+        let mut negated = false;
+        while let Not(inner) = atom {
+            negated = !negated;
+            atom = resolve(inner, prefix);
+        }
+        if !matches!(
+            atom,
+            Bvsgt(..) | Bvsge(..) | Bvslt(..) | Bvsle(..) | Bvugt(..) | Bvuge(..) | Bvult(..) | Bvule(..)
+        ) {
+            return None;
+        }
+        let mut changed = false;
+        let substituted = atom
+            .map_var(&mut |v| {
+                let mut operand = *v;
+                // 只追踪别名和位宽转换。无关守卫无需展开其余定义。
+                while !matches!(projected.get(&operand), Some(Some(_))) {
+                    let Some(mut term) = prefix.definition(operand) else { break };
+                    while let SignExtend(_, x) | ZeroExtend(_, x) | Extract(_, _, x) = term {
+                        term = x;
+                    }
+                    let Var(sym) = term else { break };
+                    operand = *sym;
+                }
+                let value = if matches!(projected.get(&operand), Some(Some(_))) {
+                    self.project_finite_definition(*v, prefix, projected)
+                } else {
+                    None
+                };
+                changed |= value.is_some();
+                Ok::<_, std::convert::Infallible>(value.unwrap_or(Var(*v)))
+            })
+            .unwrap();
+        changed.then(|| self.translate_exp(&substituted).structural_bool()).flatten().map(|value| value != negated)
+    }
+
     fn translate_projection_assertion(&self, exp: &Exp<Sym>) -> Ast<'ctx> {
         #[cfg(test)]
         PROJECT_TRANSLATIONS.set(PROJECT_TRANSLATIONS.get() + 1);
@@ -498,7 +549,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let mut common = ProjectionLiterals::new();
         let empty = HashMap::new();
         let mut dependent = Vec::new();
-        for &key in assertions.iter().rev().chain(guards.iter()) {
+        let mut independent_residual = false;
+        for (&key, is_guard) in assertions.iter().rev().map(|k| (k, false)).chain(guards.iter().map(|k| (k, true))) {
             if probe.as_ref().is_some_and(|p| facts.contains_anchor(key, &anchor, p, &mut independent)) {
                 dependent.push(key);
                 continue;
@@ -510,11 +562,14 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             match truth {
                 Some(false) => return FiniteDomain::Known(Vec::new()),
                 Some(true) => (),
-                None if common.record(bool_literals.get(residual).copied(), &empty) => (),
+                None if common.record(bool_literals.get(residual).copied(), &empty) => {
+                    independent_residual |= !is_guard && !bool_literals.contains_key(residual);
+                }
                 None => return FiniteDomain::Known(Vec::new()),
             }
         }
 
+        let mut pruned_by_guard = false;
         let mut admissible = Vec::new();
         let mut exact = true;
         'candidate: for candidate in candidates {
@@ -549,6 +604,16 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     let Some(value) = self.project_finite_definition(target, prefix, &mut projected) else {
                         return FiniteDomain::Unknown;
                     };
+                    if self.region_queries_deferred()
+                        && self
+                            .transaction_conditions
+                            .iter()
+                            .rev()
+                            .any(|guard| self.project_order_guard(guard, prefix, &mut projected) == Some(false))
+                    {
+                        pruned_by_guard = true;
+                        continue 'candidate;
+                    }
                     // 重试的排除式可能引用遭化简的目标。先在原表达式中代入，再判是否必假。
                     for assertion in prefix.assertions() {
                         let mut changed = false;
@@ -575,6 +640,21 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             if !admissible.contains(&value) {
                 admissible.push(value);
             }
+        }
+        if pruned_by_guard && !exact && !independent_residual {
+            // 守卫判假只能排除候选。其余候选均有结构见证，才可把上界升级为精确域。
+            drop(cache);
+            let mut witnessed = Vec::new();
+            self.combined_values(prefix, &Exp::Var(target), |mut value, certified| {
+                if certified {
+                    let value = value.finite_bits().expect("有限域表达式必须为位向量常量");
+                    if admissible.contains(&value) && !witnessed.contains(&value) {
+                        witnessed.push(value);
+                    }
+                }
+                witnessed.len() < admissible.len()
+            });
+            exact = witnessed.len() == admissible.len();
         }
         if exact {
             FiniteDomain::Known(admissible)
