@@ -169,24 +169,18 @@ pub(crate) struct RemoteArrival<'ir, B> {
 }
 
 impl<'ir, B: BV> RemoteArrival<'ir, B> {
-    pub(crate) fn remap_symbols(&mut self, remap: &SymRemap) {
+    pub(crate) fn remap_symbols(&mut self, remap: &SymRemap, history_prefix: usize) {
         assert!(
             self.suffix.iter().all(|item| !matches!(item.event, Event::WriteMem { .. })),
             "首版远端臂不得移交已写入且不可重命名的 Memory"
         );
-        self.suffix = self
-            .suffix
-            .iter()
-            .map(|item| ArmSuffixEvent {
-                guard: item.guard.as_ref().map(|guard| remap.exp(guard)),
-                event: remap.event(&item.event),
-                register_read_occurrence: item.register_read_occurrence,
-                cycle: item.cycle,
-            })
-            .collect();
+        for item in &mut self.suffix {
+            item.guard = item.guard.as_ref().map(|guard| remap.exp(guard));
+            item.event = remap.event(&item.event);
+        }
         if let Some(deferred) = &mut self.deferred {
             deferred.remap_symbols(remap);
         }
-        self.frame.remap_symbols(remap);
+        self.frame.remap_symbols(remap, history_prefix);
     }
 }

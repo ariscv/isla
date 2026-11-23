@@ -362,15 +362,17 @@ pub fn freeze_frame<'ir, B: BV>(frame: &LocalFrame<'ir, B>) -> Frame<'ir, B> {
 impl<'ir, B: BV> LocalFrame<'ir, B> {
     /// 远端臂到达 A 前的纯数据 alpha 重命名。
     ///
-    /// 直线臂沿用入口调用续体和合并历史。接收者在此之前已确认调用层与历史长度。
-    pub(crate) fn remap_symbols(&mut self, remap: &crate::smt::SymRemap) {
+    /// 接收者已确认调用续体归位。只改写入口后新增的合并记录。
+    pub(crate) fn remap_symbols(&mut self, remap: &crate::smt::SymRemap, history_prefix: usize) {
         assert!(self.region_arrivals.is_empty(), "远端到达帧不得携带内层片段");
         assert!(self.arm_error.is_none(), "远端到达帧不得携带错误叶");
         cost::make_mut(&mut self.local_state).remap_symbols(remap);
         if let Some(execution) = &mut self.region_execution {
             execution.remap_symbols(remap);
         }
-        // 直线臂没有新增记录，保留入口历史的共享身份。
+        #[cfg(feature = "tracetool")]
+        cost::make_mut(&mut self.trace_path).remap_branch_conditions(remap);
+        self.region_merge_records.remap_suffix(history_prefix, remap);
         self.arm_error_memory_guards = Arc::from(
             self.arm_error_memory_guards.iter().map(|(index, guard)| (*index, remap.exp(guard))).collect::<Vec<_>>(),
         );

@@ -12,20 +12,31 @@ struct Observation {
 }
 
 fn diamond(workers: usize, enabled: bool, hook: Option<Hook>) -> (Vec<Observation>, serde_json::Value) {
-    diamond_case(workers, enabled, hook, false, None)
+    diamond_case(workers, enabled, hook, Body::Inline, None)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Body {
+    Inline,
+    Call,
+    Nested,
+    Loop,
+    ErrorLeaf,
 }
 
 fn diamond_case(
     workers: usize,
     enabled: bool,
     hook: Option<Hook>,
-    call: bool,
+    body: Body,
     timeout: Option<u64>,
 ) -> (Vec<Observation>, serde_json::Value) {
     let mut shared = empty_shared_state();
     shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
     let mut limits = ExecutionLimits::default().with_path_merging(true);
     limits.arms_as_tasks = enabled;
+    limits.region_loop_analysis = body == Body::Loop;
+    limits.region_global_state = body == Body::Loop;
     let mut state = TaskState::new().with_execution_limits(limits);
     state.arm_test_hook = hook;
     let ctx = Context::new(Config::new());
@@ -36,16 +47,37 @@ fn diamond_case(
     let input = shared.symtab.intern("zarm_input");
     shared.registers.insert(input, Ty::Bool);
     let b_result = Exp::Call(Op::Or, vec![Exp::Id(input), Exp::Id(flag)]);
-    let b = if call {
+    let b = if body != Body::Inline {
+        let counter = shared.symtab.intern("zscan_index");
+        let set = |value| Instr::Copy(Loc::Id(RETURN), value, info());
+        let code = match body {
+            Body::Call => vec![set(b_result), Instr::End],
+            Body::Nested | Body::ErrorLeaf => vec![
+                Instr::Jump(Exp::Id(input), 3, info()),
+                set(Exp::Id(flag)),
+                Instr::Goto(4),
+                if body == Body::ErrorLeaf {
+                    Instr::PrimopUnary(Loc::Id(RETURN), primop::not_bool::<B64>, Exp::I128(1), info())
+                } else {
+                    set(b_result)
+                },
+                Instr::End,
+            ],
+            Body::Loop => vec![
+                Instr::Init(counter, Ty::I64, Exp::I64(0), info()),
+                Instr::Jump(Exp::Call(Op::Eq, vec![Exp::Id(counter), Exp::I64(2)]), 7, info()),
+                Instr::Jump(Exp::Id(input), 5, info()),
+                Instr::Copy(Loc::Id(counter), Exp::Call(Op::Add, vec![Exp::Id(counter), Exp::I64(1)]), info()),
+                Instr::Goto(1),
+                set(b_result),
+                Instr::Goto(8),
+                set(Exp::Id(flag)),
+                Instr::End,
+            ],
+            Body::Inline => unreachable!(),
+        };
         let helper = shared.symtab.intern("zlinear_arm");
-        shared.functions.insert(
-            helper,
-            (
-                vec![(flag, &Ty::Bool)],
-                &Ty::Bool,
-                Box::leak(vec![Instr::Copy(Loc::Id(RETURN), b_result, info()), Instr::End].into_boxed_slice()),
-            ),
-        );
+        shared.functions.insert(helper, (vec![(flag, &Ty::Bool)], &Ty::Bool, Box::leak(code.into_boxed_slice())));
         Instr::Call(Loc::Id(RETURN), false, helper, vec![Exp::Id(flag)], info())
     } else {
         Instr::Copy(Loc::Id(RETURN), b_result, info())
@@ -62,7 +94,15 @@ fn diamond_case(
     let output = Arc::new(Mutex::new(Vec::new()));
     let task = frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver));
     start_multi(workers, timeout, vec![task], &shared, output.clone(), &|_, _, result, _, mut solver, output| {
-        let Ok((Run::Finished(value), frame)) = result else { panic!("菱形程序应正常完成") };
+        let (value, frame) = match result {
+            Ok((Run::Finished(value), frame)) => (value, frame),
+            Err((ExecError::Type(..), frame)) if body == Body::ErrorLeaf => {
+                assert!(frame.arm_error_certified());
+                // 单独收集错误叶的输入域，约定其观察值为 true。
+                (Val::Bool(true), frame)
+            }
+            _ => panic!("菱形程序应正常完成或交付已认证的错误叶"),
+        };
         let records = frame
             .region_merge_records
             .iter()
@@ -70,9 +110,25 @@ fn diamond_case(
                 let parent = r
                     .parent_record
                     .map(|id| frame.region_merge_records.iter().position(|p| p.record_id == id).unwrap());
-                let mut symbols: Vec<_> = r.value_symbols.iter().map(|s| s.as_u32()).collect();
-                symbols.sort_unstable();
-                format!("{parent:?}/{:?}/{:?}/{:?}/{}/{}/{symbols:?}", r.join, r.arm, r.condition, r.branch_pc, r.dead)
+                let values: BTreeSet<_> = r.value_symbols.iter().map(|s| s.as_u32()).collect();
+                let inputs: BTreeSet<_> = r.input_symbols.iter().map(|s| s.as_u32()).collect();
+                format!(
+                    "{parent:?}/{:?}",
+                    (
+                        r.arm,
+                        r.function,
+                        r.branch_pc,
+                        r.join,
+                        r.condition,
+                        r.source_loc,
+                        r.depth,
+                        r.dead,
+                        values,
+                        inputs,
+                        &r.single_arm_reads,
+                        &r.memory_reads
+                    )
+                )
             })
             .collect();
         let events = solver.trace().events_with_guards_rev().map(|(e, g)| format!("{e:?}/{g:?}")).collect();
@@ -133,7 +189,19 @@ fn ordered(
         }
         Ok(())
     });
-    let (data, stats) = diamond_case(workers, true, Some(hook), fail == "call", (fail == "timeout").then_some(1));
+    let (data, stats) = diamond_case(
+        workers,
+        true,
+        Some(hook),
+        match fail {
+            "call" => Body::Call,
+            "nested" => Body::Nested,
+            "loop" => Body::Loop,
+            "error_leaf" => Body::ErrorLeaf,
+            _ => Body::Inline,
+        },
+        (fail == "timeout").then_some(1),
+    );
     let entries = std::mem::take(&mut *log.lock().unwrap());
     (data, entries, stats)
 }
@@ -272,7 +340,7 @@ fn region_arm_function_application_remaps_function_and_argument() {
 
 #[test]
 fn region_arm_imports_straight_line_call_and_register_read() {
-    let base = diamond_case(1, false, None, true, None).0;
+    let base = diamond_case(1, false, None, Body::Call, None).0;
     let (out, log, _) = ordered(2, "worker_claimed", "a_join", "call");
     assert!(log.iter().any(|(s, _)| s == "imported"));
     assert_eq!(out, base);
@@ -296,11 +364,20 @@ fn region_arm_wait_excludes_queue_time_and_retains_longer_arm() {
 /// 只放宽 B 的下标时，出口必须仍看见第一项可能越界的读取。
 #[test]
 fn region_arm_imports_deferred_register_indices() {
+    check_deferred_indices(false, "region_arm_imports_deferred_register_indices");
+}
+
+#[test]
+fn region_arm_nested_deferred_indices() {
+    check_deferred_indices(true, "region_arm_nested_deferred_indices");
+}
+
+fn check_deferred_indices(nested: bool, name: &str) {
     const CHILD: &str = "ISLA_ARM_INDEX_OBLIGATION_TEST";
     if std::env::var_os(CHILD).is_none() {
-        let test = "executor::tests::region_arm_runtime_tests::region_arm_imports_deferred_register_indices";
+        let test = format!("executor::tests::region_arm_runtime_tests::{name}");
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", test, "--nocapture"])
+            .args(["--exact", &test, "--nocapture"])
             .env(CHILD, "1")
             .output()
             .unwrap();
@@ -335,18 +412,24 @@ fn region_arm_imports_deferred_register_indices() {
         let read = |index| {
             Instr::Call(Loc::Id(RETURN), false, READ_REGISTER_FROM_VECTOR, vec![Exp::Id(index), Exp::Id(refs)], info())
         };
-        let mut frame = make_frame(vec![
-            Instr::Jump(Exp::Id(flag), 4, info()),
-            read(index_b),
-            read(index_b),
-            Instr::Goto(5),
-            read(index_a),
-            Instr::End,
-        ]);
+        let inner = test_name(9014);
+        let mut code = if nested {
+            vec![Instr::Jump(Exp::Id(inner), 4, info()), read(index_b), Instr::Goto(5), read(index_b)]
+        } else {
+            vec![read(index_b), read(index_b)]
+        };
+        let target = code.len() + 2;
+        code.insert(0, Instr::Jump(Exp::Id(flag), target, info()));
+        code.extend([Instr::Goto(target + 1), read(index_a), Instr::End]);
+        let mut frame = make_frame(code);
         let ctx = Context::new(Config::new());
         let mut solver = Solver::new(&ctx);
         let guard = solver.declare_const(smtlib::Ty::Bool, info());
         frame.vars_mut().insert(flag, UVal::Init(Val::Symbolic(guard)));
+        if nested {
+            let choice = solver.declare_const(smtlib::Ty::Bool, info());
+            frame.vars_mut().insert(inner, UVal::Init(Val::Symbolic(choice)));
+        }
         for (name, bounded) in [(index_a, true), (index_b, safe)] {
             let index = solver.declare_bitvector(2, info());
             if bounded {
@@ -380,7 +463,7 @@ fn region_arm_imports_deferred_register_indices() {
         frame.path_timing.start_active();
         let result = region_merge::try_region(
             guard,
-            4,
+            target,
             0,
             TaskId::fresh(),
             &mut Fraction::one(),
@@ -407,4 +490,99 @@ fn region_arm_imports_deferred_register_indices() {
     for safe in [true, false] {
         assert_eq!(execute(false, safe), execute(true, safe), "逐项比较义务定义及其守卫");
     }
+}
+
+fn check_nested_b(body: Body, label: &'static str) {
+    let baseline = diamond_case(1, false, None, body, None).0;
+    assert_eq!(baseline.len(), 1);
+    assert!(baseline[0].records.len() >= 2, "基准必须执行内层汇合");
+    assert_eq!(
+        baseline[0].results,
+        [(true, true, false), (true, false, true), (false, true, true), (false, false, false)].into_iter().collect()
+    );
+    assert_eq!(diamond_case(1, true, None, body, None).0, baseline);
+    for workers in [2, 4] {
+        let (observed, log, _) = ordered(workers, "worker_claimed", "a_join", label);
+        assert_eq!(log.iter().filter(|(point, _)| point == "imported").count(), 1, "B 必须在外层出口交付一次");
+        assert_eq!(observed, baseline);
+    }
+}
+
+#[test]
+fn region_arm_nested_two_arms() {
+    check_nested_b(Body::Nested, "nested");
+}
+
+#[test]
+fn region_arm_nested_foreach_early_exit() {
+    check_nested_b(Body::Loop, "loop");
+}
+
+#[test]
+fn region_arm_nested_error_leaf_replays_once() {
+    const CHILD: &str = "ISLA_NESTED_ARM_ERROR_LEAF";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "executor::tests::region_arm_runtime_tests::region_arm_nested_error_leaf_replays_once"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        return;
+    }
+    crate::config::RegionOptions { arm_error_leaf: true, defer_exit_check: true, ..Default::default() }.configure();
+    let mut baseline = diamond_case(1, false, None, Body::ErrorLeaf, None).0;
+    let (mut output, log, _) = ordered(2, "worker_claimed", "a_join", "error_leaf");
+    assert_eq!(log.iter().filter(|(point, _)| point == "serial_retry").count(), 1);
+    assert!(!log.iter().any(|(point, _)| point == "imported"));
+    assert_eq!(output.len(), 2, "串行重跑须各交付一次正常终态和错误叶");
+    baseline.sort_by_key(|o| o.results.len());
+    output.sort_by_key(|o| o.results.len());
+    assert_eq!(output[0].results, BTreeSet::from([(false, true, true)]));
+    assert_eq!(baseline, output);
+}
+
+#[test]
+fn region_arm_nested_loop_observes_cancellation_and_path_deadline() {
+    use crate::ir::regions::{Region, RegionKind, RegionPoint};
+    let frame = make_frame(vec![Instr::Goto(1), Instr::End]);
+    let region = Arc::new(Region {
+        branch_pc: 0,
+        has_back_edge: false,
+        join: RegionPoint::Instruction(1),
+        nodes: [0].into_iter().collect(),
+        kind: RegionKind::Reconvergent,
+        local_variables: Default::default(),
+    });
+    let state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(true));
+    let mode = crate::config::MergeMode::Adaptive;
+    let mut outer = region_merge::prepare_region_base(&frame, &region, 1, mode, &state, info());
+    let cancel = Arc::new(AtomicBool::new(false));
+    outer.region_execution.as_mut().unwrap().remote_cancel = Some(cancel.clone());
+    outer.path_timing = path_timing::PathTiming::from_totals(path_timing::PathTimeTotals {
+        active_wall: Duration::from_secs(1),
+        ..Default::default()
+    });
+    let loop_region = Arc::new(Region { has_back_edge: true, ..(*region).clone() });
+    let mut nested = region_merge::prepare_region_base(&outer, &loop_region, 2, mode, &state, info());
+    cancel.store(true, Ordering::Release);
+    assert!(matches!(
+        region_merge::step(&mut nested),
+        Err(ExecError::SpeculativeReject { reason: SpeculativeRejectReason::IncompatibleState, .. })
+    ));
+    cancel.store(false, Ordering::Release);
+    let context = Context::new(Config::new());
+    let result = run_loop(
+        1,
+        TaskId::fresh(),
+        &mut Fraction::one(),
+        PathTimeout::from_seconds(Some(1)),
+        None,
+        &SingleForkSink { queue: &Worker::new_lifo() },
+        &mut nested,
+        &state,
+        &empty_shared_state(),
+        &mut Solver::new(&context),
+    );
+    assert!(matches!(result, Err(ExecError::Timeout)));
 }

@@ -76,7 +76,7 @@ fn 根事务可导入重命名后的远端臂后缀() {
     remote_solver.with_logical_arm(remote_arm, |solver| {
         solver.assert(Exp::Eq(Box::new(Exp::Var(remote)), Box::new(Exp::Bits64(B64::from_u64(2)))));
     });
-    let suffix = remote_solver.export_arm_suffix(remote_arm);
+    let suffix = remote_solver.export_arm_suffix(remote_arm).unwrap();
 
     let imported = Sym::from_u32(20);
     let remap = SymRemap::from_pairs([(remote, imported)]);
@@ -107,14 +107,14 @@ fn 远端臂导入保留寄存器读取投影序号() {
     remote.with_logical_arm(remote_arm, |solver| {
         solver.add_region_register_read(Event::ReadReg(Name::from_u32(800), Vec::new(), Val::Bits(B64::zeros(64))), 7);
     });
-    let suffix = remote.export_arm_suffix(remote_arm);
+    let suffix = remote.export_arm_suffix(remote_arm).unwrap();
     assert_eq!(suffix[0].register_read_occurrence, Some(7));
 
     let mut target = Solver::<B64>::new(&ctx);
     target.start_transaction();
     let target_arm = target.new_logical_arm(None);
     target.import_arm_suffix(target_arm, &suffix);
-    assert_eq!(target.export_arm_suffix(target_arm)[0].register_read_occurrence, Some(7));
+    assert_eq!(target.export_arm_suffix(target_arm).unwrap()[0].register_read_occurrence, Some(7));
 }
 
 #[test]
@@ -1104,7 +1104,7 @@ fn region_arm_deferred_input_fact_and_exit_marker() {
         let root_b = b.start_transaction();
         let (mut suffix, mut deferred) = b.with_deferred_region_queries(|b| {
             let arm = execute_b(b);
-            (b.export_arm_suffix(arm), b.take_arm_assertions().unwrap())
+            (b.export_arm_suffix(arm).unwrap(), b.take_arm_assertions().unwrap())
         });
         let remap = SymRemap::from_pairs(
             (remote_start..b.next_join_symbol())

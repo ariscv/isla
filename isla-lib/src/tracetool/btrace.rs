@@ -18,6 +18,13 @@ pub(super) struct BranchEdge {
 }
 
 impl TracePerPath {
+    pub(crate) fn remap_branch_conditions(&mut self, remap: &crate::smt::SymRemap) {
+        let original = std::mem::take(&mut self.branch_conditions);
+        for condition in original.iter() {
+            self.branch_conditions.push(remap.exp(condition));
+        }
+    }
+
     pub fn push_branch_condition(&mut self, condition: smtlib::Exp<Sym>) {
         self.branch_conditions.push(condition);
     }

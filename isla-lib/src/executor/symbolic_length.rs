@@ -110,10 +110,6 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
     shared: &SharedState<'ir, B>,
 ) -> Result<bool, ExecError> {
     use smtlib::Exp::*;
-    // 原语也会直接进入此处。远端直线臂须把消费者留给 A 的串行事务。
-    if frame.region_execution.as_ref().is_some_and(|execution| execution.remote_cancel.is_some()) {
-        return Err(error);
-    }
     let _scope = super::stats::region_progress::QueryScope::enter("concretization");
 
     match &error {

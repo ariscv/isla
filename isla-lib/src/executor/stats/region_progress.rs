@@ -145,7 +145,7 @@ impl AttemptGuard {
         let root = DEPTH.with(|d| {
             let n = d.get();
             d.set(n + 1);
-            n == 0
+            n == 0 && super::merge_diagnostics::arm_parent().is_none()
         });
         if root {
             super::region_cost::reset_boundary();
