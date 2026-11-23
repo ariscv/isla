@@ -319,13 +319,13 @@ fn projection_reuses_ast_work_across_prefix_growth_and_anchors() {
     let cold = count(&solver, x);
     let warm = count(&solver, x);
     eprintln!("同一锚点首次／再次（翻译、代入、结构判定） {cold:?}／{warm:?}");
-    assert_eq!(cold, (258, 261, 259));
-    assert_eq!(warm, (0, 4, 2));
-    assert_eq!(count(&solver, y), (0, 261, 3));
+    assert_eq!(cold, (258, 2, 257));
+    assert_eq!(warm, (0, 2, 0));
+    assert_eq!(count(&solver, y), (0, 2, 1));
     let b = solver.declare_const(Ty::Bool, info);
     solver.assert(not(Exp::Var(b)));
-    assert_eq!(count(&solver, x), (1, 5, 3));
-    assert_eq!(count(&solver, y), (0, 5, 2));
+    assert_eq!(count(&solver, x), (1, 2, 1));
+    assert_eq!(count(&solver, y), (0, 2, 0));
 }
 
 #[test]
@@ -360,4 +360,69 @@ fn projection_cache_tracks_rollback_rewritten_guard_and_new_context() {
     replay.assert(equal(x, 1));
     values(&replay, x, &[1]);
     values(&solver, x, &[0, 1]);
+}
+
+#[test]
+fn projection_related_candidates_share_a_dag_and_reuse_results() {
+    configure_tastic(Tactic::Qfaufbv);
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let info = SourceLoc::unknown();
+    let x = solver.declare_bitvector(8, info);
+    let alias = solver.define_bitvector(Exp::Bvadd(Box::new(Exp::Var(x)), Box::new(bits64(1, 8))), info);
+    let b = solver.declare_const(Ty::Bool, info);
+    let shared = Exp::Ite(Box::new(equal(x, 1)), Box::new(Exp::Var(b)), Box::new(Exp::Bool(true)));
+    for i in 16..48 {
+        solver.assert(Exp::Or(Box::new(shared.clone()), Box::new(equal(x, i))));
+    }
+    let candidates: Vec<_> = (0..16).map(|v| bits64(v, 8)).collect();
+    let check = |solver: &Solver<'_, B64>, target| {
+        let prefix = PathConditions::new(solver).unwrap();
+        let expected = solver.reference_projection(&prefix, target, x, candidates.clone());
+        let (actual, sub, boolean) =
+            projection_counts(|| solver.project_finite_values(&prefix, target, x, candidates.clone()));
+        assert_eq!(expected, actual);
+        (sub, boolean)
+    };
+    let cold = check(&solver, x);
+    let warm = check(&solver, alias);
+    let tx = solver.start_transaction();
+    solver.assert(not(Exp::Var(b)));
+    let appended = check(&solver, alias);
+    solver.rollback_transaction(tx);
+    let restored = check(&solver, alias);
+    eprintln!("相关断言（全量代入、结构判定），首次 {cold:?}，换目标 {warm:?}，追加 {appended:?}，回滚 {restored:?}");
+    assert!(cold.0 <= 16 && restored.0 <= 16);
+    assert!(cold.1 <= 32 && restored.1 <= 32);
+    assert_eq!(warm, (16, 0));
+    assert!(appended.0 <= 16 && appended.1 <= 1);
+}
+
+#[test]
+fn projection_reuses_nonliteral_without_keeping_its_residual() {
+    configure_tastic(Tactic::Qfaufbv);
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let info = SourceLoc::unknown();
+    let x = solver.declare_bitvector(8, info);
+    let y = solver.declare_bitvector(8, info);
+    solver.assert(Exp::Or(Box::new(equal(x, 0)), Box::new(equal(y, 4))));
+    for with_witness in [false, true] {
+        if with_witness {
+            assert!(matches!(solver.check_sat(info), Sat));
+        }
+        let prefix = PathConditions::new(&solver).unwrap();
+        for value in 0..4 {
+            let candidates = vec![bits64(value, 8)];
+            let expected = solver.reference_projection(&prefix, x, x, candidates.clone());
+            for warm in [false, true] {
+                let (actual, _, boolean) =
+                    projection_counts(|| solver.project_finite_values(&prefix, x, x, candidates.clone()));
+                assert_eq!(actual, expected);
+                if warm {
+                    assert_eq!(boolean, 0, "同一候选重复投影，value={value}");
+                }
+            }
+        }
+    }
 }

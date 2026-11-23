@@ -3,8 +3,10 @@ use super::*;
 
 mod arithmetic;
 mod prefix_index;
+mod projection;
 use prefix_index::{BranchCandidates, Candidate, PathConditions, ProjectionCache};
 pub(super) use prefix_index::{PrefixIndex, BUFFERED};
+use projection::{AnchorProjection, ProjectedFact};
 
 #[cfg_attr(test, derive(Debug, PartialEq))]
 pub(crate) enum FiniteDomain {
@@ -477,8 +479,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
         // 已化简的锚点可能等于第一个候选。选第一个非恒等代入来判依赖，
         // 全部相等时只复用本次的公共结果，不向依赖缓存登记“无关”。
-        let probe =
-            candidates.iter().map(|c| self.translate_exp(c)).enumerate().find(|(_, c)| c.z3_ast != anchor.z3_ast);
+        let probe = candidates.iter().map(|c| self.translate_exp(c)).find(|c| c.z3_ast != anchor.z3_ast);
         let mut bool_atoms = Vec::new();
         let mut bool_literals = HashMap::new();
         for sym in prefix.bool_symbols() {
@@ -492,25 +493,15 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         prefix.translate_projection_suffix(self, &mut cache);
         let ProjectionCache { assertions, guards, anchors, simplified } = &mut *cache;
         let asts = &prefix.index.asts;
-        let dependencies = &mut anchors.entry(asts.keep(anchor.clone())).or_default().dependencies;
+        let facts = &mut anchors.entry(asts.keep(anchor.clone())).or_default().projection;
+        let mut independent = HashSet::new();
         let mut common = ProjectionLiterals::new();
         let empty = HashMap::new();
         let mut dependent = Vec::new();
         for &key in assertions.iter().rev().chain(guards.iter()) {
-            if let Some((_, probe_value)) = &probe {
-                let mut prepared = None;
-                if *dependencies.entry(key).or_insert_with(|| {
-                    let residual = asts.get(key).substitute(&anchor, probe_value);
-                    if residual.z3_ast == key {
-                        false
-                    } else {
-                        prepared = Some(residual);
-                        true
-                    }
-                }) {
-                    dependent.push((asts.get(key), prepared));
-                    continue;
-                }
+            if probe.as_ref().is_some_and(|p| facts.contains_anchor(key, &anchor, p, &mut independent)) {
+                dependent.push(key);
+                continue;
             }
             let (truth, residual) = simplified.entry(key).or_insert_with(|| {
                 let mut residual = asts.get(key);
@@ -526,26 +517,26 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
         let mut admissible = Vec::new();
         let mut exact = true;
-        'candidate: for (index, candidate) in candidates.into_iter().enumerate() {
+        'candidate: for candidate in candidates {
             let value = self.translate_exp(&candidate);
             let binding = (!free).then(|| Ast::mk_eq(&anchor, &value));
-            let path_facts = dependent.iter().map(|(original, prepared)| {
-                let residual = match prepared {
-                    Some(first) if Some(index) == probe.as_ref().map(|(index, _)| *index) => first.clone(),
-                    _ => original.substitute(&anchor, &value),
-                };
-                let unchanged = original.z3_ast == residual.z3_ast;
-                (residual, unchanged)
-            });
+            let mut rebuilt = HashMap::new();
+            let path_facts =
+                dependent.iter().map(|&key| facts.project_assertion(asts, key, &anchor, &value, &mut rebuilt));
             let mut literals = ProjectionLiterals::new();
             let mut can_reuse_witness = self.has_stashed_model();
-            for (mut residual, unchanged) in path_facts.chain(binding.map(|eq| (eq, false))) {
-                match residual.structural_bool() {
+            for fact in path_facts.chain(binding.into_iter().map(|mut eq| ProjectedFact {
+                truth: eq.structural_bool(),
+                literal: bool_literals.get_key_value(&eq.z3_ast).map(|(&key, _)| key),
+                unchanged: false,
+            })) {
+                match fact.truth {
                     Some(false) => continue 'candidate,
                     Some(true) => (),
                     None => {
-                        can_reuse_witness &= unchanged;
-                        if !literals.record(bool_literals.get(&residual.z3_ast).copied(), &common.values) {
+                        can_reuse_witness &= fact.unchanged;
+                        let literal = fact.literal.and_then(|key| bool_literals.get(&key)).copied();
+                        if !literals.record(literal, &common.values) {
                             continue 'candidate;
                         }
                     }

@@ -27,7 +27,7 @@ pub(super) struct ProjectionCache {
 
 #[derive(Default)]
 pub(super) struct AnchorFacts {
-    pub(super) dependencies: HashMap<Z3_ast, bool>,
+    pub(super) projection: AnchorProjection,
     // 普通追加只检查新后缀。条件替换、前缀缩短和改绑随整个投影缓存失效。
     indexed_assertions: usize,
     indexed_guards: usize,
@@ -62,40 +62,6 @@ impl<'ctx> ProjectionAsts<'ctx> {
         assert!(self.refs.borrow().contains(&key));
         unsafe { Z3_inc_ref(self.ctx.z3_ctx, key) };
         Ast { ctx: self.ctx, z3_ast: key }
-    }
-
-    // 子节点由当前前缀持有的根保活。显式后序遍历不占 Rust 递归栈。
-    fn contains_anchor(&self, root: Z3_ast, anchor: &Ast, probe: &Ast, nodes: &mut HashMap<Z3_ast, bool>) -> bool {
-        let ctx = self.ctx.z3_ctx;
-        let mut pending = vec![(root, false)];
-        while let Some((node, expanded)) = pending.pop() {
-            if nodes.contains_key(&node) {
-                continue;
-            }
-            let found = if node == anchor.z3_ast {
-                true
-            } else {
-                unsafe {
-                    match Z3_get_ast_kind(ctx, node) {
-                        AstKind::Numeral | AstKind::Var => false,
-                        AstKind::App => {
-                            let app = Z3_to_app(ctx, node);
-                            let mut children = (0..Z3_get_app_num_args(ctx, app)).map(|i| Z3_get_app_arg(ctx, app, i));
-                            if !expanded {
-                                pending.push((node, true));
-                                pending.extend(children.map(|child| (child, false)));
-                                continue;
-                            }
-                            children.any(|child| nodes[&child])
-                        }
-                        // 对带绑定器等未遍历的形式，保留原生非恒等代入的判定。
-                        _ => return self.get(root).substitute(anchor, probe).z3_ast != root,
-                    }
-                }
-            };
-            nodes.insert(node, found);
-        }
-        nodes[&root]
     }
 
     fn clear(&mut self) {
@@ -202,7 +168,7 @@ impl<'ctx> PrefixIndex<'ctx> {
                 .anchors
                 .values()
                 .map(|facts| {
-                    map_bytes::<Z3_ast, bool>(facts.dependencies.capacity())
+                    facts.projection.heap_bytes()
                         + facts.related.capacity() * size_of::<Z3_ast>()
                         + map_bytes::<Z3_ast, BranchCheck>(facts.candidates.capacity())
                 })
@@ -303,9 +269,9 @@ impl<'a, B: BV> PathConditions<'a, B> {
         };
 
         // 同一批新断言常共享很大的子式。每个 DAG 节点只查一次是否含锚点。
-        let mut nodes = HashMap::new();
+        let mut independent = HashSet::new();
         for &key in assertions[facts.indexed_assertions..].iter().chain(&guards[facts.indexed_guards..]) {
-            if *facts.dependencies.entry(key).or_insert_with(|| asts.contains_anchor(key, anchor, value, &mut nodes)) {
+            if facts.projection.contains_anchor(key, anchor, value, &mut independent) {
                 facts.related.push(key);
             }
         }

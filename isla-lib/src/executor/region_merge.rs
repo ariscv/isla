@@ -1762,6 +1762,8 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             RegionPoint::FunctionExit => true,
             RegionPoint::Instruction(pc) => matches!(frame.instrs.get(pc), Some(Instr::End)),
         };
+    let mut first_pmp_fold =
+        super::stats::region_progress::enabled() && shared.symtab.to_str(frame.function_name) == "zpmpCheck";
     let mut exit_prefix = Vec::new();
     let mut exit_ids = None;
     let root_branch = region.branch_pc;
@@ -2093,8 +2095,9 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
                         .expect("合并记录编号溢出");
                     if super::stats::region_progress::enabled()
-                        && LOGGED_ITERATION_FOLDS.fetch_add(1, Ordering::Relaxed) < 2048
+                        && (LOGGED_ITERATION_FOLDS.fetch_add(1, Ordering::Relaxed) < 2048 || first_pmp_fold)
                     {
+                        first_pmp_fold = false;
                         let _log = crate::executor::stats::path_account::Scope::enter(
                             crate::executor::stats::path_account::Category::Log,
                         );
