@@ -129,6 +129,7 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
         let cond = solver.define_const(in_range, info);
         return retry_partition(
             consumer,
+            None,
             cond,
             Var(cond),
             Not(Box::new(Var(cond))),
@@ -400,6 +401,7 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                         {
                             return retry_partition(
                                 consumer,
+                                None,
                                 sym,
                                 allowed,
                                 excluded,
@@ -511,6 +513,7 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                     let local = consumer.filter(|_| matches!(solver.finite_domain(sym), FiniteDomain::Known(_)));
                     return retry_partition(
                         local,
+                        None,
                         sym,
                         selected,
                         remainder,
@@ -650,7 +653,9 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
     };
     let width = solver.length(sym).expect("长度参数必须是位向量");
     assert!(width > 0, "待枚举的位向量必须具有正位宽");
-    let domain = solver.finite_domain(sym);
+    let inherited = solver.operand_bound(sym, info);
+    let mut pass_bound = inherited.is_some();
+    let domain = inherited.unwrap_or_else(|| solver.finite_domain(sym));
     let bounded = matches!(domain, FiniteDomain::Bounded(_));
     let mut restricted = false;
     let values = match (domain, bounds) {
@@ -662,10 +667,14 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
             restricted = values.len() != old_len;
             Some(values)
         }
-        (FiniteDomain::Bounded(values), Some(OperandBounds::RequireWithin(range)))
-            if values.iter().all(|value| candidate_in_bounds(value, &range)) =>
-        {
-            Some(values)
+        (FiniteDomain::Bounded(mut values), Some(OperandBounds::RequireWithin(range))) => {
+            if values.iter().any(|v| !candidate_in_bounds(v, &range)) {
+                let previous = values.len();
+                solver.refine_guarded_values(sym, &mut values);
+                restricted = values.len() != previous;
+                pass_bound |= restricted;
+            }
+            values.iter().all(|v| candidate_in_bounds(v, &range)).then_some(values)
         }
         _ => None,
     };
@@ -717,6 +726,7 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
         return Ok(
             if retry_partition(
                 consumer,
+                (pass_bound && in_region && solver.region_queries_deferred()).then_some(values),
                 sym,
                 equal,
                 remainder,
@@ -830,6 +840,7 @@ fn cache_retry_operand<B: BV>(frame: &mut LocalFrame<'_, B>, operands: &[Val<B>]
 #[allow(clippy::too_many_arguments)]
 fn retry_partition<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     consumer: Option<(usize, super::PathTimeout)>,
+    split: Option<Vec<smtlib::Exp<crate::smt::Sym>>>,
     sym: crate::smt::Sym,
     equal: smtlib::Exp<crate::smt::Sym>,
     remainder: smtlib::Exp<crate::smt::Sym>,
@@ -847,7 +858,10 @@ fn retry_partition<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     if let Some((tid, timeout)) = consumer {
         let previous = frame.pending_retry_operand.clone();
         cache_retry_operand(frame, operands);
-        let retry = super::concrete_values::ConsumerRetry::Operand([equal.clone(), remainder.clone()]);
+        let retry = super::concrete_values::ConsumerRetry::Operand {
+            guards: [equal.clone(), remainder.clone()],
+            split: split.map(|values| (sym, values)),
+        };
         match super::concrete_values::retry_region(
             retry, info, tid, task_id, fraction, timeout, stop, sink, frame, state, shared, solver,
         ) {

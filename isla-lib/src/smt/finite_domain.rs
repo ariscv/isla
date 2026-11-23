@@ -18,6 +18,13 @@ pub(crate) enum FiniteDomain {
     Unknown,
 }
 
+// 仅当前重试臂拥有，在保存点结束时随臂丢弃。
+pub(super) struct OperandBound {
+    sym: Sym,
+    site: SourceLoc,
+    values: Vec<Exp<Sym>>,
+}
+
 type Bound = Option<Vec<Exp<Sym>>>;
 
 fn intersect(lhs: Bound, rhs: Bound) -> Bound {
@@ -415,6 +422,20 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
     }
 
+    pub(crate) fn set_operand_bound(&mut self, sym: Sym, site: SourceLoc, values: Vec<Exp<Sym>>) {
+        let arm = self.savepoints.last_mut().expect("操作数上界必须属于活动重试臂");
+        arm.operand_bound = Some(Box::new(OperandBound { sym, site, values }));
+    }
+
+    pub(crate) fn operand_bound(&self, sym: Sym, site: SourceLoc) -> Option<FiniteDomain> {
+        let bound = self.savepoints.last()?.operand_bound.as_ref()?;
+        if bound.sym != sym || bound.site != site || !self.region_queries_deferred() {
+            return None;
+        }
+        PathConditions::new(self)?; // 符号已重绑时重新推导。
+        Some(FiniteDomain::Bounded(bound.values.clone()))
+    }
+
     pub(crate) fn finite_domain(&self, sym: Sym) -> FiniteDomain {
         let Some(prefix) = PathConditions::new(self) else { return FiniteDomain::Unknown };
         let key = (sym, self.has_stashed_model(), self.region_queries_deferred());
@@ -428,7 +449,18 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         answer
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_split_recomputations() -> usize {
+        SPLIT_RECOMPUTATIONS.get()
+    }
+
     fn compute_finite_domain(&self, prefix: &PathConditions<'_, B>, sym: Sym) -> FiniteDomain {
+        #[cfg(test)]
+        if self.region_queries_deferred()
+            && matches!(self.transaction_conditions.last(), Some(Exp::Eq(a, b) | Exp::Neq(a, b)) if **a == Exp::Var(sym) && constant(b).is_some())
+        {
+            SPLIT_RECOMPUTATIONS.set(SPLIT_RECOMPUTATIONS.get() + 1);
+        }
         let mut pending = vec![sym];
         let mut seen = HashSet::new();
         let mut best = FiniteDomain::Unknown;
@@ -731,6 +763,7 @@ thread_local! {
     static PROJECT_SUBSTITUTIONS: Cell<usize> = const { Cell::new(0) };
     pub(super) static STRUCTURAL_BOOLS: Cell<usize> = const { Cell::new(0) };
     static BOUND_NODE_VISITS: Cell<usize> = const { Cell::new(0) };
+    static SPLIT_RECOMPUTATIONS: Cell<usize> = const { Cell::new(0) };
     static BOUND_SEARCHES: Cell<usize> = const { Cell::new(0) };
 }
 

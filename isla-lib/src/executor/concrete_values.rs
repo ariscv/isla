@@ -81,7 +81,11 @@ fn resolve_value<B: BV>(
 
 pub(super) enum ConsumerRetry {
     Choice(Sym),
-    Operand([smtlib::Exp<Sym>; 2]),
+    Operand {
+        guards: [smtlib::Exp<Sym>; 2],
+        // 等值臂只取首项，互补臂保留其余值。其他类型的谓词拆分没有这个上界。
+        split: Option<(Sym, Vec<smtlib::Exp<Sym>>)>,
+    },
 }
 
 #[allow(clippy::too_many_arguments)]

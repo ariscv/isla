@@ -50,6 +50,7 @@ pub(super) enum DeclarationUndo<'ctx> {
 
 pub(super) struct SolverSavepoint<'ctx, B> {
     token: SolverTransaction,
+    pub(super) operand_bound: Option<Box<finite_domain::OperandBound>>,
     arm_error_prefix: OnceCell<Arc<TraceHead<B>>>,
     arm_error_blocks: RefCell<error_snapshot::SnapshotBlocks<B>>,
     pub(super) events_len: usize,
@@ -198,6 +199,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             let _ = &snapshot_scope;
             self.savepoints.push(SolverSavepoint {
                 token,
+                operand_bound: None,
                 arm_error_prefix: OnceCell::new(),
                 arm_error_blocks: RefCell::default(),
                 events_len: self.transaction_events.len(),

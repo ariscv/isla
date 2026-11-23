@@ -295,3 +295,151 @@ fn finite_domain_ptwalk_zeros_projects_signed_arm_through_narrowing() {
         }
     }
 }
+
+// 标签与载荷共用分支。深臂从零递减时错误标签生效，负载荷仍保留。
+fn merged_length(solver: &mut Solver<B64>) -> ((Sym, Sym, Sym), Sym, Sym) {
+    use smtlib::bits64;
+    use smtlib::Exp as F;
+    let mode_a = solver.declare_const(smtlib::Ty::Bool, info());
+    let mode_b = solver.declare_const(smtlib::Ty::Bool, info());
+    let mode_sort = solver.get_enum(Name::from_u32(8100), 3);
+    let member = |member| F::Enum(crate::smt::EnumMember { enum_id: mode_sort, member });
+    let mode = solver.define_const(
+        F::Ite(
+            Box::new(F::Var(mode_a)),
+            Box::new(member(0)),
+            Box::new(F::Ite(Box::new(F::Var(mode_b)), Box::new(member(1)), Box::new(member(2)))),
+        ),
+        info(),
+    );
+    let matches = |index| F::Eq(Box::new(F::Var(mode)), Box::new(member(index)));
+    let first = solver.define_const(matches(0), info());
+    let second = solver.define_const(matches(1), info());
+    let initial = solver.define_const(
+        F::Ite(
+            Box::new(F::Var(first)),
+            Box::new(bits64(2, 128)),
+            Box::new(F::Ite(Box::new(F::Var(second)), Box::new(bits64(3, 128)), Box::new(bits64(4, 128)))),
+        ),
+        info(),
+    );
+    let prior = solver.define_const(F::Bvsub(Box::new(F::Var(initial)), Box::new(bits64(2, 128))), info());
+    let route = solver.declare_bitvector(8, info());
+    let deep = solver.define_const(F::Bvugt(Box::new(F::Var(route)), Box::new(bits64(10, 8))), info());
+    let allow = solver.define_const(F::Bvsgt(Box::new(F::Var(prior)), Box::new(bits64(0, 128))), info());
+    let next = solver.define_const(F::Bvsub(Box::new(F::Var(prior)), Box::new(bits64(1, 128))), info());
+    let narrow = solver.define_const(F::Extract(63, 0, Box::new(F::Var(next))), info());
+    let merged =
+        solver.define_const(F::Ite(Box::new(F::Var(deep)), Box::new(F::Var(narrow)), Box::new(bits64(2, 64))), info());
+    let payload = solver.define_const(
+        F::Bvmul(Box::new(F::SignExtend(64, Box::new(F::Var(merged)))), Box::new(bits64(9, 128))),
+        info(),
+    );
+    let success = bits64(17, 32);
+    let failure = bits64(16, 32);
+    let deep_tag = solver
+        .define_const(F::Ite(Box::new(F::Var(allow)), Box::new(success.clone()), Box::new(failure.clone())), info());
+    let merged_tag =
+        solver.define_const(F::Ite(Box::new(F::Var(deep)), Box::new(F::Var(deep_tag)), Box::new(success)), info());
+    let ok = solver.define_const(F::Neq(Box::new(F::Var(merged_tag)), Box::new(failure)), info());
+    let other = solver.declare_bitvector(64, info());
+    solver.assert(F::Bvule(Box::new(F::Var(other)), Box::new(bits64(100, 64))));
+    ((mode_a, mode_b, route), ok, payload)
+}
+
+#[test]
+fn ones_shift_guard_projection_matches_eager_solver() {
+    use smtlib::Exp::*;
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    let mut cfg = Config::new();
+    cfg.solver_options.finite_domain_enumeration = true;
+    let ctx = Context::new(cfg);
+    let mut solver = Solver::<B64>::new(&ctx);
+    let (_, ok, width) = merged_length(&mut solver);
+    let all: Vec<_> = [-9, 0, 9, 18].into_iter().map(crate::primop_util::smt_i128).collect();
+    for guard in [Some(Var(ok)), Some(Not(Box::new(Var(ok)))), None] {
+        let tx = solver.start_transaction_with_guard(guard);
+        let mut actual = all.clone();
+        solver.refine_guarded_values(width, &mut actual);
+        let expected: Vec<_> = all
+            .iter()
+            .filter(|v| {
+                solver.check_sat_with(&Eq(Box::new(Var(width)), Box::new((*v).clone())), info()).is_sat().unwrap()
+            })
+            .cloned()
+            .collect();
+        assert_eq!(actual, expected);
+        solver.rollback_transaction(tx);
+    }
+}
+
+#[test]
+fn ones_shift_merged_tag_guards_length() {
+    if !run_in_diagnostics_process(concat!(module_path!(), "::ones_shift_merged_tag_guards_length")) {
+        return;
+    }
+    run_deep_region_test(|| {
+        use smtlib::bits64;
+        use smtlib::Exp as F;
+        crate::config::RegionOptions { defer_exit_check: true, ..Default::default() }.configure();
+        let (mut shared, _, _) = shared_state_and_bindings_from_ir(
+            r#"
+val zzeros = "zeros" : (%i) -> %bv
+val zlength = "length" : (%bv) -> %i
+val zwiden = "%i64->%i" : (%i64) -> %i
+val zmask : (%bool, %i) -> %i
+fn zmask(zok, zshift) {
+    jump zok goto 3;
+    return = zwiden(0);
+    goto 6;
+    zbits : %bv;
+    zbits = zzeros(zshift);
+    return = zlength(zbits);
+    end;
+}
+"#,
+        );
+        let mask = shared.symtab.lookup("zmask");
+        let tag = shared.symtab.intern("zsuccess");
+        let width = shared.symtab.intern("zwidth");
+        let program =
+            vec![Instr::Call(Loc::Id(RETURN), false, mask, vec![Exp::Id(tag), Exp::Id(width)], info()), Instr::End];
+        let mut inputs = None;
+        crate::smt::reset_test_mandatory_query_count();
+        let (paths, _, rejects) = paths_with_solver_state(
+            program,
+            &shared,
+            0,
+            ExecutionLimits::default().with_path_merging(true),
+            crate::memory::Memory::new(),
+            |frame, solver| {
+                let (choices, ok, payload) = merged_length(solver);
+                frame.vars_mut().insert(tag, UVal::Init(Val::Symbolic(ok)));
+                frame.vars_mut().insert(width, UVal::Init(Val::Symbolic(payload)));
+                inputs = Some(choices);
+            },
+            false,
+        );
+        let blocked = crate::smt::test_mandatory_query_count();
+        let (a, b, route) = inputs.unwrap();
+        let ctx = Context::new(Config::new());
+        for (sv39, sv48, initial) in [(true, true, 2u64), (true, false, 2), (false, true, 3), (false, false, 4)] {
+            for (r, expected) in [(10, 18), (11, initial.saturating_sub(3) * 9)] {
+                let mut witnessed = false;
+                for path in &paths {
+                    let mut solver = Solver::from_checkpoint(&ctx, path.checkpoint.clone());
+                    solver.assert_eq(F::Var(a), F::Bool(sv39));
+                    solver.assert_eq(F::Var(b), F::Bool(sv48));
+                    solver.assert_eq(F::Var(route), bits64(r, 8));
+                    let matches =
+                        F::Eq(Box::new(smt_value(&path.value, info()).unwrap()), Box::new(bits64(expected, 128)));
+                    assert!(solver.check_sat_with(&F::Not(Box::new(matches.clone())), info()).is_unsat().unwrap());
+                    witnessed |= solver.check_sat_with(&matches, info()).is_sat().unwrap();
+                }
+                assert!(witnessed, "{sv39}/{sv48}/{r}");
+            }
+        }
+        assert_eq!(blocked, 0, "{rejects}");
+        assert_eq!(Solver::<B64>::test_split_recomputations(), 0, "已拆分的操作数不应重新枚举整个前缀");
+    });
+}

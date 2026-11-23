@@ -696,3 +696,34 @@ fn slice_queries_mixed_single_and_joint_keep_the_previous_joint_results() {
     eprintln!("交替查询各轮的全量代入／化简 {counts:?}");
     assert!(counts[2].1 < 10 && counts[3].0 < 10 && counts[3].1 < 20);
 }
+
+#[test]
+fn finite_domain_operand_bound_is_local_to_the_retry_arm() {
+    configure_tastic(Tactic::Qfaufbv);
+    let mut config = Config::new();
+    config.solver_options.finite_domain_enumeration = true;
+    let context = Context::new(config);
+    let mut solver = Solver::<B64>::new(&context);
+    let site = SourceLoc::new(2, 1, 0, 1, 8);
+    let x = solver.declare_bitvector(8, site);
+    let y = solver.declare_bitvector(8, site);
+    solver.assert(Exp::Or(Box::new(equal(x, 1)), Box::new(Exp::Or(Box::new(equal(x, 2)), Box::new(equal(x, 3))))));
+    solver.with_deferred_region_queries(|solver| {
+        let root = solver.start_transaction();
+        let arm = solver.start_transaction_with_guard(Some(equal(x, 3)));
+        let singleton = vec![bits64(3, 8)];
+        solver.set_operand_bound(x, site, singleton.clone());
+        assert_eq!(solver.operand_bound(y, site), None);
+        assert_eq!(solver.operand_bound(x, SourceLoc::unknown()), None);
+        assert_eq!(solver.operand_bound(x, site), Some(FiniteDomain::Bounded(singleton)));
+        solver.add(Def::DefineConst(x, bits64(4, 8)));
+        assert_eq!(solver.operand_bound(x, site), None);
+        solver.rollback_transaction(arm);
+        solver.start_transaction_with_guard(Some(not(equal(x, 3))));
+        assert_eq!(solver.operand_bound(x, site), None);
+        solver.set_operand_bound(x, site, (1..3).map(|v| bits64(v, 8)).collect());
+        solver.commit_transaction();
+        assert_eq!(solver.operand_bound(x, site), None);
+        solver.rollback_transaction(root);
+    });
+}

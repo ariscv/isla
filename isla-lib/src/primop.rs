@@ -1372,7 +1372,7 @@ pub(crate) fn proven_symbolic_i128<B: BV>(
 ) -> Result<Option<i128>, ExecError> {
     let Some(width) = solver.length(sym) else { return Ok(None) };
     use crate::smt::FiniteDomain;
-    let domain = solver.finite_domain(sym);
+    let domain = solver.operand_bound(sym, info).unwrap_or_else(|| solver.finite_domain(sym));
     match &domain {
         FiniteDomain::Known(values) | FiniteDomain::Bounded(values) if values.len() == 1 => {
             if matches!(&domain, FiniteDomain::Bounded(_)) && !solver.region_queries_deferred() {

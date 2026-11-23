@@ -1312,7 +1312,7 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     let mut arms = [Vec::new(), Vec::new()];
     let mut ready = ReadyFragments::new(state);
     let guards = match &consumer {
-        Some(ConsumerRetry::Operand(guards)) => guards.clone(),
+        Some(ConsumerRetry::Operand { guards, .. }) => guards.clone(),
         _ => [Var(condition), Not(Box::new(Var(condition)))],
     };
     ready.extend([target, fallthrough].into_iter().zip(guards).enumerate());
@@ -1367,6 +1367,10 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             }
             let owner = solver.new_logical_arm(solver.current_logical_arm());
             let tx = solver.start_transaction_with_guard(Some(guard.clone()));
+            if let Some(ConsumerRetry::Operand { split: Some((sym, values)), .. }) = &consumer {
+                let bound = if side == 0 { &values[..1] } else { &values[1..] };
+                solver.set_operand_bound(*sym, info, bound.to_vec());
+            }
             let mut arm = branch_arm(&base, pc, guard, owner);
             if let Some(ConsumerRetry::Choice(guard)) = consumer {
                 cost::make_mut(&mut arm.local_state)
@@ -2283,7 +2287,7 @@ pub(super) fn concrete_consumer<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + 
     candidate.pending_retry_operand.get_or_insert((pc, Val::Unit));
     let condition = match &retry {
         ConsumerRetry::Choice(guard) => *guard,
-        ConsumerRetry::Operand([selected, _]) => solver.define_const(selected.clone(), info),
+        ConsumerRetry::Operand { guards: [selected, _], .. } => solver.define_const(selected.clone(), info),
     };
     let mut result = match execute_region(
         condition,

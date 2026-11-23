@@ -3,6 +3,7 @@ use super::*;
 use std::rc::Rc;
 
 type Formula = Exp<Sym>;
+type Evaluated<'a, 'ctx> = HashMap<*const Expression<'a, 'ctx>, Ast<'ctx>>;
 type Node<'a, 'ctx> = Rc<Expression<'a, 'ctx>>;
 
 enum Expression<'a, 'ctx> {
@@ -14,6 +15,7 @@ enum Expression<'a, 'ctx> {
 
 struct Input<'ctx> {
     symbol: Option<Sym>,
+    guard_symbol: Option<Sym>,
     anchor: Ast<'ctx>,
     choices: Vec<Formula>,
     free: bool,
@@ -40,6 +42,7 @@ impl<'a, 'ctx, B: BV> Graph<'a, '_, 'ctx, B> {
                 let index = self.inputs.len();
                 self.inputs.push(Input {
                     symbol: Some(*sym),
+                    guard_symbol: None,
                     anchor: self.solver.translate_exp(exp),
                     choices,
                     free: matches!(resolve(exp, self.prefix), Var(_)),
@@ -63,7 +66,14 @@ impl<'a, 'ctx, B: BV> Graph<'a, '_, 'ctx, B> {
                         let free =
                             self.prefix.bool_symbols().any(|sym| self.solver.decls[&sym].ast().z3_ast == anchor.z3_ast);
                         let index = self.inputs.len();
-                        self.inputs.push(Input { symbol: None, anchor, choices: vec![Bool(true), Bool(false)], free });
+                        let guard_symbol = if let Var(sym) = guard.as_ref() { Some(*sym) } else { None };
+                        self.inputs.push(Input {
+                            symbol: None,
+                            guard_symbol,
+                            anchor,
+                            choices: vec![Bool(true), Bool(false)],
+                            free,
+                        });
                         index
                     });
                     Rc::new(Expression::Input(index))
@@ -92,6 +102,39 @@ impl<'a, 'ctx, B: BV> Graph<'a, '_, 'ctx, B> {
             _ => return None,
         };
         Some(Rc::new(node))
+    }
+
+    // 两种投影共用同一棵按需展开的选择树。返回 false 表示调用方已提前结束遍历。
+    fn visit(
+        &self,
+        root: &Expression<'a, 'ctx>,
+        mut accept: impl FnMut(Ast<'ctx>, &[(usize, usize)], &[Option<Ast<'ctx>>], &Evaluated<'a, 'ctx>) -> bool,
+    ) -> bool {
+        let mut assignments = vec![None; self.inputs.len()];
+        let mut stack: Vec<(usize, usize)> = Vec::new();
+        loop {
+            let mut evaluated = HashMap::new();
+            match root.evaluate(&assignments, &mut evaluated) {
+                Err(index) => stack.push((index, 0)),
+                Ok(value) => {
+                    if !accept(value, &stack, &assignments, &evaluated) {
+                        return false;
+                    }
+                }
+            }
+            while let Some((index, next)) = stack.last_mut() {
+                if let Some(choice) = self.inputs[*index].choices.get(*next) {
+                    assignments[*index] = Some(self.solver.translate_exp(choice));
+                    *next += 1;
+                    break;
+                }
+                assignments[*index] = None;
+                stack.pop();
+            }
+            if stack.is_empty() {
+                return true;
+            }
+        }
     }
 }
 
@@ -154,6 +197,73 @@ impl<'ctx> Expression<'_, 'ctx> {
 }
 
 impl<'ctx, B: BV> Solver<'ctx, B> {
+    /// 按产生目标值的输入重算活动守卫。只要一组赋值尚未被排除，就保留该值。
+    pub(crate) fn refine_guarded_values(&self, target: Sym, values: &mut Vec<Formula>) {
+        if self.transaction_conditions.is_empty() {
+            return;
+        }
+        let Some(prefix) = PathConditions::new(self) else {
+            return;
+        };
+        let mut graph = Graph {
+            solver: self,
+            prefix: &prefix,
+            symbols: HashMap::new(),
+            guards: HashMap::new(),
+            inputs: Vec::new(),
+        };
+        let exp = Exp::Var(target);
+        let Some(root) = graph.build(&exp) else {
+            return;
+        };
+        let mut possible = vec![false; values.len()];
+        // 选择条件可以先由枚举值或算术表达式算出。保留本组合已求值的布尔符号，
+        // 返回标签使用同一条件时可直接复用，无需从枚举构造子再次推导。
+        let predicates: Vec<_> = graph
+            .symbols
+            .iter()
+            .filter_map(|(&sym, node)| {
+                let node = node.as_ref()?;
+                self.is_bool(sym).then_some((sym, Rc::as_ptr(node)))
+            })
+            .collect();
+        graph.visit(&root, |mut ast, stack, _, evaluated| {
+            let value = ast.finite_bits().expect("长度候选必须为位向量常量");
+            let Some(index) = values.iter().position(|v| v == &value) else {
+                return true;
+            };
+            if possible[index] {
+                return true;
+            }
+            let mut projected = HashMap::from([(target, Some(value))]);
+            for &(input, next) in stack {
+                let input = &graph.inputs[input];
+                if let Some(sym) = input.symbol.or(input.guard_symbol) {
+                    projected.insert(sym, Some(input.choices[next - 1].clone()));
+                }
+            }
+            for &(sym, node) in &predicates {
+                if let Some(value) = evaluated.get(&node) {
+                    let truth = value.clone().structural_bool().expect("已求值的布尔节点必须为常量");
+                    projected.insert(sym, Some(Exp::Bool(truth)));
+                }
+            }
+            possible[index] = !self.transaction_conditions.iter().rev().any(|guard| {
+                let reduced = guard
+                    .map_var(&mut |sym| {
+                        Ok::<_, std::convert::Infallible>(
+                            self.project_finite_definition(*sym, &prefix, &mut projected).unwrap_or(Exp::Var(*sym)),
+                        )
+                    })
+                    .unwrap();
+                self.translate_exp(&reduced).structural_bool() == Some(false)
+            });
+            !possible.iter().all(|&v| v)
+        });
+        let mut possible = possible.into_iter();
+        values.retain(|_| possible.next().unwrap());
+    }
+
     pub(super) fn combined_values(
         &self,
         prefix: &PathConditions<'_, B>,
@@ -176,111 +286,92 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             literals.insert(negative.z3_ast, (sym, false));
             negative_atoms.push(negative);
         }
-        let mut assignments = vec![None; graph.inputs.len()];
-        let mut stack: Vec<(usize, usize)> = Vec::new();
-        loop {
-            match root.evaluate(&assignments, &mut HashMap::new()) {
-                Err(index) => stack.push((index, 0)),
-                Ok(value) => {
-                    let mut projected = HashMap::new();
-                    let mut anchors = Vec::new();
-                    let mut values = Vec::new();
-                    let mut free_anchors = Vec::new();
-                    let mut free_values = Vec::new();
-                    let mut bindings = Vec::new();
-                    for &(index, next) in &stack {
-                        let input = &graph.inputs[index];
-                        let assigned = assignments[index].as_ref().expect("活跃的有限域分支必须已有赋值");
-                        if let Some(sym) = input.symbol {
-                            projected.insert(sym, Some(input.choices[next - 1].clone()));
-                        }
-                        anchors.push(input.anchor.z3_ast);
-                        values.push(assigned.z3_ast);
-                        if input.free {
-                            free_anchors.push(input.anchor.z3_ast);
-                            free_values.push(assigned.z3_ast);
-                        } else {
-                            bindings.push(input.anchor.mk_eq(assigned));
-                        }
-                    }
-                    let replacements: Vec<_> = anchors.iter().copied().zip(values.iter().copied()).collect();
-                    let free_replacements: Vec<_> =
-                        free_anchors.iter().copied().zip(free_values.iter().copied()).collect();
-                    let rewrites = &prefix.index.rewrites;
-                    let mut residual = Ast::mk_bool(self.ctx, true);
-                    let mut assignments_by_literal = HashMap::new();
-                    let mut exact = true;
-                    let mut reuse_witness = self.has_stashed_model() && bindings.is_empty();
-                    let mut possible = true;
-                    for (source, original) in
-                        facts.iter().map(|(exp, ast)| (Some(*exp), ast)).chain(bindings.iter().map(|ast| (None, ast)))
-                    {
-                        let (unchanged, truth, mut fact) = if source.is_some() {
-                            rewrites.narrow(&replacements, original, &anchors, &values)
-                        } else {
-                            rewrites.narrow(&free_replacements, original, &free_anchors, &free_values)
-                        };
-                        reuse_witness &= unchanged;
-                        if truth.is_none() {
-                            if let Some(source) = source.filter(|_| !projected.is_empty()) {
-                                let mut changed = false;
-                                let substituted = source
-                                    .map_var(&mut |sym| {
-                                        Ok::<_, std::convert::Infallible>(
-                                            self.project_finite_definition(*sym, prefix, &mut projected)
-                                                .inspect(|_| changed = true)
-                                                .unwrap_or(Exp::Var(*sym)),
-                                        )
-                                    })
-                                    .unwrap();
-                                if changed {
-                                    let mut other = self.translate_exp(&substituted).substitute_many(&anchors, &values);
-                                    if other.structural_bool().is_some() {
-                                        fact = other;
-                                        reuse_witness = false;
-                                    }
-                                }
+        graph.visit(&root, |value, stack, assignments, _| {
+            let mut projected = HashMap::new();
+            let mut anchors = Vec::new();
+            let mut values = Vec::new();
+            let mut free_anchors = Vec::new();
+            let mut free_values = Vec::new();
+            let mut bindings = Vec::new();
+            for &(index, next) in stack {
+                let input = &graph.inputs[index];
+                let assigned = assignments[index].as_ref().expect("活跃的有限域分支必须已有赋值");
+                if let Some(sym) = input.symbol {
+                    projected.insert(sym, Some(input.choices[next - 1].clone()));
+                }
+                anchors.push(input.anchor.z3_ast);
+                values.push(assigned.z3_ast);
+                if input.free {
+                    free_anchors.push(input.anchor.z3_ast);
+                    free_values.push(assigned.z3_ast);
+                } else {
+                    bindings.push(input.anchor.mk_eq(assigned));
+                }
+            }
+            let replacements: Vec<_> = anchors.iter().copied().zip(values.iter().copied()).collect();
+            let free_replacements: Vec<_> = free_anchors.iter().copied().zip(free_values.iter().copied()).collect();
+            let rewrites = &prefix.index.rewrites;
+            let mut residual = Ast::mk_bool(self.ctx, true);
+            let mut assignments_by_literal = HashMap::new();
+            let mut exact = true;
+            let mut reuse_witness = self.has_stashed_model() && bindings.is_empty();
+            let mut possible = true;
+            for (source, original) in
+                facts.iter().map(|(exp, ast)| (Some(*exp), ast)).chain(bindings.iter().map(|ast| (None, ast)))
+            {
+                let (unchanged, truth, mut fact) = if source.is_some() {
+                    rewrites.narrow(&replacements, original, &anchors, &values)
+                } else {
+                    rewrites.narrow(&free_replacements, original, &free_anchors, &free_values)
+                };
+                reuse_witness &= unchanged;
+                if truth.is_none() {
+                    if let Some(source) = source.filter(|_| !projected.is_empty()) {
+                        let mut changed = false;
+                        let substituted = source
+                            .map_var(&mut |sym| {
+                                Ok::<_, std::convert::Infallible>(
+                                    self.project_finite_definition(*sym, prefix, &mut projected)
+                                        .inspect(|_| changed = true)
+                                        .unwrap_or(Exp::Var(*sym)),
+                                )
+                            })
+                            .unwrap();
+                        if changed {
+                            let mut other = self.translate_exp(&substituted).substitute_many(&anchors, &values);
+                            if other.structural_bool().is_some() {
+                                fact = other;
+                                reuse_witness = false;
                             }
                         }
-                        let (truth, fact) = rewrites.simplified(fact);
-                        match truth {
-                            Some(true) => (),
-                            Some(false) => {
+                    }
+                }
+                let (truth, fact) = rewrites.simplified(fact);
+                match truth {
+                    Some(true) => (),
+                    Some(false) => {
+                        possible = false;
+                        break;
+                    }
+                    None => {
+                        if let Some(&(sym, positive)) = literals.get(&fact.z3_ast) {
+                            if assignments_by_literal.insert(sym, positive).is_some_and(|prev| prev != positive) {
                                 possible = false;
                                 break;
                             }
-                            None => {
-                                if let Some(&(sym, positive)) = literals.get(&fact.z3_ast) {
-                                    if assignments_by_literal.insert(sym, positive).is_some_and(|prev| prev != positive)
-                                    {
-                                        possible = false;
-                                        break;
-                                    }
-                                } else {
-                                    exact = false;
-                                }
-                                residual = residual.mk_and(&fact);
-                            }
+                        } else {
+                            exact = false;
                         }
-                    }
-                    if possible && residual.structural_bool() != Some(false) && !accept(value, exact || reuse_witness) {
-                        return Some(());
+                        residual = residual.mk_and(&fact);
                     }
                 }
             }
-            while let Some((index, next)) = stack.last_mut() {
-                if let Some(choice) = graph.inputs[*index].choices.get(*next) {
-                    assignments[*index] = Some(self.translate_exp(choice));
-                    *next += 1;
-                    break;
-                }
-                assignments[*index] = None;
-                stack.pop();
+            if possible && residual.structural_bool() != Some(false) && !accept(value, exact || reuse_witness) {
+                return false;
             }
-            if stack.is_empty() {
-                return Some(());
-            }
-        }
+            true
+        });
+        Some(())
     }
 }
 
