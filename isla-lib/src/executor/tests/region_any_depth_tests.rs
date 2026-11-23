@@ -71,7 +71,7 @@ fn run_in_partial_commit_process(test: &str, options: RegionOptions, run: impl F
 fn assert_record(paths: &[Path], function: Name, pc: usize, root: bool) {
     assert!(
         paths.iter().flat_map(|path| &path.records).any(|record| {
-            !record.dead
+            record.outcome == RegionRecordOutcome::Merged
                 && record.function == function
                 && record.branch_pc == pc
                 && record.parent_record.is_none() == root

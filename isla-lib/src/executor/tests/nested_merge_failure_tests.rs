@@ -101,7 +101,7 @@ pub(super) fn observe(
         records: merged
             .iter()
             .flat_map(|path| &path.records)
-            .filter(|record| !record.dead)
+            .filter(|record| record.outcome == RegionRecordOutcome::Merged)
             .map(|record| (record.function, record.branch_pc, record.parent_record.is_none()))
             .collect(),
         root_function: crate::zencode::decode(shared.symtab.to_str(TOP_LEVEL_LET)),
@@ -486,7 +486,10 @@ fn unknown_z3_nested_arm_keeps_root_and_survivor() {
         });
         assert_eq!(paths.len(), 1);
         assert!(matches!(paths[0].value, Val::Bool(false)));
-        assert!(paths[0].records.iter().any(|record| record.branch_pc == 0 && !record.dead));
+        assert!(paths[0]
+            .records
+            .iter()
+            .any(|record| record.branch_pc == 0 && record.outcome == RegionRecordOutcome::Merged));
         let diagnostics = shared.execution_stats.merge_json();
         assert_eq!(diagnostics["solver_timeout_dropped_paths"], 1);
         assert_eq!(diagnostics["failures"], 0);

@@ -168,7 +168,7 @@ fn diamond_case(
                         r.condition,
                         r.source_loc,
                         r.depth,
-                        r.dead,
+                        r.outcome,
                         values,
                         inputs,
                         &r.single_arm_reads,

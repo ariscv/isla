@@ -185,7 +185,10 @@ fn check_region(strategy: Strategy) {
         );
         assert!(merged.iter().all(|path| !fixture.after_throw_executed(path)));
         if let Some(path) = merged.first() {
-            assert!(path.records.iter().any(|record| record.branch_pc == 0 && !record.dead));
+            assert!(path
+                .records
+                .iter()
+                .any(|record| record.branch_pc == 0 && record.outcome == RegionRecordOutcome::Merged));
             if nested {
                 assert!(path.records.iter().any(|record| record.branch_pc == 3 && record.parent_record.is_some()));
             }

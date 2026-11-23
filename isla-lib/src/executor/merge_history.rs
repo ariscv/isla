@@ -82,7 +82,7 @@ impl<B> MergeHistory<B> {
         let mut index = self.len() - 1;
         loop {
             match current.0.items.as_ref().unwrap() {
-                Items::Leaf(records) => return !records[index].dead,
+                Items::Leaf(records) => return records[index].outcome == super::RegionRecordOutcome::Merged,
                 Items::Concat(left, _) if index < left.len() => current = left,
                 Items::Concat(left, right) => {
                     current = right;

@@ -179,7 +179,10 @@ pub(super) fn check_symmetric_top_merge(mut limits: ExecutionLimits) {
     }
     assert_eq!(merged.len(), 1, "顶层应在自己的出口合并八个片段：{}", shared.execution_stats.merge_json());
     let records = &merged[0].records;
-    assert!(records.iter().any(|r| r.branch_pc == top && !r.dead), "顶层必须实际完成合并");
+    assert!(
+        records.iter().any(|r| r.branch_pc == top && r.outcome == RegionRecordOutcome::Merged),
+        "顶层必须实际完成合并"
+    );
     assert!(!records.iter().any(|r| inner_pcs.contains(&r.branch_pc)), "内层失败不能生成成功记录");
 }
 

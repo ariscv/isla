@@ -245,6 +245,15 @@ fn union_vector_wrong_tag_keeps_success_and_error_input_domains() {
 
 #[test]
 fn union_vector_rejected_region_restores_frame_trace_and_solver() {
+    check_union_vector_delivery(Some(1));
+}
+
+#[test]
+fn union_vector_incompatible_returns_keep_both_guarded_updates() {
+    check_union_vector_delivery(None);
+}
+
+fn check_union_vector_delivery(fragment_limit: Option<usize>) {
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     let ctx = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&ctx);
@@ -289,7 +298,9 @@ fn union_vector_rejected_region_restores_frame_trace_and_solver() {
     solver.rollback_transaction(tx);
     assert!(symbols.iter().all(|sym| solver.scalar_sort(*sym).is_none()));
     assert_eq!(format!("{:?}", solver.trace().to_vec()), before);
-    let state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(true));
+    let mut limits = ExecutionLimits::default().with_path_merging(true);
+    limits.max_region_fragments = fragment_limit;
+    let state = TaskState::new().with_execution_limits(limits);
     let mut shared = empty_shared_state();
     shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
     let queue = Worker::new_lifo();
@@ -310,6 +321,48 @@ fn union_vector_rejected_region_restores_frame_trace_and_solver() {
         info(),
     )
     .unwrap();
+    if fragment_limit.is_none() {
+        assert!(matches!(outcome, region_merge::RegionResult::Merged));
+        let task = queue.pop().expect("两个不兼容组必须分别交付");
+        assert!(queue.is_empty());
+        let mut sibling = Solver::from_checkpoint(&ctx, task.checkpoint);
+        let (def, event) = task.fork_cond.expect("分开的组必须带有守卫");
+        sibling.add_event(event);
+        sibling.add(def);
+        let mut seen = Vec::new();
+        for (group, mut group_solver) in [(frame, solver), (unfreeze_frame(&task.frame), sibling)] {
+            assert_eq!(group.pc, 6);
+            assert_eq!(group_solver.transaction_depth(), 0);
+            let flag = match &group.vars()[&RETURN] {
+                UVal::Init(Val::Bool(false)) => false,
+                UVal::Init(Val::String(label)) if label == "different" => true,
+                ret => panic!("未知返回值 {ret:?}"),
+            };
+            assert!(group_solver
+                .check_sat_with(&S::Neq(Box::new(S::Var(condition)), Box::new(S::Bool(flag))), info())
+                .is_unsat()
+                .unwrap());
+            let UVal::Init(Val::Vector(values)) = &group.vars()[&vector] else { panic!("片段必须保留向量") };
+            for selected in 0..2 {
+                let tx = group_solver.start_transaction();
+                group_solver.assert_eq(S::Var(index), smt_i128(selected));
+                assert!(group_solver.check_sat(info()).is_sat().unwrap());
+                for (position, actual) in values.iter().enumerate() {
+                    let expected =
+                        if flag && position as i128 == selected { item(Val::Bits(B64::new(7, 8))) } else { empty() };
+                    for difference in differences(actual, &expected) {
+                        assert!(group_solver.check_sat_with(&difference, info()).is_unsat().unwrap());
+                    }
+                }
+                group_solver.rollback_transaction(tx);
+            }
+            seen.push(flag);
+        }
+        seen.sort();
+        assert_eq!(seen, [false, true]);
+        return;
+    }
+    assert!(queue.is_empty() && fraction.is_one(), "真正回滚后不能交付任务或修改份额");
     assert!(matches!(outcome, region_merge::RegionResult::Rejected));
     assert_eq!(shared.execution_stats.merge_json()["candidate_attempts"], 1);
     assert_eq!(solver.transaction_depth(), 0);

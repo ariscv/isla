@@ -64,7 +64,7 @@ fn fixture(duplicate: bool) -> (Vec<ResidentPath<B64>>, Vec<Sample>) {
             condition: guard,
             source_loc: SourceLoc::unknown(),
             depth: 0,
-            dead: false,
+            outcome: isla_lib::executor::RegionRecordOutcome::Merged,
             value_symbols: Default::default(),
             input_symbols: Default::default(),
             single_arm_reads: Vec::new().into(),

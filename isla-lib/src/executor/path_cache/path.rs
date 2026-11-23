@@ -5,6 +5,7 @@ use super::{
     value::Val,
     CheckpointData,
 };
+use crate::executor::RegionRecordOutcome;
 use crate::{bitvector::BV, ir::Name, smt::Accessor, source_loc::SourceLoc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -57,6 +58,10 @@ pub enum Arm {
     Root,
     Then,
     Else,
+    // 在已有枚举尾部追加投影角色，保持原记录的 JSON 和 bincode 布局。
+    ProjectedRoot,
+    ProjectedThen,
+    ProjectedElse,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GuardedRead<B> {
@@ -91,11 +96,14 @@ impl<B: Clone> From<crate::executor::RegionMergeRecord<B>> for Record<B> {
         Self {
             record_id: value.record_id.try_into().unwrap(),
             parent_record: value.parent_record.map(|i| i.try_into().unwrap()),
-            arm: match value.arm {
-                "root" => Arm::Root,
-                "then" => Arm::Then,
-                "else" => Arm::Else,
-                arm => panic!("缓存记录臂无效：{arm}"),
+            arm: match (value.arm, value.outcome == RegionRecordOutcome::Projected) {
+                ("root", false) => Arm::Root,
+                ("then", false) => Arm::Then,
+                ("else", false) => Arm::Else,
+                ("root", true) => Arm::ProjectedRoot,
+                ("then", true) => Arm::ProjectedThen,
+                ("else", true) => Arm::ProjectedElse,
+                (arm, _) => panic!("缓存记录臂无效：{arm}"),
             },
             function: value.function,
             branch_pc: value.branch_pc.try_into().unwrap(),
@@ -103,7 +111,7 @@ impl<B: Clone> From<crate::executor::RegionMergeRecord<B>> for Record<B> {
             condition: value.condition.id,
             source_loc: value.source_loc,
             depth: value.depth.try_into().unwrap(),
-            dead: value.dead,
+            dead: value.outcome == RegionRecordOutcome::Dead,
             value_symbols,
             input_symbols,
             single_arm_reads: value
@@ -128,13 +136,19 @@ impl<B: Clone> From<crate::executor::RegionMergeRecord<B>> for Record<B> {
 }
 impl<B> From<Record<B>> for crate::executor::RegionMergeRecord<B> {
     fn from(value: Record<B>) -> Self {
+        let outcome = match (&value.arm, value.dead) {
+            (Arm::ProjectedRoot | Arm::ProjectedThen | Arm::ProjectedElse, false) => RegionRecordOutcome::Projected,
+            (Arm::ProjectedRoot | Arm::ProjectedThen | Arm::ProjectedElse, true) => panic!("死亡记录不能是投影片段"),
+            (_, true) => RegionRecordOutcome::Dead,
+            (_, false) => RegionRecordOutcome::Merged,
+        };
         Self {
             record_id: value.record_id.try_into().expect("缓存记录编号越界"),
             parent_record: value.parent_record.map(|i| i.try_into().expect("缓存父记录编号越界")),
             arm: match value.arm {
-                Arm::Root => "root",
-                Arm::Then => "then",
-                Arm::Else => "else",
+                Arm::Root | Arm::ProjectedRoot => "root",
+                Arm::Then | Arm::ProjectedThen => "then",
+                Arm::Else | Arm::ProjectedElse => "else",
             },
             function: value.function,
             branch_pc: value.branch_pc.try_into().unwrap(),
@@ -142,7 +156,7 @@ impl<B> From<Record<B>> for crate::executor::RegionMergeRecord<B> {
             condition: crate::smt::Sym::from_u32(value.condition),
             source_loc: value.source_loc,
             depth: value.depth.try_into().unwrap(),
-            dead: value.dead,
+            outcome,
             value_symbols: std::sync::Arc::new(
                 value.value_symbols.into_iter().map(crate::smt::Sym::from_u32).collect(),
             ),

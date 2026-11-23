@@ -73,7 +73,7 @@ mod region_merge;
 mod region_summary;
 pub mod samples;
 pub use merge_history::MergeHistory;
-pub use merge_record::{GuardedRegisterRead, MergeEnumeration, RegionMergeRecord};
+pub use merge_record::{GuardedRegisterRead, MergeEnumeration, RegionMergeRecord, RegionRecordOutcome};
 pub use region_merge::validate_force_regions;
 mod speculation;
 pub mod stats;
@@ -11105,8 +11105,13 @@ mod tests {
             for reg in [left, right] {
                 frame.regs_mut().insert(reg, false, UVal::Init(Val::Bool(true)));
             }
+            // 此处验证只能交付单个结果时的拒绝与回滚。
+            let mut limits = ExecutionLimits::default();
+            limits.ordered_events = true;
+            limits.max_region_fragments = Some(1);
+            let handler = ExecutionLimitHandler::new(&limits);
             assert_eq!(
-                merge_region_for_test(cond, 4, &mut frame, &shared, &mut solver, info(), None, None).unwrap(),
+                merge_region_for_test(cond, 4, &mut frame, &shared, &mut solver, info(), Some(&handler), None).unwrap(),
                 None
             );
             assert!(
@@ -11342,7 +11347,13 @@ mod tests {
             ]);
             frame.regs_mut().insert(left, false, UVal::Init(Val::Bits(B64::new(0, 8))));
             frame.regs_mut().insert(right, false, UVal::Init(Val::Bits(B64::new(0, 8))));
-            let merged = merge_region_for_test(cond, 4, &mut frame, &shared, &mut solver, info(), None, None).unwrap();
+            // 此处验证只能交付单个结果时的拒绝与回滚。
+            let mut limits = ExecutionLimits::default();
+            limits.ordered_events = true;
+            limits.max_region_fragments = Some(1);
+            let handler = ExecutionLimitHandler::new(&limits);
+            let merged =
+                merge_region_for_test(cond, 4, &mut frame, &shared, &mut solver, info(), Some(&handler), None).unwrap();
             let events = solver.trace().to_vec();
             let writes: Vec<_> = events
                 .iter()
@@ -14151,6 +14162,10 @@ fn zcaller(za, zb) {
                 }
                 if reason == Interrupt {
                     state.add_interrupt(TaskInterrupt::new(1, reg, B64::new(1, 2), HashMap::new()));
+                }
+                if reason == SymbolicJump {
+                    // 即使允许普通区域交付多组，显式推演也必须在分叉前拒绝。
+                    state = state.with_execution_limits(ExecutionLimits::default().with_path_merging(true));
                 }
                 if matches!(reason, LimitSampling | LimitTruncation) {
                     let mut limits = ExecutionLimits::default().with_max_path_depth(0);

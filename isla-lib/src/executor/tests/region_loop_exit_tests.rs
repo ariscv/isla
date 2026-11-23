@@ -262,7 +262,10 @@ fn region_loop_exit_nested_budget_returns_both_frontiers_to_parent() {
                 "{depth} 层 {strategy:?}：父层必须继续汇合退出与继续片段，实际 {}",
                 stats::merge_timing::summary_for_test()["outcomes"],
             );
-            assert!(merged[0].records.iter().any(|record| record.function == TOP_LEVEL_LET && !record.dead));
+            assert!(merged[0]
+                .records
+                .iter()
+                .any(|record| record.function == TOP_LEVEL_LET && record.outcome == RegionRecordOutcome::Merged));
             stats::merge_diagnostics::configure("summary").unwrap();
             let replayed = run(true, strategy, true);
             check_returns(&replayed);

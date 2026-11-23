@@ -40,7 +40,7 @@ fn guarded_memory_write_roundtrips_in_both_cache_encodings_and_judge() {
         condition: guard,
         source_loc: loc,
         depth: 0,
-        dead: false,
+        outcome: isla_lib::executor::RegionRecordOutcome::Merged,
         value_symbols: Default::default(),
         input_symbols: Default::default(),
         single_arm_reads: Vec::new().into(),

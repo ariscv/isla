@@ -6,7 +6,7 @@ use isla_lib::{
     executor::{
         path_cache::{self as cache, CachedPath, Facts, Segment, TraceReader, TraceWriter},
         samples::{fast::FastFacts, SamplePath},
-        GuardedRegisterRead, RegionMergeRecord,
+        GuardedRegisterRead, RegionMergeRecord, RegionRecordOutcome,
     },
     ir::{regions::RegionPoint, BitsSegment, SharedState, Symtab, Val},
     smt::{
@@ -125,7 +125,7 @@ fn fixture() -> (SharedState<'static, B64>, Vec<Path>) {
             condition,
             source_loc: loc,
             depth: usize::from(parent.is_some()),
-            dead: arm == "else",
+            outcome: if arm == "else" { RegionRecordOutcome::Dead } else { RegionRecordOutcome::Merged },
             value_symbols: Arc::new(HashSet::from([result])),
             input_symbols: Arc::new(HashSet::from([input, condition])),
             single_arm_reads: if parent.is_none() {
@@ -390,7 +390,7 @@ fn 反向预期文件重建核心字段及_dag_一致() {
                     x.condition,
                     x.source_loc,
                     x.depth,
-                    x.dead
+                    x.outcome
                 ),
                 (
                     y.record_id,
@@ -402,7 +402,7 @@ fn 反向预期文件重建核心字段及_dag_一致() {
                     y.condition,
                     y.source_loc,
                     y.depth,
-                    y.dead
+                    y.outcome
                 )
             );
             assert_eq!((&x.value_symbols, &x.input_symbols), (&y.value_symbols, &y.input_symbols));

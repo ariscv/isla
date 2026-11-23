@@ -741,7 +741,11 @@ impl<'a, B: BV> PathValidator<'a, B> {
                 assert!(seen.insert(id), "缓存父记录成环");
                 next = records.get(&id).expect("缓存父记录不存在").parent_record;
             }
-            assert_eq!(record.parent_record.is_none(), matches!(record.arm, Arm::Root), "缓存记录臂与父记录不一致");
+            assert_eq!(
+                record.parent_record.is_none(),
+                matches!(record.arm, Arm::Root | Arm::ProjectedRoot),
+                "缓存记录臂与父记录不一致"
+            );
             for s in record.value_symbols.iter().chain(&record.input_symbols) {
                 validator.constant(*s);
             }

@@ -32,6 +32,15 @@ pub struct GuardedRegisterRead<B> {
     pub guard: smtlib::Exp<Sym>,
 }
 
+/// 区分通过的汇合、两臂均死亡，以及未合并片段的守卫与事件投影。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegionRecordOutcome {
+    Merged,
+    Dead,
+    Projected,
+}
+
 #[derive(Clone, Debug)]
 pub struct RegionMergeRecord<B> {
     pub record_id: usize,
@@ -44,8 +53,7 @@ pub struct RegionMergeRecord<B> {
     pub condition: Sym,
     pub source_loc: SourceLoc,
     pub depth: usize,
-    /// 两臂都死亡时没有存活合并值，但剪枝本身仍是一次成功提交。
-    pub dead: bool,
+    pub outcome: RegionRecordOutcome,
     /// 合并值中的符号；最外层提交后展开 DefineConst 依赖，得到自由输入。
     pub value_symbols: Arc<HashSet<Sym>>,
     /// 仅输出开启时计算；关闭时保留空集，避免扫描完整执行迹。
@@ -72,7 +80,7 @@ impl<B> RegionMergeRecord<B> {
             condition: remap.get(self.condition),
             source_loc: self.source_loc,
             depth: self.depth,
-            dead: self.dead,
+            outcome: self.outcome,
             value_symbols: Arc::new(self.value_symbols.iter().map(|symbol| remap.get(*symbol)).collect()),
             input_symbols: Arc::new(self.input_symbols.iter().map(|symbol| remap.get(*symbol)).collect()),
             single_arm_reads: Arc::from(
@@ -106,7 +114,7 @@ impl<B> RegionMergeRecord<B> {
             && self.condition == other.condition
             && self.source_loc == other.source_loc
             && self.depth == other.depth
-            && self.dead == other.dead
+            && self.outcome == other.outcome
             && Arc::ptr_eq(&self.value_symbols, &other.value_symbols)
             && Arc::ptr_eq(&self.input_symbols, &other.input_symbols)
             && Arc::ptr_eq(&self.single_arm_reads, &other.single_arm_reads)
@@ -294,7 +302,7 @@ fn emit_records<B: BV>(records: &[RegionMergeRecord<B>], task_id: TaskId, shared
             "function":zencode::decode(shared.symtab.to_str(record.function)), "branch_pc":record.branch_pc, "join":join,
             "source_loc":record.source_loc, "location":record.source_loc.location_string(shared.symtab.files()),
             "condition":symbol_json(record.condition, &smtlib::Ty::Bool), "input_symbols":inputs,
-            "single_arm_reads":reads, "memory_reads":memory_reads, "depth":record.depth, "outcome":if record.dead { "dead" } else { "merged" }});
+            "single_arm_reads":reads, "memory_reads":memory_reads, "depth":record.depth, "outcome":record.outcome});
         let mut line = serde_json::to_vec(&value).expect("合并记录必须可序列化");
         line.push(b'\n');
         output.lock().unwrap().write_all(&line).expect("写入 ISLA_MERGE_RECORDS 失败");

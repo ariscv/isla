@@ -625,6 +625,66 @@ fn check_group_register_reads(repeated: bool, omit_one: bool) {
     assert!(observed.iter().all(|(_, counts)| *counts == expected), "分叉 {expected:?}，分组 {observed:?}");
 }
 
+#[test]
+fn incompatible_register_orders_keep_each_paths_original_events() {
+    for write in [false, true] {
+        let mut shared = empty_shared_state();
+        let a = shared.symtab.intern("zordered_a");
+        let b = shared.symtab.intern("zordered_b");
+        let access = |reg| {
+            if write {
+                Instr::Copy(Loc::Id(reg), Exp::Bool(true), info())
+            } else {
+                Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), info())
+            }
+        };
+        let program = vec![
+            Instr::Jump(input(0), 5, info()),
+            access(a),
+            access(b),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
+            Instr::Goto(8),
+            access(b),
+            access(a),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+            Instr::End,
+        ];
+        let run = |enabled| {
+            let mut limits = ExecutionLimits::default().with_path_merging(enabled);
+            limits.ordered_events = true;
+            paths_with_state(program.clone(), &shared, 1, limits, crate::memory::Memory::new(), |frame| {
+                for reg in [a, b] {
+                    frame.regs_mut().insert(reg, false, UVal::Init(Val::Bool(false)));
+                }
+            })
+        };
+        let plain = run(false);
+        let groups = run(true);
+        assert_eq!(equivalent_paths(&plain, &groups, 1, true), (2, 2));
+        equivalent_register_paths(&plain, &groups, 1);
+        for path in &groups {
+            assert!(path.records.iter().any(|r| r.branch_pc == 0 && r.outcome == RegionRecordOutcome::Projected));
+        }
+        for path in plain.iter().chain(&groups) {
+            let expected = match path.value {
+                Val::Bool(false) => [a, b],
+                Val::Bool(true) => [b, a],
+                _ => panic!("每个组必须保留独立返回值"),
+            };
+            let events: Vec<_> = path
+                .events
+                .iter()
+                .filter_map(|e| match e {
+                    Event::ReadReg(reg, _, _) if !write => Some(*reg),
+                    Event::WriteReg(reg, _, _) if write => Some(*reg),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(events, expected);
+        }
+    }
+}
+
 /// 每条分叉路径都与覆盖它的合并路径比较完整最终寄存器映射，结构字段递归展开。
 pub(super) fn equivalent_register_paths(forked: &[Path], merged: &[Path], inputs: usize) {
     use smtlib::Exp::*;
@@ -3224,7 +3284,7 @@ fn merge_enumeration_coupled_slices_caps_and_failure_result() {
         condition,
         source_loc: info(),
         depth: 1,
-        dead: false,
+        outcome: crate::executor::RegionRecordOutcome::Merged,
         value_symbols: HashSet::new().into(),
         input_symbols: HashSet::new().into(),
         single_arm_reads: vec![].into(),
@@ -3337,7 +3397,7 @@ fn merge_enumeration_extract_of_derived_symbol() {
         condition: guard,
         source_loc: info(),
         depth: 1,
-        dead: false,
+        outcome: crate::executor::RegionRecordOutcome::Merged,
         value_symbols: HashSet::new().into(),
         input_symbols: HashSet::new().into(),
         single_arm_reads: vec![].into(),
@@ -3386,7 +3446,7 @@ fn merge_enumeration_f5_深守卫与记录倒序不依赖保存点栈深度() {
             condition: guard,
             source_loc: info(),
             depth: id + 1,
-            dead: false,
+            outcome: crate::executor::RegionRecordOutcome::Merged,
             value_symbols: HashSet::new().into(),
             input_symbols: HashSet::new().into(),
             single_arm_reads: vec![].into(),
@@ -3437,7 +3497,7 @@ fn merge_enumeration_f5_单路径16384类且每类只消费一次模型() {
             condition,
             source_loc: info(),
             depth: 1,
-            dead: false,
+            outcome: crate::executor::RegionRecordOutcome::Merged,
             value_symbols: HashSet::new().into(),
             input_symbols: HashSet::new().into(),
             single_arm_reads: vec![].into(),
@@ -3494,7 +3554,7 @@ fn merge_enumeration_多分区耦合守卫规范编号与计数() {
             condition,
             source_loc: info(),
             depth: 1,
-            dead: false,
+            outcome: crate::executor::RegionRecordOutcome::Merged,
             value_symbols: HashSet::new().into(),
             input_symbols: HashSet::new().into(),
             single_arm_reads: vec![].into(),
@@ -4573,7 +4633,7 @@ fn merge_enumeration_class_cap_1_完整代表跨线程逐字节一致且取规�
                 condition,
                 source_loc: info(),
                 depth: 1,
-                dead: false,
+                outcome: crate::executor::RegionRecordOutcome::Merged,
                 value_symbols: HashSet::new().into(),
                 input_symbols: HashSet::new().into(),
                 single_arm_reads: vec![].into(),
@@ -4682,7 +4742,7 @@ fn merge_enumeration_stride_只消费dfs序号倍数且预算不变() {
             condition,
             source_loc: info(),
             depth: 1,
-            dead: false,
+            outcome: crate::executor::RegionRecordOutcome::Merged,
             value_symbols: HashSet::new().into(),
             input_symbols: HashSet::new().into(),
             single_arm_reads: vec![].into(),
@@ -4873,7 +4933,7 @@ fn merge_enumeration_budget_256组合及多线程守卫规范编号() {
         condition,
         source_loc: info(),
         depth: 1,
-        dead: false,
+        outcome: crate::executor::RegionRecordOutcome::Merged,
         value_symbols: HashSet::new().into(),
         input_symbols: HashSet::new().into(),
         single_arm_reads: vec![].into(),
@@ -4955,7 +5015,7 @@ fn merge_enumeration_budget_路径上限恰好落在类末仍标记后续类截�
         condition,
         source_loc: info(),
         depth: 1,
-        dead: false,
+        outcome: crate::executor::RegionRecordOutcome::Merged,
         value_symbols: HashSet::new().into(),
         input_symbols: HashSet::new().into(),
         single_arm_reads: vec![].into(),
@@ -5161,20 +5221,23 @@ fn merge_diagnostics_execution_is_observational() {
         Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
         Instr::End,
     ];
-    let run_nested = || {
-        paths_with_state(nested.clone(), &shared, 2, limits.clone(), crate::memory::Memory::new(), |frame| {
+    let run_nested = |limits| {
+        paths_with_state(nested.clone(), &shared, 2, limits, crate::memory::Memory::new(), |frame| {
             frame.vars_mut().insert(slot, UVal::Uninit(&Ty::I64));
             frame.vars_mut().insert(RETURN, UVal::Init(Val::Bool(false)));
         })
     };
     diag::configure("off").unwrap();
-    let without_diagnostics = run_nested();
+    let ordinary = run_nested(limits.clone().with_path_merging(false));
+    let without_diagnostics = run_nested(limits.clone());
     diag::configure("detail").unwrap();
-    let result = run_nested();
+    let result = run_nested(limits.clone());
     let diagnostics = diag::summary_for_test();
     assert!(diagnostics["differences"]["local_join_rejected"].as_u64().unwrap_or(0) > 0);
     assert_eq!(diagnostics["propagated"], 0, "局部拒绝不应记作祖先的传播原因");
-    assert_eq!(equivalent_paths(&without_diagnostics, &result, 2, true), (2, 2));
+    // 内层汇合被局部拒绝后，两个片段的槽值在返回处已死、出口状态等价，外层汇合按最少路径数合成一条。
+    assert_eq!(equivalent_paths(&ordinary, &result, 2, true), (3, 1));
+    assert_eq!(equivalent_paths(&without_diagnostics, &result, 2, true), (1, 1));
     diag::configure("detail").unwrap();
     shared.function_regions.lock().unwrap().clear();
     shared.registers.insert(slot, Ty::I64);

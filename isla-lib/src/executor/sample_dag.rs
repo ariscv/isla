@@ -146,7 +146,11 @@ impl<B: BV> SamplePath<B> {
         let guards=order.iter().enumerate().map(|(coordinate,i)| {
             let r=&records[*i];
             let active=context(r,&by_id,&mut visiting,&mut contexts);
-            json!({"coordinate":coordinate,"record_id":r.record_id,"parent_coordinate":r.parent_record.map(|p|coordinates[&p]),"arm":r.arm,"condition":expression(&Exp::Var(r.condition)),"active":expression(&active),"canonical":expression(&Exp::And(Box::new(active),Box::new(Exp::Var(r.condition)))),"function":shared.name(r.function),"branch_pc":r.branch_pc,"dead":r.dead})
+            let mut guard = json!({"coordinate":coordinate,"record_id":r.record_id,"parent_coordinate":r.parent_record.map(|p|coordinates[&p]),"arm":r.arm,"condition":expression(&Exp::Var(r.condition)),"active":expression(&active),"canonical":expression(&Exp::And(Box::new(active),Box::new(Exp::Var(r.condition)))),"function":shared.name(r.function),"branch_pc":r.branch_pc,"dead":r.outcome == crate::executor::RegionRecordOutcome::Dead});
+            if r.outcome == crate::executor::RegionRecordOutcome::Projected {
+                guard["outcome"] = json!(r.outcome);
+            }
+            guard
         }).collect::<Vec<_>>();
         let memory=self.memory.iter().enumerate().map(|(i,event)| {
             let (kind,address,data,count,commit,tag)=match event {

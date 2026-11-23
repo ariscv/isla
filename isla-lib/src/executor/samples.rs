@@ -1121,7 +1121,7 @@ mod tests {
             condition,
             source_loc: SourceLoc::unknown(),
             depth: 1,
-            dead: false,
+            outcome: crate::executor::RegionRecordOutcome::Merged,
             value_symbols: Default::default(),
             input_symbols: Default::default(),
             single_arm_reads: Vec::new().into(),

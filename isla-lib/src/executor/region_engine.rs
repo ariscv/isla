@@ -413,7 +413,7 @@ pub(super) fn record_projected_arrival<B: BV>(
     let id = super::region_merge::next_region_record();
     let prefix = base.region_merge_records.len();
     attach_child_records(fragment, prefix, id, "then");
-    record_single_arrival(fragment, base, region, id, selector, info);
+    record_single_arrival(fragment, base, region, id, selector, info, RegionRecordOutcome::Projected);
     fragment.region_merge_records.mark_closed(prefix);
     cost::make_mut(&mut fragment.local_state).speculative_access.as_mut().unwrap().guard =
         Some(smtlib::Exp::Var(selector));
@@ -430,6 +430,7 @@ fn record_single_arrival<B: BV>(
     record_id: usize,
     condition: Sym,
     info: SourceLoc,
+    outcome: RegionRecordOutcome,
 ) {
     let access = arm.local_state.speculative_access.as_ref().unwrap();
     let single_arm_reads: Vec<_> = access
@@ -454,7 +455,7 @@ fn record_single_arrival<B: BV>(
         condition,
         source_loc: info,
         depth: base.region_execution.as_ref().unwrap().depth,
-        dead: false,
+        outcome,
         value_symbols: HashSet::from([condition]).into(),
         input_symbols: HashSet::new().into(),
         single_arm_reads: single_arm_reads.into(),
@@ -523,7 +524,7 @@ pub(super) fn finish_prepared_region<'ir, B: BV>(
                 condition,
                 source_loc: info,
                 depth,
-                dead: true,
+                outcome: RegionRecordOutcome::Dead,
                 value_symbols: HashSet::from([condition]).into(),
                 input_symbols: HashSet::new().into(),
                 single_arm_reads: Vec::new().into(),
@@ -533,7 +534,7 @@ pub(super) fn finish_prepared_region<'ir, B: BV>(
             return Ok(RegionResult::Dead);
         }
         (Some(mut arm), None) | (None, Some(mut arm)) => {
-            record_single_arrival(&mut arm, base, region, record_id, condition, info);
+            record_single_arrival(&mut arm, base, region, record_id, condition, info, RegionRecordOutcome::Merged);
             arm
         }
         (Some(left), Some(right)) => match prepared {
@@ -1238,7 +1239,7 @@ fn assemble_state<'ir, B: BV>(
         condition,
         source_loc: info,
         depth: base.region_execution.as_ref().unwrap().depth,
-        dead: false,
+        outcome: RegionRecordOutcome::Merged,
         value_symbols: HashSet::new().into(),
         input_symbols: HashSet::new().into(),
         single_arm_reads: single_arm_reads.into(),

@@ -11,13 +11,37 @@ pub(super) fn record(id: usize) -> RegionMergeRecord<B64> {
         condition: Sym::from_u32(id as u32),
         source_loc: info(),
         depth: 1,
-        dead: false,
+        outcome: crate::executor::RegionRecordOutcome::Merged,
         value_symbols: Default::default(),
         input_symbols: Default::default(),
         single_arm_reads: Default::default(),
         memory_reads: Default::default(),
     }
 }
+#[test]
+fn projected_guard_survives_cache_without_certifying_a_prefix() {
+    type CachedRecord = crate::executor::path_cache::Record<B64>;
+    for arm in ["root", "then", "else"] {
+        let mut projected = record(1);
+        projected.outcome = RegionRecordOutcome::Projected;
+        projected.arm = arm;
+        projected.parent_record = (arm != "root").then_some(0);
+        let cached = CachedRecord::from(projected);
+        for restored in [
+            serde_json::from_slice::<CachedRecord>(&serde_json::to_vec(&cached).unwrap()).unwrap(),
+            bincode::deserialize::<CachedRecord>(&bincode::serialize(&cached).unwrap()).unwrap(),
+        ] {
+            let restored = RegionMergeRecord::from(restored);
+            assert_eq!(restored.outcome, RegionRecordOutcome::Projected);
+            assert_eq!(restored.arm, arm);
+            let mut history = MergeHistory::default();
+            history.push(restored);
+            history.mark_closed(0);
+            assert!(!history.has_live_closed_tail_since(0), "发布片段不得计为已完成的子合并");
+        }
+    }
+}
+
 #[test]
 fn shared_history_frame_clone_and_rollback() {
     let mut frame = make_frame(vec![Instr::End]);

@@ -11,7 +11,11 @@ fn assert_projected_fragments(paths: &[Path], branch_pc: usize) {
         let root = path
             .records
             .iter()
-            .find(|record| record.branch_pc == branch_pc && record.parent_record.is_none() && !record.dead)
+            .find(|record| {
+                record.branch_pc == branch_pc
+                    && record.parent_record.is_none()
+                    && record.outcome == RegionRecordOutcome::Projected
+            })
             .expect("未合并的出口片段应保留自己的根投影记录");
         assert!(recorded.insert(root.record_id), "不同出口片段不得共用根投影记录");
         let mut solver = Solver::from_checkpoint(&context, path.checkpoint.clone());

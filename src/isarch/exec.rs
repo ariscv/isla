@@ -3249,7 +3249,7 @@ mod tests {
             condition: guard,
             source_loc: loc,
             depth: 0,
-            dead: false,
+            outcome: isla_lib::executor::RegionRecordOutcome::Merged,
             value_symbols: HashSet::new().into(),
             input_symbols: HashSet::new().into(),
             single_arm_reads: vec![].into(),

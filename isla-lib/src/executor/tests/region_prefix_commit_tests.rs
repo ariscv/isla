@@ -12,7 +12,7 @@ fn prefix_remembers_a_live_merge_before_later_dead_or_unclosed_records() {
         rejection: None,
     };
     let mut dead = record(1);
-    dead.dead = true;
+    dead.outcome = RegionRecordOutcome::Dead;
     history.push(dead.clone());
     history.mark_closed(0);
     cut.remember_live_merge(&history);
