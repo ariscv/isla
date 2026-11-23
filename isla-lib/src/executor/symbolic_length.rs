@@ -537,11 +537,17 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
                 use crate::primop_util::length_bits;
                 match (op, index, operands) {
                     ("zeros" | "ones", _, _) => {
-                        // 位宽定义本身须保证自然数范围，独立于待认证的前缀。
+                        // 延后区域的消费者按互补守卫拆分；RequireWithin 还会逐个检查
+                        // 所有候选的表示范围。其余执行方式维持定义级的范围证明。
                         let width = solver.length(sym).expect("位宽参数必须为位向量");
                         let max = if width > 32 { u64::from(u32::MAX) } else { (1u64 << (width - 1)) - 1 };
                         let safe = Bvule(Box::new(Var(sym)), Box::new(smtlib::bits64(max, width)));
-                        (solver.structural_bool(&safe) == Some(true)).then_some(0..=i128::from(max))
+                        let deferred_consumer = solver.region_queries_deferred()
+                            && frame.region_execution.is_some()
+                            && consumer.is_some()
+                            && task_state.execution_limits.as_ref().is_some_and(|limits| limits.merge_concrete_values);
+                        (deferred_consumer || solver.structural_bool(&safe) == Some(true))
+                            .then_some(0..=i128::from(max))
                     }
                     ("slice_internal", _, _) => Some(0..=i128::from(u32::MAX)),
                     ("vector_access" | "vector_update", 1, [Val::Vector(elements), ..]) => {
