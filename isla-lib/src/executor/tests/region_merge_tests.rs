@@ -5118,20 +5118,23 @@ fn merge_diagnostics_execution_is_observational() {
         Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
         Instr::End,
     ];
-    let run_nested = || {
+    let run_nested = |initial| {
         paths_with_state(nested.clone(), &shared, 2, limits.clone(), crate::memory::Memory::new(), |frame| {
-            frame.vars_mut().insert(slot, UVal::Uninit(&Ty::I64));
+            frame.vars_mut().insert(slot, initial);
             frame.vars_mut().insert(RETURN, UVal::Init(Val::Bool(false)));
         })
     };
-    diag::configure("off").unwrap();
-    let without_diagnostics = run_nested();
-    diag::configure("detail").unwrap();
-    let result = run_nested();
-    let diagnostics = diag::summary_for_test();
-    assert!(diagnostics["differences"]["local_join_rejected"].as_u64().unwrap_or(0) > 0);
-    assert_eq!(diagnostics["propagated"], 0, "局部拒绝不应记作祖先的传播原因");
-    assert_eq!(equivalent_paths(&without_diagnostics, &result, 2, true), (2, 2));
+    // 内层的 0 和 1 必须拒绝直接汇合。在外层，未初始化的 I64 可提供符号值，具体的 0 则只可与 0 汇合。
+    for (initial, expected) in [(UVal::Uninit(&Ty::I64), (1, 1)), (UVal::Init(Val::I64(0)), (2, 2))] {
+        diag::configure("off").unwrap();
+        let without_diagnostics = run_nested(initial.clone());
+        diag::configure("detail").unwrap();
+        let result = run_nested(initial);
+        let diagnostics = diag::summary_for_test();
+        assert!(diagnostics["differences"]["local_join_rejected"].as_u64().unwrap_or(0) > 0);
+        assert_eq!(diagnostics["propagated"], 0, "局部拒绝不应记作祖先的传播原因");
+        assert_eq!(equivalent_paths(&without_diagnostics, &result, 2, true), expected);
+    }
     diag::configure("detail").unwrap();
     shared.function_regions.lock().unwrap().clear();
     shared.registers.insert(slot, Ty::I64);

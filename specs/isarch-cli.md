@@ -543,7 +543,7 @@ progress = true
 
 区域拒绝的 `reason` 包括 `SpeculativeRejectReason::UnknownFiniteDomain`（有限候选不足）、`SpeculativeRejectReason::UnknownDeferredMode`（延后或无 SMT 模式限制）及 `SpeculativeRejectReason::PathTimeout`（路径墙钟到限）。Z3 查询失败细分为 `SpeculativeRejectReason::Z3Timeout`（超时或中断）、`SpeculativeRejectReason::Z3ResourceExhausted`（资源限额耗尽）和 `SpeculativeRejectReason::UnknownZ3`（Z3 返回 UNDEF，且没有上述控制原因）。当根出口已证 Unsat 且需要回滚时记 `SpeculativeRejectReason::ExitUnsat`。自动合并撤销失败的尝试，在普通分叉上执行。路径策略只在结果可归属单条探索路径或执行最终到限时生效。样本绑定和验收的错误继续交给各自调用方。
 
-区域统计的 `failure_reasons` 和 `reason_counts`、运行摘要的 `failure-reasons` 及诊断的 `reason` 使用 `SpeculativeRejectReason::变体名`。详细区域诊断在 `first_indeterminate` 字段和 `region_first_indeterminate_summary` 中报告首次未完成判定的位置及原因。错误详情使用 `SmtError::变体名`，例如 `SmtError::Z3Timeout` 或 `SmtError::Z3Unknown`，Z3 原始原因仍在 `reason_unknown`。已保存的缓存摘要读回时保留原字符串。
+区域统计的 `failure_reasons`、运行摘要的 `failure-reasons` 及诊断的 `reason` 使用 `SpeculativeRejectReason::变体名`。详细区域诊断在 `first_indeterminate` 字段和 `region_first_indeterminate_summary` 中报告首次未完成判定的位置及原因。错误详情使用相应的 `SmtError` 变体名，例如 `SmtError::Z3Unknown`，结构化错误详情也在 `cause.reason` 写入这个完整名称，Z3 原始原因仍在 `reason_unknown`。已保存的缓存摘要读回时保留原字符串。
 
 嵌套区域的五个开关各对应一类失败，控制是否保留外层区域，并把内层分叉交回外层继续。以下示例只启用有限域一类，五项缺省均为 false。
 

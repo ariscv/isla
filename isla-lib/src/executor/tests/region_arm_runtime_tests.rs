@@ -599,8 +599,11 @@ fn region_arm_nested_two_arms() {
 
 #[test]
 fn region_arm_nested_preserves_repeated_register_reads() {
-    let baseline = diamond_case(4, false, None, Body::OrderedReads, None).0;
-    let (out, log, _) = ordered(4, "worker_claimed", "a_join", "ordered_reads");
+    let mut baseline = diamond_case(4, false, None, Body::OrderedReads, None).0;
+    let (mut out, log, _) = ordered(4, "worker_claimed", "a_join", "ordered_reads");
+    // 多个 worker 可按任意顺序交付终态。按可达输入输出对齐路径，保留每条路径内的事件顺序。
+    baseline.sort_by(|a, b| a.results.cmp(&b.results));
+    out.sort_by(|a, b| a.results.cmp(&b.results));
     assert_eq!(out, baseline);
     assert!(out.iter().any(|o| o.events.iter().filter(|e| e.contains("ReadReg")).count() > 1));
     assert_eq!(log.iter().filter(|(p, _)| p == "imported").count(), 2);

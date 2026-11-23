@@ -718,7 +718,7 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
     if solver.finite_domain_enabled() {
         let missing_domain = || resolution.err().expect("未解析的标量必须携带拒绝原因");
         let Some(result) = solver.check_candidate_sat(info) else {
-            crate::smt::no_smt::record(SpeculativeRejectReason::UnknownFiniteDomain.reason_name(), info);
+            crate::smt::no_smt::record(&SpeculativeRejectReason::UnknownFiniteDomain.to_string(), info);
             return Err(ExecError::Smt(missing_domain()));
         };
         if result == crate::smt::SmtResult::Unsat {

@@ -1,11 +1,12 @@
 //! 推演的拒绝标签、统计与强制失败诊断；区域边界负责捕获拒绝并回滚。
 
-use crate::error::qualified_reason_enum;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Mutex;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+use crate::error::qualified_reason_enum;
 use serde_json::{json, Value};
 
 /// 推演状态属于执行帧；调用、冻结和恢复时原样传递。
@@ -26,6 +27,24 @@ macro_rules! speculative_reject_reasons {
             }
         }
 
+        impl Serialize for SpeculativeRejectReason {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.serialize_str(self.reason_name())
+            }
+        }
+
+        impl<'de> Deserialize<'de> for SpeculativeRejectReason {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let name = String::deserialize(deserializer)?;
+                match name.as_str() {
+                    $(qualified_reason_enum!(@name SpeculativeRejectReason, $variant) => Ok(Self::$variant),)*
+                    _ => Err(serde::de::Error::unknown_variant(
+                        &name, &[$(qualified_reason_enum!(@name SpeculativeRejectReason, $variant)),*])),
+                }
+            }
+        }
+
+        #[cfg(test)]
         impl SpeculativeRejectReason {
             const ALL: &'static [Self] = &[$(Self::$variant),*];
         }
@@ -112,28 +131,6 @@ impl SpeculativeRejectReason {
     }
 }
 
-impl Serialize for SpeculativeRejectReason {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_unit_variant("SpeculativeRejectReason", *self as u32, self.reason_name())
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for SpeculativeRejectReason {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        if deserializer.is_human_readable() {
-            let key = String::deserialize(deserializer)?;
-            Self::ALL
-                .iter()
-                .copied()
-                .find(|reason| reason.reason_name() == key)
-                .ok_or_else(|| serde::de::Error::custom(format!("未知推演原因 {key}")))
-        } else {
-            let index = u32::deserialize(deserializer)?;
-            Self::ALL.get(index as usize).copied().ok_or_else(|| serde::de::Error::custom("未知推演原因编号"))
-        }
-    }
-}
-
 impl fmt::Display for SpeculativeRejectReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.reason_name())
@@ -184,8 +181,9 @@ mod tests {
 
     #[test]
     fn every_rejection_reason_uses_its_variant_name() {
+        let type_name = std::any::type_name::<SpeculativeRejectReason>().rsplit("::").next().unwrap();
         for &reason in SpeculativeRejectReason::ALL {
-            let name = format!("SpeculativeRejectReason::{reason:?}");
+            let name = format!("{type_name}::{reason:?}");
             let serialized = serde_json::to_value(reason).unwrap();
             assert_eq!(serialized, json!(name));
             assert_eq!(reason.to_string(), name);
