@@ -327,13 +327,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             let mut undecided = false;
             for candidate in candidates {
                 let value = self.translate_exp(&candidate.value);
-                if *candidate.excluded.get_or_insert_with(|| {
-                    prefix.assertions().any(|fact| {
-                        let original = self.translate_exp(fact);
-                        let mut narrowed = original.substitute(&anchor, &value);
-                        narrowed.z3_ast != original.z3_ast && narrowed.structural_bool() == Some(false)
-                    })
-                }) {
+                if *candidate.excluded.get_or_insert_with(|| prefix.excludes_branch_candidate(self, &anchor, &value)) {
                     continue;
                 }
                 match predicate.substitute(&anchor, &value).structural_bool() {
@@ -498,7 +492,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         prefix.translate_projection_suffix(self, &mut cache);
         let ProjectionCache { assertions, guards, anchors, simplified } = &mut *cache;
         let asts = &prefix.index.asts;
-        let dependencies = anchors.entry(asts.keep(anchor.clone())).or_default();
+        let dependencies = &mut anchors.entry(asts.keep(anchor.clone())).or_default().dependencies;
         let mut common = ProjectionLiterals::new();
         let empty = HashMap::new();
         let mut dependent = Vec::new();
@@ -610,6 +604,9 @@ thread_local! {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod branch_tests;
 
 #[cfg(test)]
 mod arithmetic_tests;

@@ -2100,7 +2100,7 @@ fn execute_loop_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         );
                         eprintln!(
                             "{}",
-                            serde_json::json!({"kind":"loop_iteration_fold",
+                            serde_json::json!({"kind":"loop_iteration_fold","task":task_id.as_usize(),"root_attempt":diagnostics::root_attempt(),
                             "function":diagnostics::name_string(original_frame.function_name,&shared.symtab),
                             "pc":root_branch,"call_instance":original_frame.local_state.call_instance,
                             "steps_since_budget_renewal":used,"step_budget_unlimited":remaining.is_none(),"logical_frontiers":2,

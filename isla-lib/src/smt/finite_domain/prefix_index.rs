@@ -22,7 +22,23 @@ pub(super) struct ProjectionCache {
     pub(super) assertions: Vec<Z3_ast>,
     pub(super) guards: Vec<Z3_ast>,
     pub(super) simplified: HashMap<Z3_ast, (Option<bool>, Z3_ast)>,
-    pub(super) anchors: HashMap<Z3_ast, HashMap<Z3_ast, bool>>,
+    pub(super) anchors: HashMap<Z3_ast, AnchorFacts>,
+}
+
+#[derive(Default)]
+pub(super) struct AnchorFacts {
+    pub(super) dependencies: HashMap<Z3_ast, bool>,
+    // 普通追加只检查新后缀。条件替换、前缀缩短和改绑随整个投影缓存失效。
+    indexed_assertions: usize,
+    indexed_guards: usize,
+    related: Vec<Z3_ast>,
+    candidates: HashMap<Z3_ast, BranchCheck>,
+}
+
+#[derive(Clone, Copy)]
+enum BranchCheck {
+    Excluded,
+    Checked(usize),
 }
 
 // 与 ConstBinding 相同，接管 Ast 的引用，由原 Context 释放。
@@ -46,6 +62,40 @@ impl<'ctx> ProjectionAsts<'ctx> {
         assert!(self.refs.borrow().contains(&key));
         unsafe { Z3_inc_ref(self.ctx.z3_ctx, key) };
         Ast { ctx: self.ctx, z3_ast: key }
+    }
+
+    // 子节点由当前前缀持有的根保活。显式后序遍历不占 Rust 递归栈。
+    fn contains_anchor(&self, root: Z3_ast, anchor: &Ast, probe: &Ast, nodes: &mut HashMap<Z3_ast, bool>) -> bool {
+        let ctx = self.ctx.z3_ctx;
+        let mut pending = vec![(root, false)];
+        while let Some((node, expanded)) = pending.pop() {
+            if nodes.contains_key(&node) {
+                continue;
+            }
+            let found = if node == anchor.z3_ast {
+                true
+            } else {
+                unsafe {
+                    match Z3_get_ast_kind(ctx, node) {
+                        AstKind::Numeral | AstKind::Var => false,
+                        AstKind::App => {
+                            let app = Z3_to_app(ctx, node);
+                            let mut children = (0..Z3_get_app_num_args(ctx, app)).map(|i| Z3_get_app_arg(ctx, app, i));
+                            if !expanded {
+                                pending.push((node, true));
+                                pending.extend(children.map(|child| (child, false)));
+                                continue;
+                            }
+                            children.any(|child| nodes[&child])
+                        }
+                        // 对带绑定器等未遍历的形式，保留原生非恒等代入的判定。
+                        _ => return self.get(root).substitute(anchor, probe).z3_ast != root,
+                    }
+                }
+            };
+            nodes.insert(node, found);
+        }
+        nodes[&root]
     }
 
     fn clear(&mut self) {
@@ -147,8 +197,16 @@ impl<'ctx> PrefixIndex<'ctx> {
         (cache.assertions.capacity() + cache.guards.capacity()) * size_of::<Z3_ast>()
             + map_bytes::<Z3_ast, (Option<bool>, Z3_ast)>(cache.simplified.capacity())
             + map_bytes::<Z3_ast, ()>(self.asts.refs.borrow().capacity())
-            + map_bytes::<Z3_ast, HashMap<Z3_ast, bool>>(cache.anchors.capacity())
-            + cache.anchors.values().map(|facts| map_bytes::<Z3_ast, bool>(facts.capacity())).sum::<usize>()
+            + map_bytes::<Z3_ast, AnchorFacts>(cache.anchors.capacity())
+            + cache
+                .anchors
+                .values()
+                .map(|facts| {
+                    map_bytes::<Z3_ast, bool>(facts.dependencies.capacity())
+                        + facts.related.capacity() * size_of::<Z3_ast>()
+                        + map_bytes::<Z3_ast, BranchCheck>(facts.candidates.capacity())
+                })
+                .sum::<usize>()
             + map_bytes::<Sym, Position>(self.symbols.capacity())
             + self.assertions.capacity() * size_of::<Position>()
             + self.bool_symbols.capacity() * size_of::<(Position, Sym)>()
@@ -227,6 +285,39 @@ impl<'a, B: BV> PathConditions<'a, B> {
         for guard in &self.guards[cache.guards.len()..] {
             cache.guards.push(self.index.asts.keep(solver.translate_projection_assertion(guard)));
         }
+    }
+
+    pub(super) fn excludes_branch_candidate(&self, solver: &Solver<'_, B>, anchor: &Ast, value: &Ast) -> bool {
+        if value.z3_ast == anchor.z3_ast {
+            return false;
+        }
+        let asts = &self.index.asts;
+        let mut cache = self.index.projection.borrow_mut();
+        self.translate_projection_suffix(solver, &mut cache);
+        let ProjectionCache { assertions, guards, anchors, .. } = &mut *cache;
+        let facts = anchors.entry(asts.keep(anchor.clone())).or_default();
+        let checked = match facts.candidates.get(&value.z3_ast) {
+            Some(BranchCheck::Excluded) => return true,
+            Some(BranchCheck::Checked(count)) => *count,
+            None => 0,
+        };
+
+        // 同一批新断言常共享很大的子式。每个 DAG 节点只查一次是否含锚点。
+        let mut nodes = HashMap::new();
+        for &key in assertions[facts.indexed_assertions..].iter().chain(&guards[facts.indexed_guards..]) {
+            if *facts.dependencies.entry(key).or_insert_with(|| asts.contains_anchor(key, anchor, value, &mut nodes)) {
+                facts.related.push(key);
+            }
+        }
+        facts.indexed_assertions = assertions.len();
+        facts.indexed_guards = guards.len();
+        let excluded = facts.related[checked..].iter().any(|&key| {
+            let mut residual = asts.get(key).substitute(anchor, value);
+            residual.z3_ast != key && residual.structural_bool() == Some(false)
+        });
+        let result = if excluded { BranchCheck::Excluded } else { BranchCheck::Checked(facts.related.len()) };
+        facts.candidates.insert(asts.keep(value.clone()), result);
+        excluded
     }
 
     fn assertion(&self, position: Position) -> &'a Exp<Sym> {
