@@ -226,7 +226,11 @@ impl AttemptGuard {
             let mut counts = COUNTS.get().unwrap().lock().unwrap();
             counts.begin();
             if tracked {
-                let parent = stack.last().filter(|attempt| attempt.tracked).map(|attempt| attempt.id);
+                let parent = stack
+                    .last()
+                    .filter(|attempt| attempt.tracked)
+                    .map(|attempt| attempt.id)
+                    .or_else(merge_diagnostics::arm_parent);
                 counts.begin_live(
                     id,
                     parent,
@@ -263,7 +267,7 @@ impl Drop for AttemptGuard {
             inclusive.add(attempt.children);
             inclusive.wall = attempt.started.elapsed();
             let exclusive = inclusive.subtract(attempt.children);
-            let root = stack.is_empty();
+            let root = stack.is_empty() && merge_diagnostics::arm_parent().is_none();
             if let Some(parent) = stack.last_mut() {
                 parent.children.add(inclusive);
             }

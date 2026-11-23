@@ -595,14 +595,15 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     /// 导出当前根事务内一个逻辑臂可见的纯数据后缀及读取投影元数据。
-    pub(crate) fn export_arm_suffix(&self, arm: LogicalArm) -> Vec<ArmSuffixEvent<B>> {
+    pub(crate) fn export_arm_suffix(&self, arm: LogicalArm) -> Option<Vec<ArmSuffixEvent<B>>> {
         assert_eq!(self.transaction_depth(), 1, "远端臂只能从最外层区域事务导出");
         self.transaction_events
             .iter()
             .zip(&self.transaction_event_guards)
             .zip(self.logical_arms.group_events(Some(arm)))
-            .filter_map(|((event, guard), (selected, cycle, read))| {
-                selected.then(|| ArmSuffixEvent {
+            .map(|((event, guard), (selected, cycle, read))| {
+                // 死臂也可能定义存活义务引用的符号。未选中的非 SMT 事件需要原来的投影位置。
+                (selected || matches!(event, Event::Smt(..))).then(|| ArmSuffixEvent {
                     guard: guard.clone(),
                     event: event.clone(),
                     register_read_occurrence: read.map(|value| value.get() - 1),

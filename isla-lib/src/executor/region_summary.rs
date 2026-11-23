@@ -6,10 +6,10 @@ use crate::primop::{self as effects, Effect};
 #[cfg(test)]
 mod tests;
 
-fn constraint_unary<B: BV>(f: primop::Unary<B>) -> bool {
+pub(super) fn constraint_unary<B: BV>(f: primop::Unary<B>) -> bool {
     std::ptr::fn_addr_eq(f, primop::assume::<B> as primop::Unary<B>)
 }
-fn constraint_binary<B: BV>(f: primop::Binary<B>) -> bool {
+pub(super) fn constraint_binary<B: BV>(f: primop::Binary<B>) -> bool {
     [primop::optimistic_assert::<B> as primop::Binary<B>, primop::pessimistic_assert::<B> as primop::Binary<B>]
         .iter()
         .any(|assertion| std::ptr::fn_addr_eq(f, *assertion))

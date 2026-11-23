@@ -90,6 +90,7 @@ struct TraceState {
     swapped: bool,
 }
 thread_local! {
+    static ARM_PARENT: Cell<Option<usize>> = const { Cell::new(None) };
     static TRACE: RefCell<Option<TraceState>> = const { RefCell::new(None) };
     static ATTEMPTS: RefCell<Vec<Attempt>> = const { RefCell::new(Vec::new()) };
     // 延后查询只持有 Sail 位置；解释器在每条 IR 指令前补入当前函数和 pc。
@@ -533,7 +534,7 @@ impl AttemptGuard {
         let timing = super::merge_timing::AttemptGuard::start(id, task, origin.clone());
         ATTEMPTS.with(|stack| {
             let mut stack = stack.borrow_mut();
-            let parent = stack.last().map(|attempt| attempt.id);
+            let parent = stack.last().map(|attempt| attempt.id).or_else(arm_parent);
             let root_started = (parent.is_none() && enabled()).then(Instant::now);
             let trace_start = (parent.is_none() && MODE.load(Ordering::Relaxed) == 2).then(|| (Instant::now(), info));
             if trace_start.is_some() {
@@ -746,11 +747,20 @@ pub(crate) fn record_current_site(function: Name, pc: usize, symtab: &Symtab) {
     CURRENT_SITE.with(|site| *site.borrow_mut() = Some(json!({"function":name_string(function, symtab),"pc":pc})));
 }
 
+/// 每个 B 使用独占的一次性 worker。内层尝试继续挂在 A 的根下，耗时仍按各自线程计量。
+pub(crate) fn set_arm_parent(parent: Option<usize>) {
+    ARM_PARENT.set(parent);
+}
+
+pub(super) fn arm_parent() -> Option<usize> {
+    ARM_PARENT.get()
+}
+
 pub(crate) fn root_attempt() -> Option<usize> {
     if !enabled() {
         return None;
     }
-    ATTEMPTS.with(|stack| stack.borrow().first().map(|attempt| attempt.id))
+    arm_parent().or_else(|| ATTEMPTS.with(|stack| stack.borrow().first().map(|attempt| attempt.id)))
 }
 
 pub(crate) fn record_deferred_query(purpose: &str, info: crate::source_loc::SourceLoc, returns_unknown: bool) {

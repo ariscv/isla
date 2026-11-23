@@ -1903,7 +1903,7 @@ macro_rules! btrace_push_branch_condition {
     ($frame:expr, $condition:expr) => {{
         #[cfg(feature = "tracetool")]
         {
-            cost::make_mut(&mut $frame.trace_path).push_branch_condition($condition);
+            $crate::executor::stats::region_cost::make_mut(&mut $frame.trace_path).push_branch_condition($condition);
         }
         #[cfg(not(feature = "tracetool"))]
         {
@@ -2192,10 +2192,6 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             )
         {
             return Ok(Run::Dead);
-        }
-        // 远端直线臂遇到消费者时，将原指令留给具有完整入口状态的 A 重跑。
-        if frame.region_execution.as_ref().is_some_and(|execution| execution.remote_cancel.is_some()) {
-            return Err(error);
         }
         let retry = if let ExecError::ConcreteChoice(guard, info) = error {
             concrete_values::retry(

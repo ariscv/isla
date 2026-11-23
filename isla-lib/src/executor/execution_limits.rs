@@ -186,6 +186,13 @@ impl Default for ExecutionLimits {
 }
 
 impl ExecutionLimits {
+    pub(super) fn can_schedule_region_arm(&self) -> bool {
+        // 有限片段预算由两臂按串行顺序扣除。Force 的失败也必须基于 A 提升初值后的真实前态。
+        self.arms_as_tasks
+            && self.max_region_fragments.is_none()
+            && !self.merge_policy.iter().any(|rule| rule.mode == MergeMode::Force)
+    }
+
     /// 完整符号探索默认尝试区域合并；库的通用入口仍可独立选择。
     pub fn for_symbolic_dag(config: Option<&ExecutionLimitsConfig>, symtab: &Symtab) -> Self {
         let mut limits = Self::default().with_path_merging(true);

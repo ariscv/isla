@@ -389,6 +389,11 @@ pub(super) fn preflight<B: BV>(
     if frame.region_execution.is_none() {
         return Ok(());
     }
+    if frame.region_execution.as_ref().unwrap().remote_cancel.is_some()
+        && !parallel_arms::transferable_instruction(frame, shared)
+    {
+        return Err(reject(frame, SpeculativeRejectReason::StateEffect));
+    }
     let global_state = state.execution_limits.as_ref().is_some_and(|limits| limits.region_global_state);
     let summaries = state.region_effect_summaries.get_or_init(|| function_effect_summaries(shared, global_state));
     if let Instr::Call(_, _, callee, _, _) = &frame.instrs[frame.pc] {
@@ -712,7 +717,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                 let record_start = frame.region_merge_records.len();
                 failure_phase = FailurePhase::ArmExecution;
                 let mut candidate_frame = solver.validates_candidates().then(|| frame.clone());
-                let arm_task_entry = parallel_arms::entry(sink, frame, state, &region, shared, solver);
+                let arm_task_entry = parallel_arms::entry(sink, frame, state, &region, solver);
                 let tx = solver.start_transaction();
                 let defer = solver.defer_region_checks();
                 let probe_context = (!nested && crate::smt::probe_query_timings_enabled()).then(|| {
@@ -1131,7 +1136,7 @@ pub(super) fn prepare_region_base<'ir, B: BV>(
             RegionPoint::Instruction(pc) => matches!(frame.instrs.get(pc), Some(Instr::End)),
         };
     let execution = RegionExecution {
-        remote_cancel: None,
+        remote_cancel: parent.as_ref().and_then(|execution| execution.remote_cancel.clone()),
         region: region.clone(),
         pending_branch: None,
         entry_depth: frame.backtrace.len(),
