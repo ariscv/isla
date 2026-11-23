@@ -388,12 +388,12 @@ fn region_util_defer_range_obligation_preserves_error_domain() {
         s.with_deferred_region_queries(|s| {
             reset_path_smt_stats();
             let result = narrow(Val::Symbolic(wide), s, info);
-            if enabled {
+            if enabled || safe {
                 assert!(matches!(result, Ok(Val::Symbolic(_))));
             } else {
                 assert!(matches!(result, Err(ExecError::Z3Unknown)));
             }
-            assert_eq!(s.deferred_assertions.as_ref().unwrap().arm.obligations.len(), usize::from(enabled));
+            assert_eq!(s.deferred_assertions.as_ref().unwrap().arm.obligations.len(), usize::from(enabled && !safe));
             assert_eq!(path_smt_stats().calls, 0, "出口前不查 SMT");
             s.assert_region_exit(Bool(false));
             assert_eq!(
