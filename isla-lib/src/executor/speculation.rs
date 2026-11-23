@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Mutex;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+use crate::error::qualified_reason_enum;
 use serde_json::{json, Value};
 
 /// 推演状态属于执行帧；调用、冻结和恢复时原样传递。
@@ -15,10 +17,41 @@ pub enum SpeculationMode {
     On,
 }
 
-/// 上层位置优先报告来源；直接使用底层分叉接口时报告对应底层标签。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SpeculativeRejectReason {
+macro_rules! speculative_reject_reasons {
+    ($($(#[$attr:meta])* $variant:ident,)*) => {
+        qualified_reason_enum! {
+            /// 上层位置优先报告来源；直接使用底层分叉接口时报告对应底层标签。
+            #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+            pub enum SpeculativeRejectReason {
+                $($(#[$attr])* $variant,)*
+            }
+        }
+
+        impl Serialize for SpeculativeRejectReason {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.serialize_str(self.reason_name())
+            }
+        }
+
+        impl<'de> Deserialize<'de> for SpeculativeRejectReason {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let name = String::deserialize(deserializer)?;
+                match name.as_str() {
+                    $(qualified_reason_enum!(@name SpeculativeRejectReason, $variant) => Ok(Self::$variant),)*
+                    _ => Err(serde::de::Error::unknown_variant(
+                        &name, &[$(qualified_reason_enum!(@name SpeculativeRejectReason, $variant)),*])),
+                }
+            }
+        }
+
+        #[cfg(test)]
+        impl SpeculativeRejectReason {
+            const ALL: &'static [Self] = &[$(Self::$variant),*];
+        }
+    };
+}
+
+speculative_reject_reasons! {
     UnknownFiniteDomain,
     UnknownZ3,
     Z3Timeout,
@@ -194,10 +227,7 @@ impl SpeculativeRejectReason {
 
 impl fmt::Display for SpeculativeRejectReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Value::String(label) = serde_json::to_value(self).expect("拒绝标签必须可序列化") else {
-            panic!("拒绝标签必须序列化为字符串")
-        };
-        f.write_str(&label)
+        f.write_str(self.reason_name())
     }
 }
 
@@ -359,6 +389,18 @@ mod tests {
     }
 
     #[test]
+    fn every_rejection_reason_uses_its_variant_name() {
+        let type_name = std::any::type_name::<SpeculativeRejectReason>().rsplit("::").next().unwrap();
+        for &reason in SpeculativeRejectReason::ALL {
+            let name = format!("{type_name}::{reason:?}");
+            let serialized = serde_json::to_value(reason).unwrap();
+            assert_eq!(serialized, json!(name));
+            assert_eq!(reason.to_string(), name);
+            assert_eq!(serde_json::from_value::<SpeculativeRejectReason>(serialized).unwrap(), reason);
+        }
+    }
+
+    #[test]
     fn speculation_stats_disabled_does_not_count() {
         let stats = SpeculationStats::new(false);
         stats.record_reject(SpeculativeRejectReason::SymbolicJump);
@@ -380,7 +422,7 @@ mod tests {
         assert_eq!(
             stats.reject_json(),
             json!({"total": 8,
-            "reason_counts": {"symbolic_jump": 4, "retry_operand": 4}})
+            "reason_counts": {"SpeculativeRejectReason::SymbolicJump": 4, "SpeculativeRejectReason::RetryOperand": 4}})
         );
         stats.reset();
         assert_eq!(stats.reject_json(), json!({"total": 0, "reason_counts": {}}));

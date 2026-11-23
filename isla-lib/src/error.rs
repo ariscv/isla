@@ -55,14 +55,42 @@ impl IslaError for VoidError {
     }
 }
 
-#[derive(Clone, Debug)]
-pub enum SmtError {
-    FiniteDomain { source_loc: SourceLoc, symbol: crate::smt::Sym, width: u32, candidates: Option<Vec<String>> },
-    DeferredQuery { source_loc: SourceLoc, purpose: &'static str },
-    NoSmt { reason: &'static str, source_loc: SourceLoc },
-    Z3Timeout(Z3Timeout),
-    Z3ResourceExhausted(Z3QueryFailure),
-    Z3Unknown(Z3QueryFailure),
+// 从枚举声明生成标签，包含载荷的变体只匹配其判别类型。
+macro_rules! qualified_reason_enum {
+    ($(#[$enum_attr:meta])* $vis:vis enum $name:ident {
+        $($(#[$attr:meta])* $variant:ident $(($($tuple:tt)*))? $({$($fields:tt)*})?,)*
+    }) => {
+        $(#[$enum_attr])*
+        $vis enum $name {
+            $($(#[$attr])* $variant $(($($tuple)*))? $({$($fields)*})?,)*
+        }
+
+        impl $name {
+            pub(crate) const fn reason_name(&self) -> &'static str {
+                match self {
+                    $(qualified_reason_enum!(@pattern $variant $(($($tuple)*))? $({$($fields)*})?) =>
+                        qualified_reason_enum!(@name $name, $variant),)*
+                }
+            }
+        }
+    };
+    (@pattern $variant:ident) => { Self::$variant };
+    (@pattern $variant:ident ($($tuple:tt)*)) => { Self::$variant(..) };
+    (@pattern $variant:ident {$($fields:tt)*}) => { Self::$variant { .. } };
+    (@name $name:ident, $variant:ident) => { concat!(stringify!($name), "::", stringify!($variant)) };
+}
+pub(crate) use qualified_reason_enum;
+
+qualified_reason_enum! {
+    #[derive(Clone, Debug)]
+    pub enum SmtError {
+        FiniteDomain { source_loc: SourceLoc, symbol: crate::smt::Sym, width: u32, candidates: Option<Vec<String>> },
+        DeferredQuery { source_loc: SourceLoc, purpose: &'static str },
+        NoSmt { reason: &'static str, source_loc: SourceLoc },
+        Z3Timeout(Z3Timeout),
+        Z3ResourceExhausted(Z3QueryFailure),
+        Z3Unknown(Z3QueryFailure),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -104,7 +132,7 @@ impl SmtError {
 
     pub fn diagnostic(&self) -> serde_json::Value {
         use serde_json::json;
-        match self {
+        let mut details = match self {
             Self::FiniteDomain { symbol, width, candidates, .. } => {
                 json!({"purpose":"symbolic_value_enumeration","symbol":symbol.as_u32(),"width":width,"candidates":candidates})
             }
@@ -120,7 +148,9 @@ impl SmtError {
                 json!({"purpose":timeout.query_purpose,"operation":format!("{:?}",timeout.operation),
                 "seconds":timeout.operation_wall.as_secs_f64(),"limit_seconds":timeout.limit.as_secs_f64()})
             }
-        }
+        };
+        details["reason"] = json!(self.reason_name());
+        details
     }
 
     pub fn source_loc(&self) -> SourceLoc {
@@ -164,38 +194,40 @@ impl Eq for SmtError {}
 
 impl fmt::Display for SmtError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::FiniteDomain { source_loc, symbol, width, candidates } => write!(
-                f,
-                "unknown_finite_domain: v{} ({} 位)，候选 {:?}，位置 {:?}",
-                symbol.as_u32(),
-                width,
-                candidates,
-                source_loc
-            ),
-            Self::DeferredQuery { source_loc, purpose } => {
-                write!(f, "unknown_deferred_mode: {purpose}，位置 {source_loc:?}")
+        let variant = self.reason_name();
+        let query = match self {
+            Self::FiniteDomain { source_loc, symbol, width, candidates } => {
+                return write!(
+                    f,
+                    "{variant}: v{} ({} 位)，候选 {:?}，位置 {:?}",
+                    symbol.as_u32(),
+                    width,
+                    candidates,
+                    source_loc
+                );
             }
-            SmtError::NoSmt { reason, source_loc } => {
-                write!(f, "unknown_deferred_mode: 无 SMT 无法继续：{reason}，位置{source_loc:?}")
+            Self::DeferredQuery { source_loc, purpose } => {
+                return write!(f, "{variant}: {purpose}，位置 {source_loc:?}");
+            }
+            Self::NoSmt { reason, source_loc } => {
+                return write!(f, "{variant}: 无 SMT 无法继续：{reason}，位置{source_loc:?}");
+            }
+            Self::Z3Timeout(Z3Timeout::Interrupted(timeout)) => {
+                return write!(
+                    f,
+                    "{variant}: Z3 调用 {:?} 在 {:?} 中断，限时 {:?}，耗时 {:?}",
+                    timeout.operation, timeout.source_loc, timeout.limit, timeout.operation_wall
+                );
             }
             Self::Z3Timeout(Z3Timeout::Native(query)) | Self::Z3ResourceExhausted(query) | Self::Z3Unknown(query) => {
-                write!(
-                    f,
-                    "{}: Z3 返回 {:?}，用途 {}，位置 {:?}，耗时 {:?}",
-                    self.reject_reason(),
-                    query.reason,
-                    query.purpose,
-                    query.source_loc,
-                    query.wall
-                )
+                query
             }
-            Self::Z3Timeout(Z3Timeout::Interrupted(timeout)) => write!(
-                f,
-                "z3_timeout: Z3 调用 {:?} 在 {:?} 中断，限时 {:?}，耗时 {:?}",
-                timeout.operation, timeout.source_loc, timeout.limit, timeout.operation_wall
-            ),
-        }
+        };
+        write!(
+            f,
+            "{variant}: Z3 返回 {:?}，用途 {}，位置 {:?}，耗时 {:?}",
+            query.reason, query.purpose, query.source_loc, query.wall
+        )
     }
 }
 
@@ -404,7 +436,7 @@ impl fmt::Display for ExecError {
             NoElfEntry => write!(f, "No entry point specified"),
             OutOfBounds(func) => write!(f, "Out of bounds error in {}", func),
             MatchFailure(_) => write!(f, "Pattern match failure"),
-            Timeout => write!(f, "path_timeout"),
+            Timeout => fmt::Display::fmt(&crate::executor::SpeculativeRejectReason::PathTimeout, f),
             Smt(error) => write!(f, "{}", error),
             NoModel => write!(f, "No SMT model found"),
             Z3Error(msg) => write!(f, "SMT solver error: {}", msg),

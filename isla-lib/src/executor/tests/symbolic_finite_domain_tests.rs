@@ -156,8 +156,8 @@ fn symbolic_finite_domain_unknown_reports_error_and_does_not_certify() {
         assert!(matches!(results.as_slice(), [Err(ExecError::Smt(cause))] if cause.reject_reason() == if enabled {
             SpeculativeRejectReason::UnknownFiniteDomain
         } else { SpeculativeRejectReason::UnknownDeferredMode }));
-        let label = if enabled { "unknown_finite_domain" } else { "unknown_deferred_mode" };
-        assert!(results[0].as_ref().unwrap_err().to_string().contains(label));
+        let label = if enabled { "SmtError::FiniteDomain:" } else { "SmtError::NoSmt:" };
+        assert!(results[0].as_ref().unwrap_err().to_string().starts_with(label));
         assert_eq!(queries, 0);
     }
     let (results, queries) = lengths(true, true, |solver, symbol| {

@@ -838,7 +838,7 @@ pub(crate) fn unattributed_error(function: Name, pc: usize, error: &ExecError, s
     if !recorded {
         emit(json!({"stage":"execute_arm","at":{"function":name_string(function,symtab),"pc":pc},
             "slot":null,"path":null,"left":null,"right":null,"difference":"unsupported_value",
-            "error":bounded_debug(error,256),"reason":"incompatible_state"}));
+            "error":bounded_debug(error,256),"reason":super::SpeculativeRejectReason::IncompatibleState}));
     }
 }
 
@@ -877,7 +877,7 @@ pub(crate) fn execute_arm_error(function: Name, pc: usize, error: &ExecError, sy
     }
     emit(json!({"stage":"execute_arm","at":{"function":name_string(function,symtab),"pc":pc},
         "slot":null,"path":null,"left":null,"right":null,"difference":"unsupported_value",
-        "error":bounded_debug(error,256),"reason":"incompatible_state"}));
+        "error":bounded_debug(error,256),"reason":super::SpeculativeRejectReason::IncompatibleState}));
 }
 
 pub(super) struct DiagnosticCounts {

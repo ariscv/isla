@@ -223,7 +223,11 @@ fn loop_segment_sixty_four_rounds_keep_first_match_and_reduce_paths_body() {
     assert!(on.len() <= 16, "分段应在边界合流，而不是逐轮放出：{}", on.len());
     let stats = shared.execution_stats.merge_json();
     stats::merge_diagnostics::configure("off").unwrap();
-    assert_eq!(stats["failure_reasons"]["step_budget"].as_u64().unwrap_or(0), 0, "已完成的段不能整体作废");
+    assert_eq!(
+        stats["failure_reasons"]["SpeculativeRejectReason::StepBudget"].as_u64().unwrap_or(0),
+        0,
+        "已完成的段不能整体作废"
+    );
 }
 #[test]
 fn loop_segment_multiple_real_ends_use_virtual_exit() {

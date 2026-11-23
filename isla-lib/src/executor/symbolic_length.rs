@@ -780,7 +780,7 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
             }),
         };
         let Some(result) = solver.check_candidate_sat(info) else {
-            crate::smt::no_smt::record("unknown_finite_domain", info);
+            crate::smt::no_smt::record(&SpeculativeRejectReason::UnknownFiniteDomain.to_string(), info);
             return Err(ExecError::Smt(missing_domain()));
         };
         if result == crate::smt::SmtResult::Unsat {

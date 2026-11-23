@@ -59,7 +59,10 @@ fn region_filtered_match_plain_and_opt_out() {
     let program = vec![Instr::Jump(input(0), 3, info()), returns(), Instr::End, failure()];
     assert_eq!(outcomes(program.clone(), &shared, false, false), ["match_failure", "return"]);
     assert_eq!(outcomes(program.clone(), &shared, true, false), ["match_failure", "return"]);
-    assert_eq!(shared.execution_stats.arm_unsupported_json(&shared.symtab)["top"][0]["reason"], "exit");
+    assert_eq!(
+        shared.execution_stats.arm_unsupported_json(&shared.symtab)["top"][0]["reason"],
+        "SpeculativeRejectReason::Exit"
+    );
     assert_eq!(outcomes(program, &shared, false, true), ["dead", "return"]);
     assert_eq!(shared.execution_stats.merge_json()["filtered_match_failure_paths"], 1);
     for (cause, outcome) in [(ExitCause::Explicit, "explicit_exit"), (ExitCause::AssertionFailure, "assertion_failure")]

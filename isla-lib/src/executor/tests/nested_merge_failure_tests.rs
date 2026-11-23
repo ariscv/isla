@@ -195,7 +195,7 @@ fn load_shape(strategy: Strategy, different: bool) -> Observation {
     ];
     let observed = observe(shared, program, 4, strategy);
     if different {
-        observed.assert_local_rejection(ACCESS_NAME, 1, "incompatible_state");
+        observed.assert_local_rejection(ACCESS_NAME, 1, "SpeculativeRejectReason::IncompatibleState");
     }
     observed
 }
@@ -237,7 +237,7 @@ fn check_three_levels(different: bool) {
         program.extend([Instr::Goto(16), Instr::Goto(17), Instr::Goto(18), Instr::End]);
         let observed = observe(shared, program, 4, strategy);
         if different {
-            observed.assert_local_rejection(&observed.root_function, 10, "incompatible_state");
+            observed.assert_local_rejection(&observed.root_function, 10, "SpeculativeRejectReason::IncompatibleState");
         }
         observed.assert_root(5);
         for pc in [3, 6] {
@@ -270,7 +270,7 @@ fn check_callee(different: bool) {
         ];
         let observed = observe(shared, program, 3, strategy);
         if different {
-            observed.assert_local_rejection(ACCESS_NAME, 1, "incompatible_state");
+            observed.assert_local_rejection(ACCESS_NAME, 1, "SpeculativeRejectReason::IncompatibleState");
         }
         observed.assert_root(5);
         assert!(observed.committed(callee, 6), "被调函数中后续的正常分支必须合并");
@@ -316,27 +316,29 @@ fn union_region(shared: &mut SharedState<'static, B64>, slot: Name, different: b
 
 fn check_failure_reasons(different: bool) {
     for strategy in strategies() {
-        let observations = [("incompatible_state", false), ("union_payload", true)].map(|(reason, union)| {
-            let mut shared = empty_shared_state();
-            let slot = shared.symtab.intern("znested_reason_slot");
-            let body = if union {
-                union_region(&mut shared, slot, different)
-            } else {
-                string_region(3, input(1), slot, different)
-            };
-            let mut program =
-                vec![Instr::Jump(input(0), 3, info()), copy_return(input(1)), Instr::Goto(3 + body.len())];
-            program.extend(body);
-            program.push(Instr::End);
-            let observed = observe(shared, program, 2, strategy);
-            if different {
-                observed.assert_local_rejection(&observed.root_function, 4, reason);
-            } else {
-                assert_eq!(observed.rejections["total"], 0, "同形对照不得被拒绝");
-            }
-            assert_eq!(observed.committed(TOP_LEVEL_LET, 4), !different, "内层汇合点的合并结果不符");
-            (reason, observed)
-        });
+        let observations =
+            [("SpeculativeRejectReason::IncompatibleState", false), ("SpeculativeRejectReason::UnionPayload", true)]
+                .map(|(reason, union)| {
+                    let mut shared = empty_shared_state();
+                    let slot = shared.symtab.intern("znested_reason_slot");
+                    let body = if union {
+                        union_region(&mut shared, slot, different)
+                    } else {
+                        string_region(3, input(1), slot, different)
+                    };
+                    let mut program =
+                        vec![Instr::Jump(input(0), 3, info()), copy_return(input(1)), Instr::Goto(3 + body.len())];
+                    program.extend(body);
+                    program.push(Instr::End);
+                    let observed = observe(shared, program, 2, strategy);
+                    if different {
+                        observed.assert_local_rejection(&observed.root_function, 4, reason);
+                    } else {
+                        assert_eq!(observed.rejections["total"], 0, "同形对照不得被拒绝");
+                    }
+                    assert_eq!(observed.committed(TOP_LEVEL_LET, 4), !different, "内层汇合点的合并结果不符");
+                    (reason, observed)
+                });
         // 两种失配全部执行完再检查外层，第一种红灯也必须留下第二种的结果。
         for (reason, observed) in &observations {
             eprintln!("{reason}：完成路径数={}，拒绝诊断={}", observed.paths.1, observed.rejections["top"]);
@@ -395,7 +397,7 @@ fn observe_boundary(strategy: Strategy, wrapped: bool, different: bool) -> Obser
 fn nested_failure_is_local_to_its_join_without_ancestor() {
     for strategy in strategies() {
         let observed = observe_boundary(strategy, false, true);
-        observed.assert_local_rejection(&observed.root_function, 1, "incompatible_state");
+        observed.assert_local_rejection(&observed.root_function, 1, "SpeculativeRejectReason::IncompatibleState");
         assert_eq!(observed.paths, (3, 2));
         assert!(!observed.committed(TOP_LEVEL_LET, 1), "失败的汇合点不得提交");
         assert!(observed.committed(TOP_LEVEL_LET, 2), "正常的子区域必须仍能合并");
@@ -406,7 +408,7 @@ fn nested_failure_is_local_to_its_join_without_ancestor() {
 fn nested_failure_is_local_to_its_join() {
     for strategy in strategies() {
         let observed = observe_boundary(strategy, true, true);
-        observed.assert_local_rejection(&observed.root_function, 4, "incompatible_state");
+        observed.assert_local_rejection(&observed.root_function, 4, "SpeculativeRejectReason::IncompatibleState");
         assert!(!observed.committed(TOP_LEVEL_LET, 4), "失败的汇合点不得提交");
         observed.assert_root(4);
     }
@@ -559,7 +561,7 @@ fn partial_commit_unknown_z3_keeps_outer_merge() {
         });
         assert_eq!(equivalent_paths(&plain, &merged, 2, true), (3, 1));
         assert!(merged[0].records.iter().any(|record| record.branch_pc == 0 && record.parent_record.is_none()));
-        assert_eq!(shared.execution_stats.merge_json()["failure_reasons"]["unknown_z3"], 1);
+        assert_eq!(shared.execution_stats.merge_json()["failure_reasons"]["SpeculativeRejectReason::UnknownZ3"], 1);
     }
 }
 
@@ -599,7 +601,7 @@ fn unknown_z3_exit_obligation_replays_and_drops_per_path() {
         });
         assert_eq!(paths.len(), 2, "区域出口 Unknown 须回放两条路径");
         assert_eq!(replay.execution_stats.solver_path_drop_count(), 0);
-        assert_eq!(replay.execution_stats.merge_json()["failure_reasons"]["unknown_z3"], 1);
+        assert_eq!(replay.execution_stats.merge_json()["failure_reasons"]["SpeculativeRejectReason::UnknownZ3"], 1);
         let paths = super::path_failure_policy_tests::with_solver_dead(|| {
             crate::smt::test_queries::with_unknown_purposes(&["exit_obligations", "assertion", "assertion"], || {
                 paths_with_state(program, &shared, 2, strategy.limits(), crate::memory::Memory::new(), |_| ())
@@ -608,7 +610,7 @@ fn unknown_z3_exit_obligation_replays_and_drops_per_path() {
         assert!(paths.is_empty());
         let diagnostics = shared.execution_stats.merge_json();
         assert_eq!(diagnostics["solver_timeout_dropped_paths"], 2);
-        assert_eq!(diagnostics["failure_reasons"]["unknown_z3"], 1);
+        assert_eq!(diagnostics["failure_reasons"]["SpeculativeRejectReason::UnknownZ3"], 1);
         let drops = shared.execution_stats.solver_path_drops_since(0);
         assert!(drops.first_locations.iter().all(|drop| drop.purpose == "assertion"));
     }

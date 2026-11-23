@@ -785,7 +785,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         "at":{"function":diagnostics::name_string(frame.function_name,&shared.symtab),
                             "pc":frame.pc,"location":info,"region_depth":depth,
                             "call_depth":frame.backtrace.len(),"transaction_depth":solver.transaction_depth()},
-                        "difference":"nesting_limit","reason":SpeculativeRejectReason::NestingLimit}));
+                        "difference":SpeculativeRejectReason::NestingLimit,"reason":SpeculativeRejectReason::NestingLimit}));
                 }
                 Err(reject(frame, SpeculativeRejectReason::NestingLimit))
             } else {
