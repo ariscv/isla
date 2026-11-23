@@ -6123,8 +6123,15 @@ fn arm_error_leaf_batch_child() {
     let mut solver = Solver::<B64>::new(&ctx);
     let loc = info();
     let input = solver.declare_const(smtlib::Ty::Bool, loc);
+    // 兄弟叶共享已冻结的类型和定义，再用自己的断言与同编号守卫覆盖后缀。
+    for _ in 0..128 {
+        solver.define_const(smtlib::Exp::Var(input), loc);
+    }
+    let mut work = (0, 0);
     let entry = checkpoint(&mut solver);
+    let solvers_before = crate::smt::REPLAY_SOLVERS.get();
     let mut queries = solver.arm_error_queries(4).unwrap();
+    work.0 += crate::smt::REPLAY_SOLVERS.get() - solvers_before;
     for (index, (prefix, condition, expected)) in [
         (true, true, SmtResult::Sat),
         (false, false, SmtResult::Sat),
@@ -6145,13 +6152,22 @@ fn arm_error_leaf_batch_child() {
         failed.assert(polarity(prefix));
         let guard = failed.define_const(polarity(condition), loc);
         let failed_at = checkpoint(&mut failed);
+        let before = (crate::smt::REPLAY_SOLVERS.get(), crate::smt::REPLAY_SMT_EVENTS.get());
         let checked = solver.check_arm_error(guard, &failed_at, loc, Some(&mut queries));
+        work.0 += crate::smt::REPLAY_SOLVERS.get() - before.0;
+        work.1 += crate::smt::REPLAY_SMT_EVENTS.get() - before.1;
         assert_eq!(checked, Some(expected));
         if index % 2 == 0 {
             assert!(queries.used_for_last_check(), "错误叶应在批次求解器中检查");
         }
         assert_eq!(checked, solver.check_arm_error(guard, &failed_at, loc, None));
         assert_eq!(queries.batch_released(), index % 2 == 1, "批满后应立即释放原生求解器");
+    }
+    assert_eq!(work, (1, 129 + 4 * 2), "认证求解器和 SMT 回放事件计数");
+    for batch in [None, Some(&mut queries)] {
+        crate::smt::test_queries::with_results([Some(z3_sys::Z3_L_UNDEF)], || {
+            assert!(solver.check_arm_error(input, &entry, loc, batch).unwrap().is_unknown());
+        });
     }
 }
 

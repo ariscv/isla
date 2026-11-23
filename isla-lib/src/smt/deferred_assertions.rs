@@ -262,16 +262,15 @@ impl<B: BV> Solver<'_, B> {
         guard: Sym,
         point: &Checkpoint<B>,
         info: SourceLoc,
-        queries: Option<&mut ArmErrorQueries<'_>>,
+        queries: Option<&mut ArmErrorQueries<'_, B>>,
     ) -> Option<SmtResult> {
         if !self.validates_candidates() {
             return None;
         }
-        let mut verifier = Solver::from_checkpoint(self.ctx, point.clone());
         let target = Exp::Var(guard);
         match queries {
-            Some(queries) => Some(queries.check(&verifier, &target, info)),
-            None => verifier.check_candidate_sat_with(&target, info),
+            Some(queries) => Some(queries.check(point, &target, info)),
+            None => Solver::from_checkpoint(self.ctx, point.clone()).check_candidate_sat_with(&target, info),
         }
     }
 

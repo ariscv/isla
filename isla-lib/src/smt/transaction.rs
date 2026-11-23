@@ -45,6 +45,7 @@ impl Drop for SavedModel<'_> {
 pub(super) enum DeclarationUndo<'ctx> {
     Constant(Sym, Option<ConstBinding<'ctx>>),
     Bitvector(Sym),
+    ReplayEnum(Name),
     Function(Sym, Option<FuncDecl<'ctx>>),
 }
 
@@ -259,6 +260,19 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         token
     }
 
+    pub(super) fn rewind_declarations(&mut self, len: usize) {
+        while self.declaration_undo.len() > len {
+            match self.declaration_undo.pop().unwrap() {
+                DeclarationUndo::Constant(sym, previous) => restore_binding(&mut self.decls, sym, previous),
+                DeclarationUndo::Bitvector(sym) => {
+                    assert!(self.sail_bitvectors.remove(&sym), "撤销的位向量标记必须存在");
+                }
+                DeclarationUndo::ReplayEnum(name) => self.enums.enums.remove(&name).unwrap().dec_refs(self.ctx.z3_ctx),
+                DeclarationUndo::Function(sym, previous) => restore_binding(&mut self.func_decls, sym, previous),
+            }
+        }
+    }
+
     pub fn rollback_transaction(&mut self, tx: SolverTransaction) {
         let cost_scope =
             crate::executor::stats::region_cost::Scope::enter(crate::executor::stats::region_cost::Category::Release);
@@ -293,15 +307,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             self.transaction_conditions.pop().unwrap();
         }
         self.clear_stashed_model();
-        while self.declaration_undo.len() > savepoint.declaration_undo_len {
-            match self.declaration_undo.pop().unwrap() {
-                DeclarationUndo::Constant(sym, previous) => restore_binding(&mut self.decls, sym, previous),
-                DeclarationUndo::Bitvector(sym) => {
-                    assert!(self.sail_bitvectors.remove(&sym), "撤销的位向量标记必须存在");
-                }
-                DeclarationUndo::Function(sym, previous) => restore_binding(&mut self.func_decls, sym, previous),
-            }
-        }
+        self.rewind_declarations(savepoint.declaration_undo_len);
         self.def_attrs = savepoint.def_attrs;
         self.cycles = savepoint.cycles;
         self.asserts_since_check = savepoint.asserts_since_check;

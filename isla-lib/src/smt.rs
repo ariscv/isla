@@ -326,6 +326,7 @@ pub(crate) use deferred_assertions::DeferredArmAssertions;
 pub(crate) use deferred_assertions::{reset_test_mandatory_query_count, test_mandatory_query_count};
 mod finite_domain;
 pub(crate) use finite_domain::FiniteDomain;
+mod arm_error_replay;
 pub mod no_smt;
 mod query;
 pub(crate) use query::ArmErrorQueries;
@@ -2003,6 +2004,12 @@ impl PerformanceInfo {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static REPLAY_SOLVERS: Cell<usize> = const { Cell::new(0) };
+    pub(crate) static REPLAY_SMT_EVENTS: Cell<usize> = const { Cell::new(0) };
+}
+
 /// The Solver type handles all interaction with Z3. It mimics
 /// interacting with Z3 via the subset of the SMTLIB 2.0 format we
 /// care about.
@@ -2090,6 +2097,8 @@ pub struct Solver<'ctx, B> {
     shadow_witnesses: witness_shadow::Bank<'ctx>,
     savepoints: Vec<SolverSavepoint<'ctx, B>>,
     declaration_undo: Vec<DeclarationUndo<'ctx>>,
+    // 批量错误叶认证独占的翻译器。每条断言在当时的符号绑定下冻结。
+    replay_assertions: Option<Vec<Ast<'ctx>>>,
     transaction_events: Vec<Event<B>>,
     finite_prefix: Option<finite_domain::PrefixIndex<'ctx>>,
     logical_arms: logical_arm::LogicalArms,
@@ -2806,6 +2815,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 
     fn new_with_symbol_namer(ctx: &'ctx Context, symbol_namer: Z3SymbolNamer, seed: Option<u32>) -> Self {
+        #[cfg(test)]
+        REPLAY_SOLVERS.set(REPLAY_SOLVERS.get() + 1);
         let config = SMT_CONFIG.get().expect("SMT 尚未初始化，请在程序启动时调用 smt::configure_tastic");
         unsafe {
             // Default 使用原生 solver，其余策略仍显式指定 tactic；均不按 logic 限制枚举支持。
@@ -2840,6 +2851,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 shadow_witnesses: witness_shadow::Bank::new(ctx),
                 savepoints: Vec::new(),
                 declaration_undo: Vec::new(),
+                replay_assertions: None,
                 transaction_events: Vec::new(),
                 finite_prefix: ctx
                     .solver_options
@@ -3159,8 +3171,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         crate::executor::stats::region_cost::count(crate::executor::stats::region_cost::Category::ReplayAssert, 1, 0);
         let mut ast = self.translate_exp(exp);
         ast.simplify();
-        unsafe {
-            Z3_solver_assert(self.ctx.z3_ctx, self.z3_solver, ast.z3_ast);
+        if let Some(assertions) = &mut self.replay_assertions {
+            assertions.push(ast);
+        } else {
+            unsafe { Z3_solver_assert(self.ctx.z3_ctx, self.z3_solver, ast.z3_ast) };
         }
     }
 
@@ -3223,7 +3237,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     self.knowledge.constrain();
                     self.clear_stashed_model();
                 }
-                if !self.savepoints.is_empty() {
+                if self.tracks_declarations() {
                     self.declaration_undo.push(DeclarationUndo::Function(*v, previous));
                 }
             }
@@ -3254,7 +3268,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     // matches constructors through recognizers from the model
                     // value's own sort.
                     let members: Vec<Sym> = (0..*size).map(|_| self.fresh()).collect();
-                    self.enums.add_enum(*name, &members, &self.symbol_namer)
+                    self.enums.add_enum(*name, &members, &self.symbol_namer);
+                    if self.replay_assertions.is_some() {
+                        self.declaration_undo.push(DeclarationUndo::ReplayEnum(*name));
+                    }
                 }
             }
         }
@@ -3342,6 +3359,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.with_def_attrs(self.def_attrs.sail_bitvector(), |solver| solver.define_const(exp, info))
     }
 
+    fn tracks_declarations(&self) -> bool {
+        !self.savepoints.is_empty() || self.replay_assertions.is_some()
+    }
+
     fn bind_constant(&mut self, sym: Sym, binding: ConstBinding<'ctx>) {
         // 改绑可能改变缓冲断言的含义，清除已有见证。
         let previous = self.decls.insert(sym, binding);
@@ -3349,13 +3370,13 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             self.knowledge.constrain();
             self.clear_stashed_model();
         }
-        if !self.savepoints.is_empty() {
+        if self.tracks_declarations() {
             self.declaration_undo.push(DeclarationUndo::Constant(sym, previous));
         }
     }
 
     fn tag_bitvector(&mut self, sym: Sym) {
-        if self.sail_bitvectors.insert(sym) && !self.savepoints.is_empty() {
+        if self.sail_bitvectors.insert(sym) && self.tracks_declarations() {
             self.declaration_undo.push(DeclarationUndo::Bitvector(sym));
         }
     }
@@ -3440,6 +3461,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     fn add_event_internal(&mut self, event: &Event<B>) {
         if let Event::Smt(def, attrs, info) = event {
+            #[cfg(test)]
+            REPLAY_SMT_EVENTS.set(REPLAY_SMT_EVENTS.get() + 1);
             self.with_def_attrs(*attrs, |solver| solver.add_internal(def, *info))
         };
     }

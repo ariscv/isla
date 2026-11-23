@@ -79,7 +79,8 @@ pub(super) struct QuerySolver<'ctx> {
     independent: bool,
 }
 
-pub(crate) struct ArmErrorQueries<'ctx> {
+pub(crate) struct ArmErrorQueries<'ctx, B> {
+    replay: arm_error_replay::ArmErrorReplay<'ctx, B>,
     ctx: &'ctx Context,
     active: Option<QuerySolver<'ctx>>,
     batch_size: usize,
@@ -87,9 +88,10 @@ pub(crate) struct ArmErrorQueries<'ctx> {
 }
 
 impl<'ctx, B: BV> Solver<'ctx, B> {
-    pub(crate) fn arm_error_queries(&self, count: usize) -> Option<ArmErrorQueries<'ctx>> {
+    pub(crate) fn arm_error_queries(&self, count: usize) -> Option<ArmErrorQueries<'ctx, B>> {
         let config = SMT_CONFIG.get().unwrap();
         (count > 1 && self.validates_candidates() && config.tactic == Tactic::Default).then(|| ArmErrorQueries {
+            replay: arm_error_replay::ArmErrorReplay::new(self.ctx),
             ctx: self.ctx,
             active: None,
             batch_size: crate::config::RegionOptions::current().arm_error_batch_size.get(),
@@ -98,8 +100,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
     }
 }
 
-impl ArmErrorQueries<'_> {
-    pub(super) fn check<B: BV>(&mut self, verifier: &Solver<B>, target: &Exp<Sym>, info: SourceLoc) -> SmtResult {
+impl<B: BV> ArmErrorQueries<'_, B> {
+    pub(super) fn check(&mut self, point: &Checkpoint<B>, target: &Exp<Sym>, info: SourceLoc) -> SmtResult {
+        let verifier = self.replay.restore(point);
         let active = self.active.get_or_insert_with(|| {
             let ctx = self.ctx;
             let z3_solver = unsafe { new_z3_solver(ctx.z3_ctx, Tactic::Default.as_c_str(), None) };
@@ -123,11 +126,7 @@ impl QuerySolver<'_> {
         let _scope = crate::executor::stats::region_progress::QueryScope::fallback("arm_error");
         let goal = verifier.translate_exp(target);
         let selector = unsafe {
-            let assertions = Z3_solver_get_assertions(ctx.z3_ctx, verifier.z3_solver);
-            Z3_ast_vector_inc_ref(ctx.z3_ctx, assertions);
-            let mut terms = (0..Z3_ast_vector_size(ctx.z3_ctx, assertions))
-                .map(|index| Z3_ast_vector_get(ctx.z3_ctx, assertions, index))
-                .collect::<Vec<_>>();
+            let mut terms: Vec<_> = verifier.replay_assertions.as_ref().unwrap().iter().map(|a| a.z3_ast).collect();
             terms.push(goal.z3_ast);
             let formula = Z3_mk_and(ctx.z3_ctx, terms.len().try_into().unwrap(), terms.as_ptr());
             Z3_inc_ref(ctx.z3_ctx, formula);
@@ -136,7 +135,6 @@ impl QuerySolver<'_> {
             Z3_inc_ref(ctx.z3_ctx, flag);
             let selector = Ast { ctx, z3_ast: flag };
             Z3_solver_assert(ctx.z3_ctx, native, Z3_mk_implies(ctx.z3_ctx, flag, formula.z3_ast));
-            Z3_ast_vector_dec_ref(ctx.z3_ctx, assertions);
             selector
         };
         let slow = verifier.slow_query_begin(native);
@@ -162,7 +160,7 @@ impl QuerySolver<'_> {
 }
 
 #[cfg(test)]
-impl ArmErrorQueries<'_> {
+impl<B> ArmErrorQueries<'_, B> {
     pub(crate) fn used_for_last_check(&self) -> bool {
         self.active.as_ref().is_some_and(|batch| z3_timeout::last_solver_query().0 == batch.z3_solver as usize)
     }
