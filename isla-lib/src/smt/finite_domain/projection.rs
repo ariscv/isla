@@ -144,7 +144,7 @@ impl AnchorProjection {
     }
 }
 
-fn is_literal_shape(ast: &Ast) -> bool {
+pub(super) fn is_literal_shape(ast: &Ast) -> bool {
     unsafe {
         let z3 = ast.ctx.z3_ctx;
         let atom =

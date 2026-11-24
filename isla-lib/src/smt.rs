@@ -926,21 +926,34 @@ pub struct SolverOptions {
     pub incremental_choice_dag: bool,
     pub coi_query_slicing: bool,
     pub finite_domain_ground_eval: bool,
+    pub branch_candidate_sparse_rewrite: bool,
+    pub joint_candidate_sparse_rewrite: bool,
+    pub structural_bool_cache: bool,
+    pub retain_ordinary_prefix_cache: bool,
+    pub reuse_narrow_truth: bool,
+    pub skip_independent_predicate_substitution: bool,
     pub bv_rewrite: rewrite::BvRewrite,
 }
 
 impl Default for SolverOptions {
     fn default() -> Self {
+        let defaults = crate::config::PathMergeConfig::default();
         Self {
             on_unknown: Default::default(),
             skip_branch_checks: false,
             skip_bool_proofs: false,
             no_smt: false,
             keep_bool_proofs: false,
-            finite_domain_enumeration: crate::config::PathMergeConfig::default().finite_domain_enumeration,
+            finite_domain_enumeration: defaults.finite_domain_enumeration,
             incremental_choice_dag: false,
             coi_query_slicing: false,
-            finite_domain_ground_eval: crate::config::PathMergeConfig::default().finite_domain_ground_eval,
+            finite_domain_ground_eval: defaults.finite_domain_ground_eval,
+            branch_candidate_sparse_rewrite: defaults.branch_candidate_sparse_rewrite,
+            joint_candidate_sparse_rewrite: defaults.joint_candidate_sparse_rewrite,
+            structural_bool_cache: defaults.structural_bool_cache,
+            retain_ordinary_prefix_cache: defaults.retain_ordinary_prefix_cache,
+            reuse_narrow_truth: defaults.reuse_narrow_truth,
+            skip_independent_predicate_substitution: defaults.skip_independent_predicate_substitution,
             bv_rewrite: Default::default(),
         }
     }
@@ -1011,7 +1024,11 @@ fn fresh_random_seed() -> u32 {
         .unwrap_or(1)
 }
 
+// 自定义全局改写参数可能限制单次化简。此时走原生路径。
+static CUSTOM_Z3_GLOBAL_PARAMS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn global_set_param_value(id: &str, value: &str) {
+    CUSTOM_Z3_GLOBAL_PARAMS.store(true, std::sync::atomic::Ordering::Release);
     let id = CString::new(id).unwrap();
     let value = CString::new(value).unwrap();
     unsafe { Z3_global_param_set(id.as_ptr(), value.as_ptr()) }
@@ -1025,6 +1042,7 @@ pub struct Context {
     rlimit: Option<u32>,
     native_timeout: Option<Duration>,
     enum_cache: RefCell<HashMap<EnumSortKey, Enum>>,
+    structural_bools: RefCell<no_smt::StructuralBoolCache>,
 }
 
 fn z3_version_supported(version: (c_uint, c_uint, c_uint, c_uint)) -> bool {
@@ -1049,8 +1067,15 @@ impl Context {
                 rlimit: cfg.rlimit,
                 native_timeout: cfg.native_timeout,
                 enum_cache: RefCell::new(HashMap::new()),
+                structural_bools: RefCell::default(),
             }
         }
+    }
+
+    fn has_unbounded_rewriting(&self) -> bool {
+        self.rlimit.is_none()
+            && self.native_timeout.is_none()
+            && !CUSTOM_Z3_GLOBAL_PARAMS.load(std::sync::atomic::Ordering::Acquire)
     }
 
     fn error(&self) -> ExecError {
@@ -1068,6 +1093,7 @@ impl Drop for Context {
         for (_, enumeration) in self.enum_cache.get_mut().drain() {
             enumeration.dec_refs(self.z3_ctx);
         }
+        self.structural_bools.get_mut().clear(self.z3_ctx);
         unsafe { Z3_del_context(self.z3_ctx) }
     }
 }
@@ -1377,6 +1403,7 @@ impl<'ctx> Ast<'ctx> {
         unsafe {
             if SMT_CONFIG.get().is_some_and(|config| config.tactic == Tactic::Default) {
                 let z3_ast = Z3_simplify(self.ctx.z3_ctx, self.z3_ast);
+                assert!(!z3_ast.is_null(), "Z3 化简未完成：{:?}", self.ctx.error());
                 Z3_inc_ref(self.ctx.z3_ctx, z3_ast);
                 Z3_dec_ref(self.ctx.z3_ctx, self.z3_ast);
                 self.z3_ast = z3_ast;
@@ -1395,6 +1422,7 @@ impl<'ctx> Ast<'ctx> {
             Z3_params_set_bool(self.ctx.z3_ctx, z3_params, bv_sort_ac, true);
 
             let z3_ast = Z3_simplify_ex(self.ctx.z3_ctx, self.z3_ast, z3_params);
+            assert!(!z3_ast.is_null(), "Z3 化简未完成：{:?}", self.ctx.error());
             Z3_inc_ref(self.ctx.z3_ctx, z3_ast);
             Z3_dec_ref(self.ctx.z3_ctx, self.z3_ast);
             self.z3_ast = z3_ast;
