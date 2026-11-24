@@ -96,7 +96,7 @@ impl<'ctx> Ast<'ctx> {
             }
             // DefineConst已把sign_extend化成concat并传播extract到ITE。
             // 以同一原生化简器重建后严格比较AST，不按操作符显示名猜测类型/值域。
-            rebuilt.simplify();
+            rebuilt.simplify_small();
             Z3_is_eq_ast(ctx, self.z3_ast, rebuilt.z3_ast).then_some(source)
         }
     }

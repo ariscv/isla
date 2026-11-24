@@ -931,16 +931,17 @@ pub struct SolverOptions {
 
 impl Default for SolverOptions {
     fn default() -> Self {
+        let defaults = crate::config::PathMergeConfig::default();
         Self {
             on_unknown: Default::default(),
             skip_branch_checks: false,
             skip_bool_proofs: false,
             no_smt: false,
             keep_bool_proofs: false,
-            finite_domain_enumeration: crate::config::PathMergeConfig::default().finite_domain_enumeration,
+            finite_domain_enumeration: defaults.finite_domain_enumeration,
             incremental_choice_dag: false,
             coi_query_slicing: false,
-            finite_domain_ground_eval: crate::config::PathMergeConfig::default().finite_domain_ground_eval,
+            finite_domain_ground_eval: defaults.finite_domain_ground_eval,
             bv_rewrite: Default::default(),
         }
     }
@@ -1011,7 +1012,11 @@ fn fresh_random_seed() -> u32 {
         .unwrap_or(1)
 }
 
+// 自定义全局改写参数可能限制单次化简。此时走原生路径。
+static CUSTOM_Z3_GLOBAL_PARAMS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn global_set_param_value(id: &str, value: &str) {
+    CUSTOM_Z3_GLOBAL_PARAMS.store(true, std::sync::atomic::Ordering::Release);
     let id = CString::new(id).unwrap();
     let value = CString::new(value).unwrap();
     unsafe { Z3_global_param_set(id.as_ptr(), value.as_ptr()) }
@@ -1025,6 +1030,8 @@ pub struct Context {
     rlimit: Option<u32>,
     native_timeout: Option<Duration>,
     enum_cache: RefCell<HashMap<EnumSortKey, Enum>>,
+    structural_bools: RefCell<no_smt::StructuralBoolCache>,
+    small_simplifications: RefCell<rewrite::SmallSimplifications>,
 }
 
 fn z3_version_supported(version: (c_uint, c_uint, c_uint, c_uint)) -> bool {
@@ -1049,8 +1056,16 @@ impl Context {
                 rlimit: cfg.rlimit,
                 native_timeout: cfg.native_timeout,
                 enum_cache: RefCell::new(HashMap::new()),
+                structural_bools: RefCell::default(),
+                small_simplifications: RefCell::default(),
             }
         }
+    }
+
+    fn has_unbounded_rewriting(&self) -> bool {
+        self.rlimit.is_none()
+            && self.native_timeout.is_none()
+            && !CUSTOM_Z3_GLOBAL_PARAMS.load(std::sync::atomic::Ordering::Acquire)
     }
 
     fn error(&self) -> ExecError {
@@ -1068,6 +1083,8 @@ impl Drop for Context {
         for (_, enumeration) in self.enum_cache.get_mut().drain() {
             enumeration.dec_refs(self.z3_ctx);
         }
+        self.structural_bools.get_mut().clear(self.z3_ctx);
+        self.small_simplifications.get_mut().clear(self.z3_ctx);
         unsafe { Z3_del_context(self.z3_ctx) }
     }
 }
@@ -1369,6 +1386,10 @@ impl<'ctx> Ast<'ctx> {
     }
 
     fn simplify(&mut self) {
+        self.simplify_with_verified_fixpoint();
+    }
+
+    fn simplify_native(&mut self) {
         #[cfg(test)]
         AST_SIMPLIFY_CALLS.set(AST_SIMPLIFY_CALLS.get() + 1);
         let cost_scope =
@@ -1377,6 +1398,7 @@ impl<'ctx> Ast<'ctx> {
         unsafe {
             if SMT_CONFIG.get().is_some_and(|config| config.tactic == Tactic::Default) {
                 let z3_ast = Z3_simplify(self.ctx.z3_ctx, self.z3_ast);
+                assert!(!z3_ast.is_null(), "Z3 化简未完成：{:?}", self.ctx.error());
                 Z3_inc_ref(self.ctx.z3_ctx, z3_ast);
                 Z3_dec_ref(self.ctx.z3_ctx, self.z3_ast);
                 self.z3_ast = z3_ast;
@@ -1395,6 +1417,7 @@ impl<'ctx> Ast<'ctx> {
             Z3_params_set_bool(self.ctx.z3_ctx, z3_params, bv_sort_ac, true);
 
             let z3_ast = Z3_simplify_ex(self.ctx.z3_ctx, self.z3_ast, z3_params);
+            assert!(!z3_ast.is_null(), "Z3 化简未完成：{:?}", self.ctx.error());
             Z3_inc_ref(self.ctx.z3_ctx, z3_ast);
             Z3_dec_ref(self.ctx.z3_ctx, self.z3_ast);
             self.z3_ast = z3_ast;
@@ -3329,7 +3352,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 }
                 self.performance_info.add_var_node(*v, info);
                 let fd = FuncDecl::new(self.ctx, *v, &self.enums, &[], ty, &self.symbol_namer);
-                self.bind_constant(*v, ConstBinding::new(Ast::mk_constant(&fd), false));
+                self.bind_constant(*v, ConstBinding::new(Ast::mk_constant(&fd), false, false));
                 if self.def_attrs.attrs & 2 != 0 {
                     self.tag_bitvector(*v);
                 }
@@ -3361,12 +3384,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                         self.performance_info.add_var_edge(used, v)
                     }
                 }
-                // 翻译时冻结操作数的绑定，第一次取值时再化简。
+                // 翻译时冻结操作数的绑定，重放保留未折叠的原始表达式。
                 let ast = self.translate_exp(exp);
-                let mut binding = ConstBinding::new(ast, true);
-                if self.replaying_arm_entry && self.replay_assertions.is_some() {
-                    binding.keep_replay_ast();
-                }
+                let keep_replay = self.replaying_arm_entry && self.replay_assertions.is_some();
+                let binding = ConstBinding::new(ast, true, keep_replay);
                 self.bind_constant(*v, binding);
                 if self.def_attrs.attrs & 2 != 0 {
                     self.tag_bitvector(*v);
@@ -4747,7 +4768,7 @@ mod tests {
             replayed.define_const(Bvadd(Box::new(smtlib::bits64(3, 16)), Box::new(smtlib::bits64(4, 16))), info);
         let before = AST_SIMPLIFY_CALLS.get();
         assert_eq!(replayed.translate_exp(&Var(constant)).get_numeral_u64().unwrap(), 7);
-        assert_eq!(AST_SIMPLIFY_CALLS.get(), before + 1, "新定义首次取值仍须化简");
+        assert_eq!(AST_SIMPLIFY_CALLS.get(), before, "新定义的已知常量可直接求值");
         eprintln!("重放／原执行的化简次数：{replay_calls}／{original_calls}");
         assert!(replay_calls * 10 < original_calls, "重放／原执行的化简次数：{replay_calls}／{original_calls}");
     }

@@ -67,7 +67,15 @@ impl<B: BV> Solver<'_, B> {
 
     /// 先化简表达式，再用已启用的有限域前缀证明蕴含，不查询 SMT 或读取模型。
     pub(crate) fn structural_bool(&self, exp: &Exp<Sym>) -> Option<bool> {
-        self.translate_exp(exp).structural_bool().or_else(|| self.finite_domain_bool(exp))
+        self.branch_structural_bool(exp).or_else(|| self.finite_domain_bool(exp))
+    }
+
+    pub(super) fn branch_structural_bool(&self, exp: &Exp<Sym>) -> Option<bool> {
+        let mut value = self.translate_exp(exp);
+        if dedup::literal(exp).is_some() && self.ctx.has_unbounded_rewriting() && value.is_open_branch_atom() {
+            return None;
+        }
+        value.structural_bool()
     }
 
     /// 结构范围只依赖位宽与定义，有无 SMT 都使用同一判定。
@@ -144,15 +152,115 @@ impl<B: BV> Solver<'_, B> {
     }
 }
 
+// 每个 Context 独占表。键区分原生默认参数与 Isla 的三项 BV 参数。
+#[derive(Default)]
+pub(super) struct StructuralBoolCache {
+    entries: ahash::AHashMap<(Z3_ast, bool), (Option<bool>, Z3_ast)>,
+}
+
+impl StructuralBoolCache {
+    pub(super) fn clear(&mut self, z3: Z3_context) {
+        for ((input, _), (_, output)) in self.entries.drain() {
+            unsafe {
+                Z3_dec_ref(z3, input);
+                Z3_dec_ref(z3, output);
+            }
+        }
+    }
+}
+
 impl Ast<'_> {
     pub(super) fn structural_bool(&mut self) -> Option<bool> {
         #[cfg(test)]
         finite_domain::STRUCTURAL_BOOLS.set(finite_domain::STRUCTURAL_BOOLS.get() + 1);
+        if !self.ctx.has_unbounded_rewriting() {
+            return self.structural_bool_uncached();
+        }
+
+        let default_params = SMT_CONFIG.get().is_some_and(|config| config.tactic == Tactic::Default);
+        let key = (self.z3_ast, default_params);
+        let z3 = self.ctx.z3_ctx;
+        let mut cache = self.ctx.structural_bools.borrow_mut();
+        if let Some(&(truth, residual)) = cache.entries.get(&key) {
+            unsafe {
+                Z3_inc_ref(z3, residual);
+                Z3_dec_ref(z3, self.z3_ast);
+            }
+            self.z3_ast = residual;
+            return truth;
+        }
+
+        // 化简可能释放输入。先保活原 AST；失败退出时也由 Ast 释放。
+        let input = self.clone();
+        let truth = self.structural_bool_uncached();
+        if self.ctx.has_unbounded_rewriting() {
+            // 每个 Context 只保留近期精确输入，限制键和值最多持有 32,768 个引用。
+            // 一个长根可产生大量唯一残余，不能把它们保留至整个 Context 退出。
+            const MAX_ENTRIES: usize = 16_384;
+            if cache.entries.len() >= MAX_ENTRIES {
+                cache.clear(z3);
+            }
+            unsafe { Z3_inc_ref(z3, self.z3_ast) };
+            std::mem::forget(input);
+            cache.entries.insert(key, (truth, self.z3_ast));
+        }
+        truth
+    }
+
+    pub(super) fn structural_bool_uncached(&mut self) -> Option<bool> {
         if let Some(value) = unsafe { structural_comparison(self.ctx, self.z3_ast) } {
             return Some(value);
         }
+        if self.ctx.has_unbounded_rewriting() {
+            if let Some(value) = self.get_bool_value() {
+                return Some(value);
+            }
+            if let Some(value) = self.boolean_constant_rewrite() {
+                *self = Ast::mk_bool(self.ctx, value);
+                return Some(value);
+            }
+        }
+        // 原生 Z3 在超时、步数耗尽或中断时报告失败。此处只有成功返回才入表。
         self.simplify();
         self.get_bool_value().or_else(|| unsafe { structural_comparison(self.ctx, self.z3_ast) })
+    }
+
+    #[cfg(test)]
+    pub(super) fn reference_structural_bool(&mut self) -> Option<bool> {
+        if let Some(value) = unsafe { structural_comparison(self.ctx, self.z3_ast) } {
+            return Some(value);
+        }
+        self.simplify_native();
+        self.get_bool_value().or_else(|| unsafe { structural_comparison(self.ctx, self.z3_ast) })
+    }
+
+    fn boolean_constant_rewrite(&self) -> Option<bool> {
+        // 这些规则的原生残余必为 true/false。即使另一侧含符号值也可判定。
+        unsafe {
+            let z3 = self.ctx.z3_ctx;
+            if Z3_get_ast_kind(z3, self.z3_ast) != AstKind::App {
+                return None;
+            }
+            let app = Z3_to_app(z3, self.z3_ast);
+            let kind = rewrite::decl_kind_raw(z3, Z3_get_app_decl(z3, app));
+            let arg = |i| Z3_get_app_arg(z3, app, i);
+            let truth = |i| match Z3_get_bool_value(z3, arg(i)) {
+                Z3_L_TRUE => Some(true),
+                Z3_L_FALSE => Some(false),
+                _ => None,
+            };
+            if kind == DeclKind::EQ as u32 {
+                return (arg(0) == arg(1)).then_some(true);
+            }
+            if kind == DeclKind::NOT as u32 {
+                return truth(0).map(|value| !value);
+            }
+            if kind == DeclKind::AND as u32 || kind == DeclKind::OR as u32 {
+                let absorbing = kind == DeclKind::OR as u32;
+                return (0..Z3_get_app_num_args(z3, app)).any(|i| truth(i) == Some(absorbing)).then_some(absorbing);
+            }
+            None
+        }
     }
 }
 
@@ -447,9 +555,9 @@ mod tests {
                 let value = solver.translate_exp(&Exp::Var(symbol));
                 assert_eq!(value.z3_ast, expected[index].z3_ast, "延迟化简必须保留定义时的绑定");
                 assert_eq!(value.get_numeral_u64().unwrap(), index as u64 + 2);
-                assert_eq!(AST_SIMPLIFY_CALLS.get(), before + 1);
+                assert_eq!(AST_SIMPLIFY_CALLS.get(), before, "读取前已知操作数全为字面量");
                 assert_eq!(solver.translate_exp(&Exp::Var(symbol)).z3_ast, value.z3_ast);
-                assert_eq!(AST_SIMPLIFY_CALLS.get(), before + 1, "重复读值须复用已化简表达式");
+                assert_eq!(AST_SIMPLIFY_CALLS.get(), before, "重复读值须复用已化简表达式");
             }
             solver.rollback_transaction(tx);
             assert_eq!(solver.translate_exp(&Exp::Var(input)).get_numeral_u64().unwrap(), 2);

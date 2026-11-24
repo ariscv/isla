@@ -46,7 +46,7 @@ impl<B: BV> Solver<'_, B> {
         let skip_query = deferred || self.branch_checks_skipped();
         // 延后或关闭查询时也要排除表达式恒假的分支。恒真只说明本条件，
         // 当前路径仍须由原有的出口检查或认证入口判定。
-        if skip_query && self.translate_exp(exp).structural_bool() == Some(false) {
+        if skip_query && self.branch_structural_bool(exp) == Some(false) {
             return Some(Unsat);
         }
         if self.finite_domain_enabled() && self.finite_domain_bool(exp) == Some(false) {
