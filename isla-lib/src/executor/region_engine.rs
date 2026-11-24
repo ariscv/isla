@@ -220,7 +220,10 @@ pub(super) fn close_arm<B: BV>(
             diagnostics::execute_arm_error(arm.function_name, arm.pc, &error, &shared.symtab);
             solver.rollback_transaction(tx);
             Err(match error {
-                ExecError::SpeculativeReject { .. } | ExecError::Smt(_) | ExecError::Timeout => error,
+                ExecError::SpeculativeReject { .. }
+                | ExecError::Smt(_)
+                | ExecError::Timeout
+                | ExecError::ProgramStopped => error,
                 ExecError::Unproven(cause) => region_merge::reject_query(arm, cause),
                 _ => reject(arm, SpeculativeRejectReason::IncompatibleState),
             })

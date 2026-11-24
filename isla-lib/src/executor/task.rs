@@ -86,6 +86,7 @@ impl<B> TaskInterrupt<B> {
 }
 
 pub struct TaskState<B> {
+    pub(super) stopped_paths: Option<std::sync::atomic::AtomicUsize>,
     pub(super) arm_costs: std::sync::Arc<super::arm_cost::ArmCosts>,
     #[cfg(test)]
     pub(super) arm_test_hook: Option<std::sync::Arc<dyn Fn(&str) -> Result<(), crate::error::ExecError> + Send + Sync>>,
@@ -126,6 +127,18 @@ impl<B> TaskState<B> {
         })
     }
 
+    pub fn with_program_control(self) -> Self {
+        Self { stopped_paths: super::program_control::active().then(Default::default), ..self }
+    }
+
+    pub(super) fn stopping(&self) -> bool {
+        self.stopped_paths.is_some() && super::program_control::reason().is_some()
+    }
+
+    pub fn stopped_paths(&self) -> usize {
+        self.stopped_paths.as_ref().map_or(0, |count| count.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
     pub fn speculation_stats(&self) -> &SpeculationStats {
         &self.speculation_stats
     }
@@ -133,6 +146,7 @@ impl<B> TaskState<B> {
     pub fn new() -> Self {
         super::merge_record::initialize();
         TaskState {
+            stopped_paths: None,
             arm_costs: Default::default(),
             #[cfg(test)]
             arm_test_hook: None,
@@ -300,6 +314,16 @@ pub struct Task<'ir, 'task, B> {
 }
 
 impl<'task, B> Task<'_, 'task, B> {
+    // 已交给调度器的区域错误叶仍须交付收集器；普通挂起帧按整条路径丢弃。
+    pub(super) fn discard_on_stop(&self) -> bool {
+        if self.state.stopping() && self.frame.arm_error.is_none() {
+            self.state.stopped_paths.as_ref().unwrap().fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn set_stop_conditions(&mut self, new_fns: &'task StopConditions) {
         self.stop_conditions = Some(new_fns);
     }

@@ -1077,7 +1077,7 @@ impl SnapshotReporter {
             return reporter;
         }
         assert!(!interval.is_zero());
-        if diagnostic {
+        if diagnostic && !crate::executor::program_control::active() {
             TERMINATION.store(0, Ordering::Relaxed);
             unsafe {
                 for signal in [libc::SIGINT, libc::SIGTERM] {

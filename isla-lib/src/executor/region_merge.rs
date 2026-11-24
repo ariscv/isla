@@ -671,6 +671,9 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
     info: SourceLoc,
 ) -> Result<RegionResult, ExecError> {
     let _scope = super::path_account::Scope::enter(super::path_account::Category::Merge);
+    if state.stopping() {
+        return Err(ExecError::ProgramStopped);
+    }
     if !frame.region_arrivals.is_empty() {
         return Ok(RegionResult::Suspended);
     }
@@ -855,6 +858,9 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         info,
                     );
                     log_phase("execute_end", None);
+                    if state.stopping() {
+                        return Err(ExecError::ProgramStopped);
+                    }
                     if let Ok(RegionResult::VerifiedPrefix(error)) = &output {
                         let reason = error.rejection_reason().expect("切点必须记录拒绝原因");
                         state.speculation_stats.record_reject(reason);
@@ -1093,6 +1099,9 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
             if solver.exploration_on_unknown().is_none() && stats::solver_failures::is_solver_failure(&error) {
                 return Err(error);
             }
+            if state.stopping() {
+                return Err(ExecError::ProgramStopped);
+            }
             if mode == MergeMode::Force {
                 speculation::force_failure(frame, state, shared, info, &error);
             }
@@ -1125,6 +1134,10 @@ pub(super) fn publish_arm_errors<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> +
         let Some((_, Event::Fork(id, ..))) = &mut task.fork_cond else {
             unreachable!("失败前沿必须有分叉元数据")
         };
+        if matches!(checked, Some(SmtResult::Error(SmtError::ProgramStopped))) {
+            task.state.stopped_paths.as_ref().unwrap().fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         if matches!(checked, Some(SmtResult::Unsat)) {
             return;
         }

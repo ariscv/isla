@@ -23,7 +23,6 @@ use crate::source_loc::SourceLoc;
 #[cfg(feature = "smt-thread-interrupt")]
 use crate::timeout::SmtTimeout;
 use crate::timeout::{SmtCallStats, SmtOperation, TimeoutSmtDump};
-#[cfg(feature = "smt-thread-interrupt")]
 use z3_sys::Z3_interrupt;
 
 #[cfg(test)]
@@ -48,25 +47,56 @@ pub(super) enum Z3TimeoutError {
     Interrupted(Duration),
 }
 
-#[cfg(feature = "smt-thread-interrupt")]
 struct Z3InterruptHandle {
     context: Z3_context,
 }
 
-#[cfg(feature = "smt-thread-interrupt")]
 unsafe impl Send for Z3InterruptHandle {}
-#[cfg(feature = "smt-thread-interrupt")]
 unsafe impl Sync for Z3InterruptHandle {}
 
-#[cfg(feature = "smt-thread-interrupt")]
 impl Z3InterruptHandle {
     fn from_context(context: Z3_context) -> Self {
         Z3InterruptHandle { context }
     }
 
-    fn interrupt(self) {
+    fn interrupt(&self) {
         unsafe { Z3_interrupt(self.context) }
     }
+}
+
+// 登记和移除持同一把锁；中断线程离开锁后，调用方才可销毁 Context。
+static PROGRAM_CHECKS: std::sync::Mutex<Vec<Z3InterruptHandle>> = std::sync::Mutex::new(Vec::new());
+
+pub(crate) fn interrupt_program_checks() {
+    for handle in PROGRAM_CHECKS.lock().unwrap().iter() {
+        handle.interrupt();
+    }
+}
+
+fn solver_check(context: Z3_context, solver: Z3_solver, assumptions: &[Z3_ast], count: u32) -> Z3_lbool {
+    use crate::executor::program_control;
+    let call = || unsafe {
+        if assumptions.is_empty() {
+            Z3_solver_check(context, solver)
+        } else {
+            Z3_solver_check_assumptions(context, solver, count, assumptions.as_ptr())
+        }
+    };
+    if !program_control::checks_enabled() {
+        return call();
+    }
+    {
+        let mut active = PROGRAM_CHECKS.lock().unwrap();
+        if program_control::reason().is_some() {
+            return z3_sys::Z3_L_UNDEF;
+        }
+        active.push(Z3InterruptHandle::from_context(context));
+    }
+    let result = call();
+    let mut active = PROGRAM_CHECKS.lock().unwrap();
+    let index = active.iter().position(|handle| handle.context == context).unwrap();
+    active.swap_remove(index);
+    result
 }
 
 static OPERATION_TIMEOUT: OnceLock<Option<Duration>> = OnceLock::new();
@@ -440,13 +470,7 @@ pub(super) fn timeout_Z3_solver_check(
         source_loc,
         context,
         || { Some(formula_size(context, solver, assumptions.len())) },
-        unsafe {
-            if assumptions.is_empty() {
-                Z3_solver_check(context, solver)
-            } else {
-                Z3_solver_check_assumptions(context, solver, count, assumptions.as_ptr())
-            }
-        }
+        solver_check(context, solver, assumptions, count)
     )
 }
 
@@ -473,15 +497,11 @@ pub(super) fn timeout_Z3_solver_check_deadline(
     }
     let count = assumptions.len().try_into().expect("Z3 查询假设数量超出上限");
     let account = path_account::Scope::smt(started);
-    let check = || unsafe {
+    let check = || {
         let timer = crate::executor::stats::region_progress::WorkTimer::start(
             crate::executor::stats::region_progress::WorkKind::Z3Check,
         );
-        let result = if assumptions.is_empty() {
-            Z3_solver_check(context, solver)
-        } else {
-            Z3_solver_check_assumptions(context, solver, count, assumptions.as_ptr())
-        };
+        let result = solver_check(context, solver, assumptions, count);
         drop(timer);
         result
     };
@@ -528,13 +548,7 @@ pub(super) fn timeout_Z3_solver_check_assumptions(
         source_loc,
         context,
         || { Some(formula_size(context, solver, assumptions.len())) },
-        unsafe {
-            if assumptions.is_empty() {
-                Z3_solver_check(context, solver)
-            } else {
-                Z3_solver_check_assumptions(context, solver, count, assumptions.as_ptr())
-            }
-        }
+        solver_check(context, solver, assumptions, count)
     )
 }
 

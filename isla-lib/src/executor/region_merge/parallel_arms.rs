@@ -115,6 +115,10 @@ fn run_b<'ir, B: BV>(
     state: &TaskState<B>,
     shared: &SharedState<'ir, B>,
 ) -> Result<Delivery<'ir, B>, ExecError> {
+    let _checks = program_control::CheckScope::enter(state.stopped_paths.is_some());
+    if state.stopping() {
+        return Err(ExecError::ProgramStopped);
+    }
     let ArmJob { cost, checkpoint, options, mut base, pc, guard, task, mut fraction, timeout, info } = job;
     let memory_task = stats::memory_stats::enabled().then(|| stats::memory_stats::begin_task(task.as_usize()));
     let _ = &memory_task;

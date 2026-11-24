@@ -12,7 +12,8 @@ pub struct FastFacts {
 
 /// 返回的布尔式表示：在该条件下，表达式由完整前态唯一决定。
 /// 活动读取还要求地址和活动条件本身已确定；不把未活动的自由读值算作输入。
-struct Dependencies {
+struct Dependencies<'solver, 'ctx, B: BV> {
+    solver: &'solver mut Solver<'ctx, B>,
     definitions: HashMap<Sym, Exp<Sym>>,
     inputs: HashSet<Sym>,
     reads: HashMap<Sym, Vec<(Exp<Sym>, Exp<Sym>)>>,
@@ -27,7 +28,7 @@ fn implies(a: Exp<Sym>, b: Exp<Sym>) -> Exp<Sym> {
     Exp::Or(Box::new(Exp::Not(Box::new(a))), Box::new(b)).eval()
 }
 
-impl Dependencies {
+impl<B: BV> Dependencies<'_, '_, B> {
     fn symbol(&mut self, symbol: Sym) -> Exp<Sym> {
         if self.inputs.contains(&symbol) {
             return Exp::Bool(true);
@@ -46,6 +47,11 @@ impl Dependencies {
             determined = Exp::Or(Box::new(determined), Box::new(condition)).eval();
         }
         self.visiting.remove(&symbol);
+        // 多个后继可共享同一项条件证明。给复合式命名，避免克隆已展开的整棵树。
+        let determined = match determined {
+            Exp::Bool(_) | Exp::Var(_) => determined,
+            condition => Exp::Var(self.solver.define_const(condition, SourceLoc::unknown())),
+        };
         self.cache.insert(symbol, determined.clone());
         determined
     }
@@ -85,7 +91,7 @@ impl Dependencies {
         }
     }
 
-    fn value<B: BV>(&mut self, value: &Val<B>) -> Exp<Sym> {
+    fn value(&mut self, value: &Val<B>) -> Exp<Sym> {
         match value {
             Val::Struct(fields) => fields.values().fold(Exp::Bool(true), |a, v| and(a, self.value(v))),
             Val::Ctor(_, value) => self.value(value),
@@ -133,13 +139,14 @@ impl FastFacts {
         }
         let simple_pre = path.pre.values().all(simple);
         let mut dependencies = Dependencies {
+            solver,
             definitions: HashMap::new(),
             inputs: HashSet::new(),
             reads: HashMap::new(),
             cache: HashMap::new(),
             visiting: HashSet::new(),
         };
-        for event in solver.trace().to_vec().into_iter().rev() {
+        for event in dependencies.solver.trace().to_vec().into_iter().rev() {
             if let Event::Smt(Def::DefineConst(symbol, exp), ..) = event {
                 dependencies.definitions.insert(*symbol, exp.clone());
             }
@@ -152,7 +159,7 @@ impl FastFacts {
         for (index, event) in path.memory.iter().enumerate() {
             if let Event::ReadMem { address, value: Val::Symbolic(symbol), bytes, .. } = event {
                 // 只有整个读取值都被绑定时，才能把整个符号作为已知量。
-                if solver.length(*symbol) == Some(8 * bytes) && *bytes > 0 {
+                if dependencies.solver.length(*symbol) == Some(8 * bytes) && *bytes > 0 {
                     dependencies.reads.entry(*symbol).or_default().push((
                         smt_value(address, SourceLoc::unknown())?,
                         path.memory_guards.get(&index).cloned().unwrap_or(Exp::Bool(true)),
@@ -160,6 +167,7 @@ impl FastFacts {
                 }
             }
         }
+        let transaction = dependencies.solver.start_transaction();
         let by_id = records.iter().map(|record| (record.record_id, record)).collect();
         let mut contexts = std::collections::HashMap::new();
         let mut visiting = std::collections::HashSet::new();
@@ -177,6 +185,7 @@ impl FastFacts {
             let active = and(dependencies.exp(&address), dependencies.exp(&data));
             post_condition = and(post_condition, and(dependencies.exp(&commit), implies(commit, active)));
         }
+        let solver = dependencies.solver;
         let mut prove = |condition: Exp<Sym>| -> Result<bool, ExecError> {
             match condition.eval() {
                 Exp::Bool(value) => Ok(value),
@@ -187,7 +196,11 @@ impl FastFacts {
                 },
             }
         };
-        Ok(Self { guard_unique: prove(guard_condition)?, post_unique: prove(post_condition)?, simple_pre })
+        let result = prove(guard_condition).and_then(|guard_unique| {
+            prove(post_condition).map(|post_unique| Self { guard_unique, post_unique, simple_pre })
+        });
+        solver.rollback_transaction(transaction);
+        result
     }
 }
 
@@ -347,12 +360,52 @@ impl From<crate::executor::path_cache::Facts> for FastFacts {
 #[cfg(test)]
 mod dependency_tests {
     use super::*;
+    use crate::bitvector::b64::B64;
+    use crate::smt::smtlib::Ty;
+    use crate::smt::{Config, Context};
+
+    #[test]
+    fn conditional_shared_dependency_proof_preserves_sharing() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let info = SourceLoc::unknown();
+        let input = solver.declare_const(Ty::Bool, info);
+        let free = solver.declare_const(Ty::Bool, info);
+        let mut dependencies = Dependencies {
+            solver: &mut solver,
+            definitions: HashMap::new(),
+            inputs: [input].into_iter().collect(),
+            reads: HashMap::new(),
+            cache: HashMap::new(),
+            visiting: HashSet::new(),
+        };
+        // input 为 true 时结果由前态决定。每级共享同一个条件前驱。
+        let mut expr = Exp::Or(Box::new(Exp::Var(input)), Box::new(Exp::Var(free)));
+        let mut previous = dependencies.solver.define_const(expr.clone(), info);
+        dependencies.definitions.insert(previous, expr);
+        for _ in 0..10 {
+            expr = Exp::And(Box::new(Exp::Var(previous)), Box::new(Exp::Var(previous)));
+            previous = dependencies.solver.define_const(expr.clone(), info);
+            dependencies.definitions.insert(previous, expr);
+        }
+        let mut proof = dependencies.symbol(previous);
+        let mut nodes = 0;
+        proof.modify(&mut |_| nodes += 1);
+        assert!(nodes < 100, "条件依赖展开为 {nodes} 个节点");
+        let different = Exp::Neq(Box::new(proof), Box::new(Exp::Var(input)));
+        assert_eq!(solver.check_sat_with(&different, info), SmtResult::Unsat);
+    }
 
     #[test]
     fn pure_shared_dag_dependency_proof_stays_constant() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
         let value = Sym::from_u32(0);
         let guard = Sym::from_u32(1);
         let mut dependencies = Dependencies {
+            solver: &mut solver,
             definitions: HashMap::new(),
             inputs: [value, guard].into_iter().collect(),
             reads: HashMap::new(),

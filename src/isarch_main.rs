@@ -433,7 +433,25 @@ fn resolve_witness_randomization(cli: Option<&str>, config: Option<&toml::Value>
     Ok(seed)
 }
 
+fn program_timeout(cli: Option<String>, config: Option<&toml::Value>) -> Result<Duration, String> {
+    let configured = if let Some(value) = config {
+        let table = value.as_table().ok_or("[run_control] 必须是表")?;
+        isla_lib::config::allowed_table_keys(table, "run_control", &["program_timeout"])?;
+        match table.get("program_timeout") {
+            Some(toml::Value::String(text)) => Some(text.clone()),
+            Some(toml::Value::Integer(seconds)) if *seconds >= 0 => Some(seconds.to_string()),
+            Some(_) => return Err("run_control.program_timeout 必须是非负整数秒或时长字符串".into()),
+            None => None,
+        }
+    } else {
+        None
+    };
+    Ok(parse_duration_arg("--program-timeout", cli.or(configured).as_deref(), true)?.unwrap_or_default())
+}
+
 fn isla_main() -> i32 {
+    use isla_lib::executor::program_control::{self, ProgramControl};
+    let program_started = std::time::Instant::now();
     let mut opts = opts::common_opts();
     isarch::path_cache::Options::add_cli(&mut opts);
     isarch::region_options::add_cli(&mut opts);
@@ -450,6 +468,7 @@ fn isla_main() -> i32 {
     opts.optopt("", "merge-diagnostics", "合并拒绝诊断，默认 off", "off|summary|detail");
     opts.optflag("", "init-isa-with-config", "使用配置默认值初始化ISA");
     opts.optflag("g", "graphviz", "输出 Graphviz 格式");
+    opts.optopt("", "program-timeout", "solve-state 整场墙钟限时，0 表示不限", "<duration>");
     opts.optopt("", "timeout", "超时时间，默认秒；支持 s/m/h 后缀", "<n[s|m|h]>");
     opts.optopt("", "slow-query-dump-dir", "返回慢查询的完整SMT及统计目录；默认关闭", "<path>");
     opts.optopt("", "slow-query-threshold", "返回慢查询的耗时阈值；默认20s", "<n[s|m|h]>");
@@ -533,7 +552,7 @@ fn isla_main() -> i32 {
         print_usage(&opts, 0);
     }
     let mut hasher = Sha256::new();
-    let (matches, arch) = opts::parse::<B129>(&mut hasher, &opts);
+    let matches = opts::parse_matches(&opts);
     if let Err(error) = isla_lib::executor::stats::merge_diagnostics::configure(
         matches.opt_str("merge-diagnostics").as_deref().unwrap_or("off"),
     ) {
@@ -609,6 +628,11 @@ fn isla_main() -> i32 {
     } else {
         None
     };
+    let mut control = matches!(subcommand, Subcommand::SolveState { .. }).then(ProgramControl::install);
+    if control.is_none() && matches.opt_present("program-timeout") {
+        eprintln!("--program-timeout 只适用于 solve-state");
+        return 1;
+    }
     let execution_limits_override = if let Some(path) = matches.opt_str("execution-limits-config") {
         match ExecutionLimitsConfig::from_file(&path) {
             Ok(config) => Some(config),
@@ -663,9 +687,19 @@ fn isla_main() -> i32 {
         return 1;
     }
 
+    let arch = opts::architecture::<B129>(&mut hasher, &matches);
     let CommonOpts { num_threads, mut arch, symtab, type_info, mut isa_config, merged_config, source_path } =
         opts::parse_with_arch(&mut hasher, &opts, &matches, &arch);
 
+    if let Some(control) = &mut control {
+        match program_timeout(matches.opt_str("program-timeout"), merged_config.get("run_control")) {
+            Ok(limit) => control.set_timeout(program_started, limit),
+            Err(error) => {
+                eprintln!("{error}");
+                return 1;
+            }
+        }
+    }
     let witness_randomization_seed = if matches!(subcommand, Subcommand::SolveState { .. }) {
         match resolve_witness_randomization(
             matches.opt_str("witness-randomization").as_deref(),
@@ -1012,7 +1046,18 @@ fn isla_main() -> i32 {
                 }
                 _ => panic!("不支持 XLEN={} 的 solve-state", xlen),
             };
-            isarch::exec::exploration_exit_code(if success { 0 } else { 1 }, shared_state)
+            let code = if let Some(reason) = program_control::reason() {
+                eprintln!(
+                    "[PROGRAM_STOP] reason={reason} elapsed_seconds={:.3}",
+                    program_started.elapsed().as_secs_f64()
+                );
+                124
+            } else if success {
+                0
+            } else {
+                1
+            };
+            isarch::exec::exploration_exit_code(code, shared_state)
         }
     }
 }

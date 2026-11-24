@@ -26,6 +26,27 @@ isarch [全局选项] <子命令> [子命令参数]
 | `--init-isa-with-config` | 使用配置默认值初始化 ISA |
 | `-g/--graphviz` | Graphviz 输出格式（tree 命令） |
 | `--timeout <n>` | 逐路径活动墙钟限时，缺省单位秒，支持 s/m/h 后缀 |
+| `--program-timeout <时长>` | `solve-state` 整场墙钟限时，缺省或 0 为不限。 |
+
+### solve-state 整场限时与信号
+
+在主 ISA TOML 的运行控制表配置整场限时。CLI 显式值覆盖 TOML，包括用 `--program-timeout 0` 取消配置的限时。整数表示秒，字符串支持 `ms`、`s`、`m`、`h`。计时从命令启动开始，覆盖初始化和所有探索批次。
+
+```toml
+[run_control]
+program_timeout = "300s"
+```
+
+到限或收到 SIGINT、SIGTERM 后，探索工作线程在任务、区域步或求解检查边界退出。已确认的终态保留，排队任务和在途路径计入 `errors.unfinished-paths` 与 `category_counts.ProgramStop`。未提交的区域沿原事务回滚。指定 `--path-cache-write` 时，按原有顺序写完分片并发布 `completeness: partial` 的 manifest。`stop_reason` 记录 `program-timeout`、`SIGINT` 或 `SIGTERM`。收尾后进程返回 124。即使尚无完成路径也会发布空分片；这类缓存可以读回，样本数为零。收到停止请求后跳过尚未启动的常驻 judge 和 fuzz。已启动的 campaign 在批次边界收尾。程序限时是发起停止的时间，实际发布时间还包括正在执行的区域操作收尾和文件同步。
+
+```sh
+isarch -A rv64d.ir -C scenario.toml -T 64 --program-timeout 300s \
+  --path-cache-only --path-cache-write cache/LOAD --path-cache-format bin solve-state --clause LOAD
+isarch -A rv64d.ir -C scenario.toml --path-cache-read cache/LOAD --path-cache-encoding bin \
+  --path-cache-recompute-facts --check-samples samples.jsonl --check-samples-limit 3 solve-state --clause LOAD
+```
+
+`[run_control]` 管整场运行。`--timeout` 继续按单条路径的活动时间计时，`[execution_limits]` 管路径和区域的探索策略。
 
 isarch 使用实际 IR 检查区域规则。旧 TOML 的 `ir_sha256` 仍可解析，IR 来源可查生成清单或求解摘要。
 

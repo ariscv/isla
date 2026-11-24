@@ -8,6 +8,8 @@ use serde_json::{json, Value};
 pub(super) struct SolveSummary {
     #[serde(skip)]
     pub solver_path_drops: SolverPathDrops,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "stop_reason")]
+    pub stop_reason: Option<String>,
     pub uncertified: bool,
     pub sampled_paths: usize,
     pub errors: usize,
@@ -29,7 +31,8 @@ pub(super) struct SolveSummary {
 
 impl SolveSummary {
     pub fn status(&self) -> &'static str {
-        if self.solver_path_drops.count > 0
+        if self.stop_reason.is_some()
+            || self.solver_path_drops.count > 0
             || self.uncertified
             || self.sampled_paths
                 + self.errors
@@ -54,6 +57,11 @@ impl SolveSummary {
             value["reason"] = json!("no-encoding-in-current-config");
             value["scope"] = json!("current-config-prestate-and-input-domain");
         }
+        if self.stop_reason.is_some() {
+            let rejection = isla_lib::executor::SpeculativeRejectReason::ProgramStopped;
+            let count = self.failure_reasons.get(&rejection.to_string()).copied().unwrap_or(0);
+            value["category_counts"] = json!(std::collections::BTreeMap::from([(rejection.category(), count)]));
+        }
         value["model-coverage"] = json!("not-measured");
         if self.solver_path_drops.count > 0 {
             value["valid"] = json!(false);
@@ -63,6 +71,16 @@ impl SolveSummary {
             value["invalid_message"] = json!(solver_path_drop_message(&self.solver_path_drops));
         }
         value
+    }
+
+    pub fn record_program_stop(&mut self, count: usize) {
+        if count != 0 {
+            self.unfinished_paths += count;
+            *self
+                .failure_reasons
+                .entry(isla_lib::executor::SpeculativeRejectReason::ProgramStopped.to_string())
+                .or_default() += count;
+        }
     }
 
     pub fn record_filtered_model_exception(&mut self, site: String) {
@@ -84,6 +102,7 @@ impl SolveSummary {
 
     pub fn merge(&mut self, other: &Self) {
         self.solver_path_drops.merge(&other.solver_path_drops);
+        self.stop_reason = self.stop_reason.take().or_else(|| other.stop_reason.clone());
         self.uncertified |= other.uncertified;
         self.filtered_model_exception_paths += other.filtered_model_exception_paths;
         for (site, count) in &other.filtered_model_exception_sites {

@@ -592,7 +592,10 @@ impl Stages {
         if let Some(path) = &self.path {
             let mut file = fs::OpenOptions::new().create(true).append(true).open(path).expect("打开阶段日志失败");
             writeln!(file, "{text}").expect("追加阶段日志失败");
-            file.sync_data().expect("同步阶段日志失败");
+            // 停止收尾时优先同步缓存本体；阶段日志仍逐行追加，可由监视进程立即读取。
+            if isla_lib::executor::program_control::reason().is_none() {
+                file.sync_data().expect("同步阶段日志失败");
+            }
         }
         eprintln!("[PATH_CACHE_STAGE] {text}");
     }
@@ -700,6 +703,8 @@ pub struct SourceRecord {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct ExplorationSummary {
+    #[serde(default, rename = "stop_reason")]
+    pub stop_reason: Option<String>,
     #[serde(default)]
     pub uncertified: bool,
     pub sampled_paths: u64,
@@ -852,7 +857,12 @@ pub fn current_source() -> Value {
     use sha2::{Digest, Sha256};
     let mut source = super::solve_summary::input_manifest();
     let executable = std::env::current_exe().expect("读取可执行文件路径失败");
-    let bytes = fs::read(&executable).expect("读取可执行文件失败");
+    // Linux 上运行期间可能重新构建同名文件；始终读取本进程实际执行的 inode。
+    #[cfg(target_os = "linux")]
+    let image = Path::new("/proc/self/exe");
+    #[cfg(not(target_os = "linux"))]
+    let image = executable.as_path();
+    let bytes = fs::read(image).expect("读取可执行文件失败");
     let mut digest = Sha256::new();
     digest.input(bytes);
     source["binary"] = json!({"path":executable,"sha256":format!("{:x}",digest.result())});
@@ -1079,6 +1089,23 @@ pub fn analyze<B: BV>(paths: &[ResidentPath<B>], timing: &mut Timing) -> Vec<Fas
         .collect()
 }
 
+pub(super) fn recompute_facts<B: BV>(
+    paths: &[ResidentPath<B>],
+    saved_facts: &[isla_lib::executor::path_cache::Facts],
+    timing: &mut Timing,
+) -> Vec<FastFacts> {
+    let recomputed = analyze(paths, timing);
+    let verified = recomputed.iter().cloned().map(Into::into).collect::<Vec<isla_lib::executor::path_cache::Facts>>();
+    // false 表示未证明，允许读回后取得更强证明；缓存声称已证明的条件仍须逐项核对。
+    assert_eq!(saved_facts.len(), verified.len(), "缓存静态事实条目数变化");
+    for (saved, current) in saved_facts.iter().zip(&verified) {
+        assert!(!saved.guard_unique || current.guard_unique, "缓存守卫唯一性证明重新分析不一致");
+        assert!(!saved.post_unique || current.post_unique, "缓存后态唯一性证明重新分析不一致");
+        assert!(!saved.simple_pre || current.simple_pre, "缓存前态形状证明重新分析不一致");
+    }
+    recomputed
+}
+
 pub fn write_provenance<B>(output: &Path, manifest: Option<&Manifest<B>>, source: &Value, options: &Options) {
     let path = output.join("provenance.json");
     let mut provenance: Value = serde_json::from_reader(File::open(&path).unwrap()).expect("provenance 损坏");
@@ -1124,6 +1151,7 @@ pub(super) fn restored_summary(summary: &ExplorationSummary) -> super::solve_sum
         applicable_batches: 1,
         inapplicable_batches: 0,
         uncertified: summary.uncertified,
+        stop_reason: summary.stop_reason.clone(),
         sampled_paths: field(summary.sampled_paths),
         errors: field(summary.errors),
         failure_reasons: summary

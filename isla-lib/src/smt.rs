@@ -5673,6 +5673,7 @@ mod tests {
 }
 
 pub use z3_timeout::configure_z3_timeout;
+pub(crate) use z3_timeout::interrupt_program_checks;
 
 #[cfg(test)]
 mod transaction_tests;
