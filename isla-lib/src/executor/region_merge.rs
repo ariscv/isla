@@ -429,8 +429,23 @@ pub(super) fn preflight<B: BV>(
     if frame.region_execution.is_none() {
         return Ok(());
     }
+    let variadic_effect = match &frame.instrs[frame.pc] {
+        Instr::PrimopVariadic(_, f, _, _) => primop::variadic_effect(*f),
+        _ => None,
+    };
+    // 两个组织者和远程臂都在调用读原语前检查回调状态。RAM 版本只记录数组内容。
+    if variadic_effect == Some(primop::Effect::ReadsMemory) {
+        let memory = frame.memory();
+        if !memory.is_pure_reader() {
+            return Err(reject(frame, SpeculativeRejectReason::ImpureMemoryRead));
+        }
+        // 保留 Custom 设备原有的推演准入限制。
+        if memory.regions().iter().any(|region| matches!(region, crate::memory::Region::Custom(..))) {
+            return Err(reject(frame, SpeculativeRejectReason::StateEffect));
+        }
+    }
     if frame.region_execution.as_ref().unwrap().remote_cancel.is_some()
-        && !parallel_arms::transferable_instruction(frame, shared)
+        && !parallel_arms::transferable_instruction(frame, shared, variadic_effect)
     {
         return Err(reject(frame, SpeculativeRejectReason::StateEffect));
     }
@@ -457,21 +472,7 @@ pub(super) fn preflight<B: BV>(
     {
         cost::make_mut(&mut frame.local_state).speculative_access.as_mut().unwrap().writes_allowed = true;
     }
-    // Custom 可执行设备 IO，Constrained 是任意闭包，均不能靠 solver 回滚外部效应。
-    if matches!(&frame.instrs[frame.pc], Instr::PrimopVariadic(_, f, _, _)
-        if primop::variadic_effect(*f) == Some(primop::Effect::ReadsMemory))
-        && frame
-            .memory()
-            .regions()
-            .iter()
-            .any(|region| matches!(region, crate::memory::Region::Custom(..) | crate::memory::Region::Constrained(..)))
-    {
-        return Err(reject(frame, SpeculativeRejectReason::StateEffect));
-    }
-    if matches!(&frame.instrs[frame.pc], Instr::PrimopVariadic(_, f, _, _)
-        if primop::variadic_effect(*f) == Some(primop::Effect::WritesMemory))
-        && frame.memory().ram_version().is_none()
-    {
+    if variadic_effect == Some(primop::Effect::WritesMemory) && frame.memory().ram_version().is_none() {
         return Err(reject(frame, SpeculativeRejectReason::StateEffect));
     }
     let defer_call_effect_checks =

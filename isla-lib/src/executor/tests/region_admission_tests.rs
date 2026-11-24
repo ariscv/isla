@@ -238,7 +238,7 @@ fn dynamic_state_effect_runs_outside_ancestor_transactions_without_replaying_pre
         assert!(done.records.iter().any(|record| record.branch_pc == 6));
         let rejected = shared.execution_stats.arm_unsupported_json(&shared.symtab);
         assert!(rejected["top"].as_array().unwrap().iter().any(|row| {
-            row["reason"] == serde_json::json!(SpeculativeRejectReason::StateEffect) && row["target_pc"] == 11
+            row["reason"] == serde_json::json!(SpeculativeRejectReason::ImpureMemoryRead) && row["target_pc"] == 11
         }));
     });
 }

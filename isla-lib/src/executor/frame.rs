@@ -823,7 +823,7 @@ pub(super) fn pop_call_stack<B: BV>(frame: &mut LocalFrame<'_, B>) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::bitvector::b64::B64;
     use crate::source_loc::SourceLoc;
@@ -901,7 +901,7 @@ mod tests {
     }
 
     #[derive(Debug, Default)]
-    struct CountingReader(std::sync::atomic::AtomicU64);
+    pub(in crate::executor) struct CountingReader(std::sync::atomic::AtomicU64);
 
     impl Clone for CountingReader {
         fn clone(&self) -> Self {

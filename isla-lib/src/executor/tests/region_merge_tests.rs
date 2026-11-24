@@ -4239,6 +4239,89 @@ fn region_merge_f4_unreachable_unknown_extern() {
 }
 
 #[test]
+fn stateful_memory_callback_preserves_read_count_after_diamond() {
+    use crate::executor::frame::tests::CountingReader;
+    use crate::memory::Memory;
+    use smtlib::Exp::{Bool, Eq, Neq, Var};
+
+    let shared = empty_shared_state();
+    let mut memory = Memory::new();
+    memory.add_symbolic_region(0..8);
+    memory.set_client_info(Box::new(CountingReader::default()));
+    let read = |target| {
+        Instr::PrimopVariadic(
+            Loc::Id(target),
+            primop::variadic_primops()["platform_read_mem"],
+            vec![Exp::Unit, Exp::I128(64), Exp::Bits(B64::new(0, 64)), Exp::I128(8)],
+            info(),
+        )
+    };
+    let program = vec![
+        Instr::Decl(test_name(950), Ty::Bits(64), info()),
+        Instr::Jump(input(0), 3, info()),
+        Instr::Goto(4),
+        read(test_name(950)),
+        read(RETURN),
+        Instr::End,
+    ];
+    let check = |paths: &[Path]| {
+        for (input, expected) in [(false, 0), (true, 1)] {
+            let mut feasible = 0;
+            for path in paths {
+                let context = Context::new(Config::new());
+                let mut solver = Solver::from_checkpoint(&context, path.checkpoint.clone());
+                let UVal::Init(Val::Symbolic(branch)) = path.variables.get(&test_name(900)).unwrap() else {
+                    panic!("预期符号分叉条件");
+                };
+                solver.assert(Eq(Box::new(Var(*branch)), Box::new(Bool(input))));
+                if solver.check_sat(info()).is_unsat().unwrap() {
+                    continue;
+                }
+                feasible += 1;
+                let result = smt_value(&path.value, info()).unwrap();
+                assert!(
+                    solver
+                        .check_sat_with(&Neq(Box::new(result), Box::new(smtlib::bits64(expected, 64))), info(),)
+                        .is_unsat()
+                        .unwrap(),
+                    "输入 {input} 时，汇合点读取必须返回 {expected}",
+                );
+            }
+            assert_eq!(feasible, 1, "每个输入必须有一条可达的完成路径");
+        }
+    };
+
+    check(&paths_with_memory(program.clone(), &shared, 1, false, memory.clone()));
+    for merge_strategy in [crate::config::MergeStrategy::Recursive, crate::config::MergeStrategy::Flat] {
+        let mut limits = ExecutionLimits::default().with_path_merging(true);
+        limits.merge_strategy = merge_strategy;
+        let (paths, _, rejects) =
+            paths_with_solver_state(program.clone(), &shared, 1, limits, memory.clone(), |_, _| (), false);
+        check(&paths);
+        assert_eq!(rejects[SpeculativeRejectReason::ImpureMemoryRead.reason_name()], 1);
+        assert!(paths.iter().all(|path| path.records.is_empty()));
+    }
+
+    let state = TaskState::new().with_execution_limits(ExecutionLimits::default().with_path_merging(true));
+    let mut frame = make_frame(program);
+    frame.set_memory(memory);
+    frame.pc = 1;
+    let summaries = region_summary::function_effect_summaries(&shared, false);
+    let region = region_merge::region(&frame, &shared, &summaries, false).unwrap();
+    let mut arm =
+        region_merge::prepare_region_base(&frame, &region, 1, crate::config::MergeMode::Adaptive, &state, info());
+    arm.pc = 3;
+    for remote in [false, true] {
+        arm.region_execution.as_mut().unwrap().remote_cancel =
+            remote.then(|| region_arm::Cancellation::new(Arc::new(AtomicBool::new(false)), None));
+        assert!(matches!(
+            region_merge::preflight(&mut arm, &state, &shared),
+            Err(ExecError::SpeculativeReject { reason: SpeculativeRejectReason::ImpureMemoryRead, pc: 3, .. })
+        ));
+    }
+}
+
+#[test]
 fn region_merge_f4_memory_read_union() {
     use crate::memory::Memory;
     for concrete in [false, true] {
@@ -4307,6 +4390,10 @@ struct F4ReadConstraint {
     input: Sym,
 }
 impl crate::memory::MemoryCallbacks<B64> for F4ReadConstraint {
+    fn is_pure_reader(&self) -> bool {
+        true
+    }
+
     fn symbolic_read(
         &self,
         regions: &[crate::memory::Region<B64>],
