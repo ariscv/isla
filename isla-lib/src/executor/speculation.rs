@@ -6,7 +6,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::qualified_reason_enum;
+use crate::error::{qualified_reason_enum, ReasonCategory};
 use serde_json::{json, Value};
 
 /// 推演状态属于执行帧；调用、冻结和恢复时原样传递。
@@ -18,12 +18,12 @@ pub enum SpeculationMode {
 }
 
 macro_rules! speculative_reject_reasons {
-    ($($(#[$attr:meta])* $variant:ident,)*) => {
+    ($($(#[$attr:meta])* $variant:ident => $category:ident,)*) => {
         qualified_reason_enum! {
             /// 上层位置优先报告来源；直接使用底层分叉接口时报告对应底层标签。
             #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
             pub enum SpeculativeRejectReason {
-                $($(#[$attr])* $variant,)*
+                $($(#[$attr])* $variant => $category,)*
             }
         }
 
@@ -44,66 +44,65 @@ macro_rules! speculative_reject_reasons {
             }
         }
 
-        #[cfg(test)]
         impl SpeculativeRejectReason {
-            const ALL: &'static [Self] = &[$(Self::$variant),*];
+            pub(crate) const ALL: &'static [Self] = &[$(Self::$variant),*];
         }
     };
 }
 
 speculative_reject_reasons! {
-    UnknownFiniteDomain,
-    UnknownZ3,
-    Z3Timeout,
-    Z3ResourceExhausted,
-    UnknownDeferredMode,
-    ExitUnsat,
-    SymbolicAssertion,
-    PathTimeout,
-    NoJoin,
-    HasBackEdge,
-    ExceptionCheck,
-    RegionEscaped,
-    StackEscaped,
-    StepBudget,
-    NestingLimit,
-    FragmentLimit,
+    UnknownFiniteDomain => Indeterminate,
+    UnknownZ3 => Indeterminate,
+    Z3Timeout => Limit,
+    Z3ResourceExhausted => Limit,
+    UnknownDeferredMode => Indeterminate,
+    ExitUnsat => SemanticPolicy,
+    SymbolicAssertion => SemanticPolicy,
+    PathTimeout => Limit,
+    NoJoin => Unsupported,
+    HasBackEdge => Unsupported,
+    ExceptionCheck => Unsupported,
+    RegionEscaped => Unsupported,
+    StackEscaped => Unsupported,
+    StepBudget => Limit,
+    NestingLimit => Limit,
+    FragmentLimit => Limit,
     /// 平铺循环的继续/退出前沿不能在同一边界收敛。
-    StateEffect,
-    UnknownExtern,
-    RecursiveEffect,
-    CalleeStateWrite,
-    RegisterReadAfterWrite,
-    RepeatedRegisterWrite,
-    RegisterReadWrite,
-    RegisterSequence,
-    RelaxedRegister,
-    IncompatibleState,
-    UnionPayload,
-    DepthMismatch,
-    LoopHistoryMismatch,
-    SamplingState,
-    PolicyOff,
-    SymbolicJump,
-    Monomorphize,
-    ExpressionRetry,
-    UnaryRetry,
-    BinaryRetry,
-    VariadicRetry,
-    SpecialCallRetry,
-    IntegerConversion,
-    RetryCondition,
-    SymbolicValueEnumeration,
-    RetryOperand,
-    AnnouncePc,
-    Interrupt,
-    ZeroInstruction,
-    LimitSampling,
-    LimitTruncation,
-    Assume,
-    Assert,
-    Arbitrary,
-    Exit,
+    StateEffect => StateIncompatible,
+    UnknownExtern => Unsupported,
+    RecursiveEffect => Unsupported,
+    CalleeStateWrite => StateIncompatible,
+    RegisterReadAfterWrite => StateIncompatible,
+    RepeatedRegisterWrite => StateIncompatible,
+    RegisterReadWrite => StateIncompatible,
+    RegisterSequence => StateIncompatible,
+    RelaxedRegister => StateIncompatible,
+    IncompatibleState => StateIncompatible,
+    UnionPayload => StateIncompatible,
+    DepthMismatch => StateIncompatible,
+    LoopHistoryMismatch => StateIncompatible,
+    SamplingState => StateIncompatible,
+    PolicyOff => SemanticPolicy,
+    SymbolicJump => Unsupported,
+    Monomorphize => NeedsConcretization,
+    ExpressionRetry => NeedsConcretization,
+    UnaryRetry => NeedsConcretization,
+    BinaryRetry => NeedsConcretization,
+    VariadicRetry => NeedsConcretization,
+    SpecialCallRetry => NeedsConcretization,
+    IntegerConversion => NeedsConcretization,
+    RetryCondition => NeedsConcretization,
+    SymbolicValueEnumeration => NeedsConcretization,
+    RetryOperand => NeedsConcretization,
+    AnnouncePc => NeedsConcretization,
+    Interrupt => SemanticPolicy,
+    ZeroInstruction => SemanticPolicy,
+    LimitSampling => Limit,
+    LimitTruncation => Limit,
+    Assume => SemanticPolicy,
+    Assert => SemanticPolicy,
+    Arbitrary => SemanticPolicy,
+    Exit => SemanticPolicy,
 }
 
 #[derive(PartialEq, Eq)]
@@ -231,6 +230,16 @@ impl fmt::Display for SpeculativeRejectReason {
     }
 }
 
+pub(super) fn reason_category_counts(
+    reasons: &BTreeMap<SpeculativeRejectReason, usize>,
+) -> BTreeMap<ReasonCategory, usize> {
+    let mut categories = BTreeMap::new();
+    for (reason, count) in reasons {
+        *categories.entry(reason.category()).or_default() += count;
+    }
+    categories
+}
+
 /// 每组 TaskState 独立持有统计，fork 的任务共享它；无需借用 IR 即可生成快照。
 /// 收尾打印和周期快照可调用 TaskState::speculation_stats().reject_json()。
 pub struct SpeculationStats {
@@ -259,7 +268,11 @@ impl SpeculationStats {
 
     pub fn reject_json(&self) -> Value {
         let counts = self.reason_counts.lock().unwrap();
-        json!({"total": counts.values().sum::<usize>(), "reason_counts": *counts})
+        json!({
+            "total": counts.values().sum::<usize>(),
+            "reason_counts": *counts,
+            "category_counts": reason_category_counts(&counts)
+        })
     }
 
     /// 只在尚无执行线程运行时清零，沿用 ExecutionStats 的约定。
@@ -389,6 +402,86 @@ mod tests {
     }
 
     #[test]
+    fn every_rejection_reason_has_the_expected_category() {
+        use ReasonCategory::*;
+        use SpeculativeRejectReason::*;
+        let expected: &[(ReasonCategory, &[SpeculativeRejectReason])] = &[
+            (Indeterminate, &[UnknownFiniteDomain, UnknownZ3, UnknownDeferredMode]),
+            (
+                Limit,
+                &[
+                    Z3Timeout,
+                    Z3ResourceExhausted,
+                    PathTimeout,
+                    StepBudget,
+                    NestingLimit,
+                    FragmentLimit,
+                    LimitSampling,
+                    LimitTruncation,
+                ],
+            ),
+            (
+                NeedsConcretization,
+                &[
+                    Monomorphize,
+                    ExpressionRetry,
+                    UnaryRetry,
+                    BinaryRetry,
+                    VariadicRetry,
+                    SpecialCallRetry,
+                    IntegerConversion,
+                    RetryCondition,
+                    SymbolicValueEnumeration,
+                    RetryOperand,
+                    AnnouncePc,
+                ],
+            ),
+            (
+                StateIncompatible,
+                &[
+                    StateEffect,
+                    CalleeStateWrite,
+                    RegisterReadAfterWrite,
+                    RepeatedRegisterWrite,
+                    RegisterReadWrite,
+                    RegisterSequence,
+                    RelaxedRegister,
+                    IncompatibleState,
+                    UnionPayload,
+                    DepthMismatch,
+                    LoopHistoryMismatch,
+                    SamplingState,
+                ],
+            ),
+            (
+                Unsupported,
+                &[
+                    NoJoin,
+                    HasBackEdge,
+                    ExceptionCheck,
+                    RegionEscaped,
+                    StackEscaped,
+                    UnknownExtern,
+                    RecursiveEffect,
+                    SymbolicJump,
+                ],
+            ),
+            (
+                SemanticPolicy,
+                &[ExitUnsat, SymbolicAssertion, PolicyOff, Interrupt, ZeroInstruction, Assume, Assert, Arbitrary, Exit],
+            ),
+        ];
+        let mut tested = std::collections::BTreeSet::new();
+        for &(category, reasons) in expected {
+            for &reason in reasons {
+                assert!(tested.insert(reason.reason_name()), "{reason:?}");
+                assert_eq!(reason.category(), category, "{reason:?}");
+            }
+        }
+        assert_eq!(tested, SpeculativeRejectReason::REASON_NAMES.iter().copied().collect());
+    }
+
+    #[test]
     fn every_rejection_reason_uses_its_variant_name() {
         let type_name = std::any::type_name::<SpeculativeRejectReason>().rsplit("::").next().unwrap();
         for &reason in SpeculativeRejectReason::ALL {
@@ -404,7 +497,7 @@ mod tests {
     fn speculation_stats_disabled_does_not_count() {
         let stats = SpeculationStats::new(false);
         stats.record_reject(SpeculativeRejectReason::SymbolicJump);
-        assert_eq!(stats.reject_json(), json!({"total": 0, "reason_counts": {}}));
+        assert_eq!(stats.reject_json(), json!({"total": 0, "reason_counts": {}, "category_counts": {}}));
     }
 
     #[test]
@@ -416,16 +509,19 @@ mod tests {
                 scope.spawn(move || {
                     stats.record_reject(SpeculativeRejectReason::SymbolicJump);
                     stats.record_reject(SpeculativeRejectReason::RetryOperand);
+                    stats.record_reject(SpeculativeRejectReason::AnnouncePc);
                 });
             }
         });
         assert_eq!(
             stats.reject_json(),
-            json!({"total": 8,
-            "reason_counts": {"SpeculativeRejectReason::SymbolicJump": 4, "SpeculativeRejectReason::RetryOperand": 4}})
+            json!({"total": 12,
+            "reason_counts": {"SpeculativeRejectReason::SymbolicJump": 4, "SpeculativeRejectReason::RetryOperand": 4,
+                "SpeculativeRejectReason::AnnouncePc": 4},
+            "category_counts": {"Unsupported": 4, "NeedsConcretization": 8}})
         );
         stats.reset();
-        assert_eq!(stats.reject_json(), json!({"total": 0, "reason_counts": {}}));
+        assert_eq!(stats.reject_json(), json!({"total": 0, "reason_counts": {}, "category_counts": {}}));
     }
 }
 

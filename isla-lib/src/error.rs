@@ -55,10 +55,32 @@ impl IslaError for VoidError {
     }
 }
 
-// 从枚举声明生成标签，包含载荷的变体只匹配其判别类型。
+/// 拒绝原因的统计类别，JSON 使用枚举变体名。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+pub enum ReasonCategory {
+    Indeterminate,
+    Limit,
+    NeedsConcretization,
+    StateIncompatible,
+    Unsupported,
+    SemanticPolicy,
+}
+
+impl ReasonCategory {
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Indeterminate,
+        Self::Limit,
+        Self::NeedsConcretization,
+        Self::StateIncompatible,
+        Self::Unsupported,
+        Self::SemanticPolicy,
+    ];
+}
+
+// 从枚举声明生成标签和类别，包含载荷的变体只匹配其判别类型。
 macro_rules! qualified_reason_enum {
     ($(#[$enum_attr:meta])* $vis:vis enum $name:ident {
-        $($(#[$attr:meta])* $variant:ident $(($($tuple:tt)*))? $({$($fields:tt)*})?,)*
+        $($(#[$attr:meta])* $variant:ident $(($($tuple:tt)*))? $({$($fields:tt)*})? => $category:ident,)*
     }) => {
         $(#[$enum_attr])*
         $vis enum $name {
@@ -66,6 +88,18 @@ macro_rules! qualified_reason_enum {
         }
 
         impl $name {
+            #[cfg(test)]
+            pub(crate) const REASON_NAMES: &'static [&'static str] = &[
+                $(qualified_reason_enum!(@name $name, $variant),)*
+            ];
+
+            pub const fn category(&self) -> $crate::error::ReasonCategory {
+                match self {
+                    $(qualified_reason_enum!(@pattern $variant $(($($tuple)*))? $({$($fields)*})?) =>
+                        $crate::error::ReasonCategory::$category,)*
+                }
+            }
+
             pub(crate) const fn reason_name(&self) -> &'static str {
                 match self {
                     $(qualified_reason_enum!(@pattern $variant $(($($tuple)*))? $({$($fields)*})?) =>
@@ -84,12 +118,49 @@ pub(crate) use qualified_reason_enum;
 qualified_reason_enum! {
     #[derive(Clone, Debug)]
     pub enum SmtError {
-        FiniteDomain { source_loc: SourceLoc, symbol: crate::smt::Sym, width: u32, candidates: Option<Vec<String>> },
-        DeferredQuery { source_loc: SourceLoc, purpose: &'static str },
-        NoSmt { reason: &'static str, source_loc: SourceLoc },
-        Z3Timeout(Z3Timeout),
-        Z3ResourceExhausted(Z3QueryFailure),
-        Z3Unknown(Z3QueryFailure),
+        FiniteDomain { source_loc: SourceLoc, symbol: crate::smt::Sym, width: u32, candidates: Option<Vec<String>> } => Indeterminate,
+        DeferredQuery { source_loc: SourceLoc, purpose: &'static str } => Indeterminate,
+        NoSmt { reason: &'static str, source_loc: SourceLoc } => Indeterminate,
+        Z3Timeout(Z3Timeout) => Limit,
+        Z3ResourceExhausted(Z3QueryFailure) => Limit,
+        Z3Unknown(Z3QueryFailure) => Indeterminate,
+    }
+}
+
+#[cfg(test)]
+mod reason_category_tests {
+    use super::*;
+
+    #[test]
+    fn every_smt_error_has_the_expected_category() {
+        use ReasonCategory::{Indeterminate, Limit};
+        let source_loc = SourceLoc::unknown();
+        let query = |reason: &str| Z3QueryFailure {
+            reason: reason.into(),
+            source_loc,
+            purpose: "test",
+            wall: Duration::ZERO,
+            limit: None,
+        };
+        let cases = [
+            (
+                SmtError::FiniteDomain { source_loc, symbol: crate::smt::Sym::from_u32(0), width: 8, candidates: None },
+                Indeterminate,
+            ),
+            (SmtError::DeferredQuery { source_loc, purpose: "test" }, Indeterminate),
+            (SmtError::NoSmt { reason: "test", source_loc }, Indeterminate),
+            (SmtError::Z3Timeout(Z3Timeout::Native(query("timeout"))), Limit),
+            (SmtError::Z3ResourceExhausted(query("resource limit")), Limit),
+            (SmtError::Z3Unknown(query("unknown")), Indeterminate),
+        ];
+        let expected_names: std::collections::BTreeSet<_> = SmtError::REASON_NAMES.iter().copied().collect();
+        let tested_names: std::collections::BTreeSet<_> = cases.iter().map(|(error, _)| error.reason_name()).collect();
+        assert_eq!(tested_names.len(), cases.len());
+        assert_eq!(tested_names, expected_names);
+        for (error, category) in cases {
+            assert_eq!(error.category(), category, "{}", error.reason_name());
+            assert_eq!(error.reject_reason().category(), category, "{}", error.reason_name());
+        }
     }
 }
 

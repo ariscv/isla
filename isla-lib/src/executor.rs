@@ -14193,7 +14193,8 @@ fn zcaller(za, zb) {
                 assert_eq!(
                     state.speculation_stats().reject_json(),
                     serde_json::json!({
-                        "total": 1, "reason_counts": {reason.to_string(): 1}
+                        "total": 1, "reason_counts": {reason.to_string(): 1},
+                        "category_counts": std::collections::BTreeMap::from([(reason.category(), 1)])
                     })
                 );
             }

@@ -10,8 +10,10 @@ pub(crate) mod region_cost;
 pub(crate) mod region_progress;
 pub mod solver_failures;
 use super::model_exception::FilteredPath;
+use super::speculation::reason_category_counts;
 use super::{ForkSink, SpeculativeRejectReason, Task};
 use crate::bitvector::BV;
+use crate::config::RegionOptions;
 use crate::ir::{Instr, Name, Symtab};
 use crate::smt::Event;
 use crate::source_loc::SourceLoc;
@@ -239,6 +241,7 @@ impl ExecutionStats {
     /// 正常收尾与 Force 强退共用，确保强退不依赖析构或 worker panic。
     pub fn print<B>(&self, shared: &crate::ir::SharedState<B>) {
         merge_diagnostics::print(self);
+        eprintln!("[PARTIAL_COMMIT_CATEGORIES] {}", json!(RegionOptions::current().partial_commit_categories()));
         if let Some(counts) = self.model_exception_filter_counts() {
             eprintln!("[MODEL_EXCEPTION_THROW_FILTER] {counts}");
         }
@@ -358,7 +361,16 @@ impl ExecutionStats {
         self.forks.lock().unwrap().values().sum()
     }
     pub fn merge_json(&self) -> Value {
-        let mut stats = serde_json::to_value(&*self.merge.lock().unwrap()).unwrap();
+        let mut stats = {
+            let merge = self.merge.lock().unwrap();
+            let mut stats = serde_json::to_value(&*merge).unwrap();
+            stats["category_counts"] = json!(reason_category_counts(&merge.failure_reasons));
+            for (index, rule) in &merge.rules {
+                stats["rules"][index.to_string()]["category_counts"] =
+                    json!(reason_category_counts(&rule.failure_reasons));
+            }
+            stats
+        };
         let drops = self.solver_path_drops_since(0);
         if drops.count > 0 {
             stats["solver_timeout_dropped_paths"] = json!(drops.count);
@@ -404,7 +416,10 @@ impl ExecutionStats {
                 .then_with(|| a.0.reason.cmp(&b.0.reason))
         });
         let top: Vec<_> = entries.into_iter().take(30).map(|(site,count,function)| json!({"reason":site.reason,"function":function,"branch_pc":site.branch_pc,"rejected_function":zencode::decode(symtab.to_str(site.rejected_function)),"target_pc":site.rejected_pc,"source_loc":site.location,"location":site.location.location_string(symtab.files()),"count":count})).collect();
-        json!({"total":total,"unique_locations":rejections.len(),"reason_counts":counts,"top":top})
+        json!({
+            "total": total, "unique_locations": rejections.len(), "top": top,
+            "reason_counts": counts, "category_counts": reason_category_counts(&counts)
+        })
     }
 }
 /// 复用实际的 fork 提交入口，覆盖 Jump、Monomorphize 和操作数重试。
@@ -500,6 +515,46 @@ mod tests {
         assert_eq!(stats.merge_json()["attempts"], 0);
         assert_eq!(stats.arm_unsupported_json(&symtab)["total"], 0);
     }
+    #[test]
+    fn stats_snapshot_groups_rejection_counts_by_category() {
+        use SpeculativeRejectReason::*;
+        let stats = ExecutionStats::new(true);
+        let mut symtab = Symtab::new();
+        let name = symtab.intern("zfunction");
+        stats.prepare_merge_rules(2);
+        for (reason, count) in [(UnknownFiniteDomain, 2), (UnknownZ3, 3), (Z3Timeout, 4)] {
+            let rejection = crate::error::ExecError::SpeculativeReject {
+                cause: None,
+                reason,
+                function: name,
+                pc: 2,
+                location: SourceLoc::unknown(),
+            };
+            for _ in 0..count {
+                stats.merge_rejected(name, 1, &rejection);
+                stats.rule_attempt(Some(0));
+                stats.rule_finished(Some(0), Some(reason));
+            }
+        }
+        stats.prepare_snapshot(&symtab);
+
+        let (merge, _, arms) = stats.snapshot_json();
+        let reasons = json!({
+            "SpeculativeRejectReason::UnknownFiniteDomain": 2,
+            "SpeculativeRejectReason::UnknownZ3": 3,
+            "SpeculativeRejectReason::Z3Timeout": 4
+        });
+        let categories = json!({"Indeterminate": 5, "Limit": 4});
+        assert_eq!(merge["failure_reasons"], reasons);
+        assert_eq!(merge["category_counts"], categories);
+        assert_eq!(merge["rules"]["0"]["failure_reasons"], reasons);
+        assert_eq!(merge["rules"]["0"]["category_counts"], categories);
+        assert_eq!(merge["rules"]["1"]["category_counts"], json!({}));
+        assert_eq!(arms["reason_counts"], reasons);
+        assert_eq!(arms["category_counts"], categories);
+        assert_eq!(arms["total"], 9);
+    }
+
     #[test]
     fn stats_snapshot_owns_names_and_locations() {
         let stats = std::sync::Arc::new(ExecutionStats::new(true));

@@ -1,5 +1,8 @@
 //! 分段合并候选与只读诊断；执行前确定，进程内保持不变。
+use crate::error::ReasonCategory;
+use crate::executor::SpeculativeRejectReason;
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -164,6 +167,21 @@ impl RegionOptions {
         Ok(())
     }
 
+    /// 某一类别至少有一个原因允许局部恢复时，汇总显示为开启。
+    pub(crate) fn partial_commit_categories(&self) -> BTreeMap<ReasonCategory, bool> {
+        let mut categories = BTreeMap::from(ReasonCategory::ALL.map(|category| (category, false)));
+        for &reason in SpeculativeRejectReason::ALL {
+            // 操作数切分与求解拒绝有独立的局部恢复入口。
+            if reason.verified_prefix(self)
+                || reason.partial_commit(self)
+                || (reason == SpeculativeRejectReason::RetryOperand && self.partial_commit_retry_operand)
+            {
+                categories.insert(reason.category(), true);
+            }
+        }
+        categories
+    }
+
     /// 沿用 SMT 配置的进程内冻结约定；重复传入相同值可用，更改配置直接终止。
     pub fn configure(&self) {
         self.validate().expect("区域配置必须在执行前通过校验");
@@ -178,6 +196,45 @@ impl RegionOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn partial_commit_categories_report_effective_switches() {
+        use serde_json::json;
+        let report = |options: &RegionOptions| serde_json::to_value(options.partial_commit_categories()).unwrap();
+        let mut options = RegionOptions::default();
+        assert_eq!(
+            report(&options),
+            json!({
+                "Indeterminate": false, "Limit": false, "NeedsConcretization": false,
+                "StateIncompatible": false, "Unsupported": false, "SemanticPolicy": false
+            })
+        );
+        options.partial_commit_prefix = true;
+        assert_eq!(report(&options), report(&RegionOptions::default()));
+
+        options.partial_commit_prefix = false;
+        options.partial_commit_finite_domain = true;
+        options.partial_commit_z3_timeout = true;
+        options.partial_commit_retry_operand = true;
+        options.partial_commit_structure = true;
+        options.partial_commit_state_effect = true;
+        options.partial_commit_control = true;
+        assert_eq!(
+            report(&options),
+            json!({
+                "Indeterminate": true, "Limit": true, "NeedsConcretization": true,
+                "StateIncompatible": false, "Unsupported": false, "SemanticPolicy": false
+            })
+        );
+        options.partial_commit_prefix = true;
+        assert_eq!(
+            report(&options),
+            json!({
+                "Indeterminate": true, "Limit": true, "NeedsConcretization": true,
+                "StateIncompatible": true, "Unsupported": true, "SemanticPolicy": true
+            })
+        );
+    }
+
     #[test]
     fn region_options_defaults_match_configuration() {
         assert_eq!(toml::from_str::<RegionOptions>("").unwrap(), RegionOptions::default());
