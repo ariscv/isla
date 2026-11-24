@@ -1526,6 +1526,14 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             );
         }
     }
+    if consumer.is_some() && crate::config::RegionOptions::current().width_closed_continuation {
+        if let Some(result) = consumer_continuation::try_width_closed_join(
+            record_id, condition, &base, &arms, tid, task_id, fraction, timeout, stop, sink, frame, state, shared,
+            solver, info,
+        )? {
+            return Ok(result);
+        }
+    }
     finish_arrivals(
         record_id,
         condition,

@@ -162,6 +162,8 @@ pub struct PathMergeConfig {
     pub prefix_compact: bool,
     /// 扩展循环逐轮折叠形状。默认开启。
     pub loop_fold_shapes: bool,
+    /// 跨过纯包装调用，在变长临时值用完后汇合。默认关闭。
+    pub width_closed_continuation: bool,
     pub diagnostics: PathMergeDiagnostics,
     pub regions: Option<Vec<PathMergeRegionConfig>>,
     #[serde(deserialize_with = "deserialize_enumeration")]
@@ -207,6 +209,7 @@ impl Default for PathMergeConfig {
             witness_eval: false,
             prefix_compact: true,
             loop_fold_shapes: true,
+            width_closed_continuation: false,
             diagnostics: PathMergeDiagnostics::default(),
             regions: None,
             enumeration: None,

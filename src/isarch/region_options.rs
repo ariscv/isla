@@ -59,6 +59,7 @@ const NO_SMT_OPTIONS: &[(&str, &str)] = &[
 
 pub fn add_cli(opts: &mut getopts::Options) {
     opts.optflagopt("", "bv-rewrite", "通用等价改写，缺省启用三条规则，false 关闭", "true|false|规则名列表");
+    opts.optflagopt("", "width-closed-continuation", "跨纯包装调用后恢复定长汇合；默认关闭", "true|false");
     for (_, flag) in NO_SMT_OPTIONS {
         opts.optflagopt("", flag, "无 SMT 实验选项；裸 flag 等于 true，覆盖 TOML，默认 false", "true|false");
     }
@@ -86,6 +87,12 @@ pub fn apply_cli(matches: &getopts::Matches, limits: &mut ExecutionLimitsConfig)
     if matches.opt_present("bv-rewrite") {
         updated.solver.bv_rewrite =
             isla_lib::smt::rewrite::BvRewrite::parse(&matches.opt_str("bv-rewrite").unwrap_or_else(|| "true".into()))?;
+    }
+    if matches.opt_present("width-closed-continuation") {
+        updated.path_merge.width_closed_continuation = matches
+            .opt_str("width-closed-continuation")
+            .map_or(Ok(true), |value| value.parse::<bool>())
+            .map_err(|_| "--width-closed-continuation 必须是 true 或 false".to_string())?;
     }
     for (field, flag, _) in BOOL_OPTIONS {
         if let Some(value) = matches.opt_str(flag) {
@@ -242,6 +249,19 @@ mod tests {
         assert!(!options.symbolic_scalar_resolver);
         assert!(!options.loop_fold_shapes);
         assert!(!options.prefix_compact);
+    }
+
+    #[test]
+    fn width_closed_continuation_defaults_off_and_accepts_overrides() {
+        let mut limits = ExecutionLimitsConfig::default();
+        assert!(!RegionOptions::from_config(&limits).width_closed_continuation);
+        let table: toml::Value = "[execution_limits.path_merge]\nwidth_closed_continuation=true".parse().unwrap();
+        limits = table["execution_limits"].clone().try_into().unwrap();
+        assert!(RegionOptions::from_config(&limits).width_closed_continuation);
+        cli(&mut limits, &["--width-closed-continuation=false"]).unwrap();
+        assert!(!RegionOptions::from_config(&limits).width_closed_continuation);
+        cli(&mut limits, &["--width-closed-continuation"]).unwrap();
+        assert!(RegionOptions::from_config(&limits).width_closed_continuation);
     }
 
     #[test]

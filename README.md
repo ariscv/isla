@@ -829,6 +829,8 @@ witness_eval = true
 
 在 `[execution_limits.path_merge]` 中，`arms_as_tasks = true` 允许把区域 B 臂和根提交的错误叶认证交给空闲线程，缺省关闭。`[execution_limits.path_merge.parallel]` 的 `min_arm_instructions` 缺省为 32，按区域中的 IR 指令和直接被调函数的指令数估算。设为 0 可取消这一调度门槛。`min_error_leaves` 缺省为 64，设置根错误叶认证开始并行的最小叶数。任务规模过小或没有可用线程时，当前执行线程继续处理。
 
+纯包装调用后的定长汇合默认关闭。使用 `--width-closed-continuation`，或在 `[execution_limits.path_merge]` 设置 `width_closed_continuation = true`。执行器保留各臂位宽，在变长局部值用完或收束为定长后汇合。指令需要访问寄存器、内存，或生成模型事件时，延续在该指令前结束。
+
 Jump 的条件恒值折叠默认开启，可用 `--prune-constant-branches=false` 或在 `[execution_limits.path_merge]` 设置 `prune_constant_branches = false` 关闭。求值后，执行器先用表达式结构和已启用的有限域前缀识别恒真／恒假，再作分支限制决策。能判定时只执行可达侧，未知时沿用原规则。不查询 SMT、不取模型，也不重复求值 IR；普通执行、defer、跳过分支检查及无 SMT 均适用。启用执行统计时，`folded_true_conditions`／`folded_false_conditions` 记录包括回滚尝试在内的折叠次数。
 
 区域合并默认在实际到达时检查普通被调函数的传递 `SpeculativeRejectReason::StateEffect`。直接原语仍在执行前检查，`SpeculativeRejectReason::CalleeStateWrite` 和未实现 extern 仍拒绝。可用 `--defer-call-effect-checks=false` 或在 `[execution_limits.path_merge]` 设置 `defer_call_effect_checks = false` 关闭。

@@ -2911,6 +2911,7 @@ obligation_dump_dir = "obligations"
                 bv_rewrite: Default::default(),
                 max_merge_depth: None,
                 symbolic_scalar_resolver: true,
+                width_closed_continuation: false,
                 defer_range_proofs: true,
                 defer_ctor_checks: true,
                 prune_constant_branches: true,

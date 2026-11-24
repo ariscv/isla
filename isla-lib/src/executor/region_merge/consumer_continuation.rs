@@ -2,6 +2,9 @@
 //! 一个使用点位于同一段直线代码时，尝试在那里重新汇合。
 use super::*;
 
+mod width_closed;
+pub(super) use width_closed::try_join as try_width_closed_join;
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn try_join_after_last_use<'ir, 'task, B: BV>(
     condition: Sym,
