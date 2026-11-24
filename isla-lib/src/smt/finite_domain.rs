@@ -576,27 +576,61 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         if let Some(value) = projected.get(&sym) {
             return value.clone();
         }
-        let value = prefix.definition(sym).and_then(|definition| {
-            let mut changed = false;
-            let expression = definition
-                .map_var(&mut |input| {
-                    Ok::<_, std::convert::Infallible>(match self.project_finite_definition(*input, prefix, projected) {
-                        Some(value) => {
-                            changed = true;
-                            value
-                        }
-                        None => Exp::Var(*input),
-                    })
-                })
-                .unwrap();
-            if !changed {
-                return None;
+        enum Step<'a> {
+            Visit(Sym),
+            Project(Sym, &'a Exp<Sym>),
+        }
+        let mut pending = vec![Step::Visit(sym)];
+        let mut visiting = HashSet::new();
+        while let Some(step) = pending.pop() {
+            match step {
+                Step::Visit(current) => {
+                    if projected.contains_key(&current) {
+                        continue;
+                    }
+                    let Some(definition) = prefix.definition(current) else {
+                        projected.insert(current, None);
+                        continue;
+                    };
+                    assert!(visiting.insert(current), "有限域投影的定义链含环：{current:?}");
+                    pending.push(Step::Project(current, definition));
+                    let first_input = pending.len();
+                    definition
+                        .map_var(&mut |input| {
+                            if !projected.contains_key(input) {
+                                pending.push(Step::Visit(*input));
+                            }
+                            Ok::<_, std::convert::Infallible>(Exp::Var(*input))
+                        })
+                        .unwrap();
+                    // 栈后入先出，倒转本次压入的输入以保留原遍历顺序。
+                    pending[first_input..].reverse();
+                }
+                Step::Project(current, definition) => {
+                    let mut changed = false;
+                    let expression = definition
+                        .map_var(&mut |input| {
+                            Ok::<_, std::convert::Infallible>(match &projected[input] {
+                                Some(value) => {
+                                    changed = true;
+                                    value.clone()
+                                }
+                                None => Exp::Var(*input),
+                            })
+                        })
+                        .unwrap();
+                    let value = if changed {
+                        let mut ast = self.translate_exp(&expression);
+                        ast.finite_bits().or_else(|| ast.structural_bool().map(Exp::Bool))
+                    } else {
+                        None
+                    };
+                    projected.insert(current, value);
+                    visiting.remove(&current);
+                }
             }
-            let mut ast = self.translate_exp(&expression);
-            ast.finite_bits().or_else(|| ast.structural_bool().map(Exp::Bool))
-        });
-        projected.insert(sym, value.clone());
-        value
+        }
+        projected[&sym].clone()
     }
 
     /// 只把本候选已求出的值代回活动比较。两个操作数可能经过单独的位宽转换。

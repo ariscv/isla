@@ -216,6 +216,99 @@ impl<B: BV> Solver<'_, B> {
     }
 }
 
+#[test]
+fn projection_handles_5000_definitions_on_a_small_stack() {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(|| {
+            configure_tastic(Tactic::Qfaufbv);
+            let context = Context::new(Config::new());
+            let mut solver = Solver::<B64>::new(&context);
+            let info = SourceLoc::unknown();
+            let anchor = solver.declare_bitvector(16, info);
+            let mut tail = anchor;
+            for _ in 0..5000 {
+                tail = solver.define_bitvector(Exp::Bvadd(Box::new(Exp::Var(tail)), Box::new(bits64(1, 16))), info);
+            }
+            let prefix = PathConditions::new(&solver).unwrap();
+            let mut projected = HashMap::from([(anchor, Some(bits64(42, 16)))]);
+
+            assert_eq!(solver.project_finite_definition(tail, &prefix, &mut projected), Some(bits64(5042, 16)));
+            assert_eq!(projected.len(), 5001);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn projection_matches_recursive_definition_walk_on_a_diamond() {
+    fn recursive(
+        solver: &Solver<'_, B64>,
+        sym: Sym,
+        prefix: &PathConditions<'_, B64>,
+        projected: &mut HashMap<Sym, Option<Exp<Sym>>>,
+    ) -> Option<Exp<Sym>> {
+        if let Some(value) = projected.get(&sym) {
+            return value.clone();
+        }
+        let value = prefix.definition(sym).and_then(|definition| {
+            let mut changed = false;
+            let expression = definition
+                .map_var(&mut |input| {
+                    Ok::<_, std::convert::Infallible>(match recursive(solver, *input, prefix, projected) {
+                        Some(value) => {
+                            changed = true;
+                            value
+                        }
+                        None => Exp::Var(*input),
+                    })
+                })
+                .unwrap();
+            if !changed {
+                return None;
+            }
+            let mut ast = solver.translate_exp(&expression);
+            ast.finite_bits().or_else(|| ast.structural_bool().map(Exp::Bool))
+        });
+        projected.insert(sym, value.clone());
+        value
+    }
+
+    configure_tastic(Tactic::Qfaufbv);
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let info = SourceLoc::unknown();
+    let anchor = solver.declare_bitvector(8, info);
+    let unknown = solver.declare_bitvector(8, info);
+    let shared = solver.define_bitvector(Exp::Bvadd(Box::new(Exp::Var(anchor)), Box::new(bits64(1, 8))), info);
+    let left = solver.define_bitvector(Exp::Bvadd(Box::new(Exp::Var(shared)), Box::new(Exp::Var(shared))), info);
+    let right = solver.define_bitvector(Exp::Bvadd(Box::new(Exp::Var(shared)), Box::new(Exp::Var(unknown))), info);
+    let guard = solver.define_const(equal(left, 12), info);
+    let target = solver.define_bitvector(
+        Exp::Ite(Box::new(Exp::Var(guard)), Box::new(Exp::Var(left)), Box::new(Exp::Var(right))),
+        info,
+    );
+    let prefix = PathConditions::new(&solver).unwrap();
+    let mut actual = HashMap::from([(anchor, Some(bits64(5, 8)))]);
+    let mut expected = actual.clone();
+
+    PROJECT_TRANSLATIONS.set(0);
+    let (reference, reference_subs, reference_bools) =
+        projection_counts(|| recursive(&solver, target, &prefix, &mut expected));
+    let reference_translations = PROJECT_TRANSLATIONS.get();
+    PROJECT_TRANSLATIONS.set(0);
+    let (result, subs, bools) = projection_counts(|| solver.project_finite_definition(target, &prefix, &mut actual));
+
+    assert_eq!(result, Some(bits64(12, 8)));
+    assert_eq!(result, reference);
+    assert_eq!(actual, expected);
+    assert_eq!(actual.get(&guard), Some(&Some(Exp::Bool(true))));
+    assert_eq!(actual.get(&right), Some(&None));
+    assert_eq!(actual.get(&unknown), Some(&None));
+    assert_eq!((PROJECT_TRANSLATIONS.get(), subs, bools), (reference_translations, reference_subs, reference_bools));
+}
+
 fn projection_counts<T>(f: impl FnOnce() -> T) -> (T, usize, usize) {
     PROJECT_SUBSTITUTIONS.set(0);
     STRUCTURAL_BOOLS.set(0);
