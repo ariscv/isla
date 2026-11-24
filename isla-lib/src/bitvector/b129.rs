@@ -46,6 +46,31 @@ pub struct B129 {
     len: u32,
 }
 
+impl B129 {
+    pub(crate) fn from_u128(bits: u128, len: u32) -> Self {
+        assert!(len <= 129 && bits == bzhi_u128(bits, len));
+        Self { tag: false, bits, len }
+    }
+
+    pub(crate) fn wrapping_mul(self, rhs: Self) -> Self {
+        assert_eq!(self.len, rhs.len);
+        if self.len < 129 {
+            return bzhi(Self { bits: self.bits.wrapping_mul(rhs.bits), ..self }, self.len);
+        }
+
+        // 129 位只需低 128 位及乘积在第 128 位上的进位。
+        let (a_low, a_high) = (u128::from(self.lower_u64()), self.bits >> 64);
+        let (b_low, b_high) = (u128::from(rhs.lower_u64()), rhs.bits >> 64);
+        let cross_left = a_low * b_high;
+        let cross_right = a_high * b_low;
+        let (sum, carry_left) = (a_low * b_low).overflowing_add(cross_left << 64);
+        let (bits, carry_right) = sum.overflowing_add(cross_right << 64);
+        let tag = ((cross_left >> 64) ^ (cross_right >> 64) ^ (a_high & b_high)) & 1 != 0;
+        let tag = tag ^ carry_left ^ carry_right ^ (self.tag && b_low & 1 != 0) ^ (rhs.tag && a_low & 1 != 0);
+        Self { tag, bits, len: self.len }
+    }
+}
+
 impl fmt::LowerHex for B129 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let prefix = if f.alternate() { "0x" } else { "" };

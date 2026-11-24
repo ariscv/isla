@@ -466,6 +466,7 @@ isarch [原 J1 探索参数] \
 | `path_merge.prune_constant_branches` | `--prune-constant-branches=true/false` | `true` | Jump 在分支限制决策前识别布尔恒值；不查询 SMT |
 | `path_merge.defer_call_effect_checks` | `--defer-call-effect-checks=true/false` | `true` | 延后普通被调函数的传递 `SpeculativeRejectReason::StateEffect` 检查 |
 | `path_merge.finite_domain_enumeration` | `--finite-domain-enumeration=true/false` | `true` | 从路径条件识别有限域，具体值消费者按需枚举 |
+| `path_merge.finite_domain_ground_eval` | 无 | `true` | 使用 Isla 判定可由有限域候选赋值求出的布尔常量 |
 | `path_merge.merge_poison_slots` | `--merge-poison-slots=true/false` | `true` | 只消除已证明不可观察的局部槽位或联合载荷 |
 | `path_merge.defer_exit_check` | `--region-defer-exit-check=true/false` | `false` | 延迟区域出口检查 |
 | `path_merge.lazy_z3_scope` | `--region-lazy-z3-scope=true/false` | `false` | 延迟 Z3 条件作用域，仅在 defer 推演内生效，可能增加内存占用 |

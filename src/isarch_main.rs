@@ -734,6 +734,7 @@ fn isla_main() -> i32 {
         finite_domain_enumeration: limits.path_merge.finite_domain_enumeration,
         incremental_choice_dag: limits.path_merge.incremental_choice_dag,
         coi_query_slicing: limits.path_merge.coi_query_slicing,
+        finite_domain_ground_eval: limits.path_merge.finite_domain_ground_eval,
         bv_rewrite: solver_region_options.bv_rewrite,
     });
     if solver_region_options.no_smt {

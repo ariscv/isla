@@ -2713,10 +2713,14 @@ end_column = 0
     fn region_merge_finite_domain_config() {
         let defaults = merge_config("[execution_limits.path_merge]").unwrap().path_merge;
         assert!(defaults.finite_domain_enumeration);
+        assert!(defaults.finite_domain_ground_eval);
         for enabled in [false, true] {
             let config =
-                merge_config(&format!("[execution_limits.path_merge]\nfinite_domain_enumeration={enabled}")).unwrap();
+                merge_config(&format!(
+                    "[execution_limits.path_merge]\nfinite_domain_enumeration={enabled}\nfinite_domain_ground_eval={enabled}"
+                )).unwrap();
             assert_eq!(config.path_merge.finite_domain_enumeration, enabled);
+            assert_eq!(config.path_merge.finite_domain_ground_eval, enabled);
         }
         for section in ["execution_limits", "execution_limits.path_merge", "execution_limits.solver"] {
             assert!(merge_config(&format!("[{section}]\nfinite_domain_max=64")).is_err());

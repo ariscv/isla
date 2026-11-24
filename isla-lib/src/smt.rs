@@ -925,6 +925,7 @@ pub struct SolverOptions {
     pub finite_domain_enumeration: bool,
     pub incremental_choice_dag: bool,
     pub coi_query_slicing: bool,
+    pub finite_domain_ground_eval: bool,
     pub bv_rewrite: rewrite::BvRewrite,
 }
 
@@ -939,6 +940,7 @@ impl Default for SolverOptions {
             finite_domain_enumeration: crate::config::PathMergeConfig::default().finite_domain_enumeration,
             incremental_choice_dag: false,
             coi_query_slicing: false,
+            finite_domain_ground_eval: crate::config::PathMergeConfig::default().finite_domain_ground_eval,
             bv_rewrite: Default::default(),
         }
     }

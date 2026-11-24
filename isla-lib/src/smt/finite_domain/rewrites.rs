@@ -158,6 +158,15 @@ impl<'ctx> Rewrites<'ctx> {
         };
         let present = find(&self.joint.current);
         let fact = present.or_else(|| find(&self.joint.previous)).unwrap_or_else(|| {
+            if let Some((truth, changed)) =
+                ground::AstEvaluator::new(original.ctx).evaluate(original.z3_ast, replacements)
+            {
+                return Narrowed {
+                    unchanged: !changed,
+                    truth: Some(truth),
+                    residual: self.joint.current.asts.keep(Ast::mk_bool(original.ctx, truth)),
+                };
+            }
             let (from, to): (Vec<_>, Vec<_>) = replacements.iter().copied().unzip();
             let mut residual = original.substitute_many(&from, &to);
             Narrowed {
@@ -189,6 +198,9 @@ impl<'ctx> Rewrites<'ctx> {
         }
         self.simplified.current.asts.retain(key);
         let (truth, raw) = self.simplified.previous.entries.borrow().get(&key).copied().unwrap_or_else(|| {
+            if let Some((truth, _)) = ground::AstEvaluator::new(original.ctx).evaluate(key, &[]) {
+                return (Some(truth), self.simplified.current.asts.keep(Ast::mk_bool(original.ctx, truth)));
+            }
             let mut value = original;
             (value.structural_bool(), self.simplified.current.asts.keep(value))
         });

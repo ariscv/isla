@@ -572,9 +572,16 @@ impl<'a, B: BV> PathConditions<'a, B> {
         }
         facts.indexed_assertions = assertions.len();
         facts.indexed_guards = guards.len();
+        let evaluator = ground::AstEvaluator::new(asts.ctx);
+        let replacement = [(anchor.z3_ast, value.z3_ast)];
         let excluded = facts.related[checked..].iter().any(|&key| {
-            let mut residual = asts.get(key).substitute(anchor, value);
-            residual.z3_ast != key && residual.structural_bool() == Some(false)
+            evaluator.evaluate(key, &replacement).map_or_else(
+                || {
+                    let mut residual = asts.get(key).substitute(anchor, value);
+                    residual.z3_ast != key && residual.structural_bool() == Some(false)
+                },
+                |(truth, changed)| changed && !truth,
+            )
         });
         let result = if excluded { BranchCheck::Excluded } else { BranchCheck::Checked(facts.related.len()) };
         facts.candidates.insert(asts.keep(value.clone()), result);

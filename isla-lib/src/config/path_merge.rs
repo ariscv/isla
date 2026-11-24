@@ -155,6 +155,8 @@ pub struct PathMergeConfig {
     pub lazy_z3_scope: bool,
     /// 需要具体值时按精确有限域枚举；默认开启。
     pub finite_domain_enumeration: bool,
+    /// 使用 Isla 求值检查全为具体值的有限域候选。缺省开启。
+    pub finite_domain_ground_eval: bool,
     pub witness_eval: bool,
     /// 迭代边界前缀固化并释放已完成轮次的历史。默认开启。
     pub prefix_compact: bool,
@@ -201,6 +203,7 @@ impl Default for PathMergeConfig {
             defer_call_effect_checks: true,
             lazy_z3_scope: false,
             finite_domain_enumeration: true,
+            finite_domain_ground_eval: true,
             witness_eval: false,
             prefix_compact: true,
             loop_fold_shapes: true,

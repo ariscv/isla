@@ -2,6 +2,7 @@
 use super::*;
 
 mod arithmetic;
+mod ground;
 mod prefix_index;
 mod projection;
 mod rewrites;
@@ -625,8 +626,16 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                         })
                         .unwrap();
                     let value = if changed {
-                        let mut ast = self.translate_exp(&expression);
-                        ast.finite_bits().or_else(|| ast.structural_bool().map(Exp::Bool))
+                        let direct = self
+                            .ctx
+                            .solver_options
+                            .finite_domain_ground_eval
+                            .then(|| ground::eval_assertion(definition, |sym| projected[&sym].as_ref(), |_| None))
+                            .flatten();
+                        direct.map(Exp::Bool).or_else(|| {
+                            let mut ast = self.translate_exp(&expression);
+                            ast.finite_bits().or_else(|| ast.structural_bool().map(Exp::Bool))
+                        })
                     } else {
                         None
                     };
@@ -862,3 +871,6 @@ mod branch_tests;
 
 #[cfg(test)]
 mod arithmetic_tests;
+
+#[cfg(test)]
+mod ground_tests;
