@@ -1,6 +1,10 @@
 //! B 臂的私有求解器复用不可变入口，正文仍由既有事务处理。
 use super::*;
 
+const ASSERTIONS_PER_SCOPE: usize = 128;
+// 迟滞保留 16–32 条查询假设，避免每次追加或回滚一条断言就修改原生作用域。
+const RETAINED_ASSUMPTIONS: usize = 16;
+
 #[derive(Clone, Copy, Default)]
 struct Mark {
     declarations: usize,
@@ -16,6 +20,7 @@ pub(crate) struct ArmReplay<'ctx, B> {
     assertions: Vec<Ast<'ctx>>,
     /// 每个原生作用域的起始断言偏移。回滚最多重装一个保留片段的 AST。
     scopes: Vec<usize>,
+    installed: usize,
 }
 
 impl<B> Trace<B> {
@@ -80,6 +85,7 @@ impl<'ctx, B: BV> ArmReplay<'ctx, B> {
             undo: Vec::new(),
             assertions: Vec::new(),
             scopes: Vec::new(),
+            installed: 0,
         }
     }
 
@@ -117,7 +123,6 @@ impl<'ctx, B: BV> ArmReplay<'ctx, B> {
             offset = 0;
         }
         let mark = common.checked_sub(1).map_or_else(Mark::default, |index| self.marks[index]);
-        let previous_assertions = self.assertions.len();
         let solver = &mut self.solver;
         assert!(solver.trace.head.is_empty());
         assert!(solver.declaration_undo.is_empty() && solver.savepoints.is_empty());
@@ -169,11 +174,12 @@ impl<'ctx, B: BV> ArmReplay<'ctx, B> {
         self.undo = std::mem::take(&mut solver.declaration_undo);
         self.assertions = solver.replay_assertions.take().unwrap();
 
-        // 活动 B 的原生作用域由事务配对回滚。入口断言按 32 条一组登记，
-        // 两个相邻入口只有末段不同时可直接 pop，保留前段已登记的约束。
+        // 原生求解器只持有稳定前缀。最后一段随每次查询提交，活跃 B 之间无需为
+        // 每次后缀变化 push/pop。检查点及正文仍读取完整的定义、索引与断言迹。
         let ctx = solver.ctx.z3_ctx;
         let native = solver.z3_solver;
-        let mut installed = previous_assertions;
+        let mut installed = self.installed;
+        let total = self.assertions.len();
         unsafe {
             let old_scopes = self.scopes.len();
             while installed > mark.assertions {
@@ -183,16 +189,24 @@ impl<'ctx, B: BV> ArmReplay<'ctx, B> {
             if pop > 0 {
                 Z3_solver_pop(ctx, native, pop.try_into().unwrap());
             }
-            while installed < self.assertions.len() {
-                self.scopes.push(installed);
-                Z3_solver_push(ctx, native);
-                let end = (installed + 32).min(self.assertions.len());
-                for ast in &self.assertions[installed..end] {
-                    Z3_solver_assert(ctx, native, ast.z3_ast);
+            if total - installed > 2 * RETAINED_ASSUMPTIONS {
+                let stable_end = total - RETAINED_ASSUMPTIONS;
+                while installed < stable_end {
+                    if self.scopes.last().is_none_or(|start| installed - start == ASSERTIONS_PER_SCOPE) {
+                        self.scopes.push(installed);
+                        Z3_solver_push(ctx, native);
+                    }
+                    let end = (self.scopes.last().unwrap() + ASSERTIONS_PER_SCOPE).min(stable_end);
+                    for ast in &self.assertions[installed..end] {
+                        Z3_solver_assert(ctx, native, ast.z3_ast);
+                    }
+                    installed = end;
                 }
-                installed = end;
             }
         }
+        self.installed = installed;
+        solver.arm_entry_assumptions.clear();
+        solver.arm_entry_assumptions.extend_from_slice(&self.assertions[installed..]);
 
         solver.trace.checkpoints = point.num;
         solver.trace.tail = point.trace;
