@@ -6,12 +6,13 @@ pub(super) enum QueryPurpose {
     RangeProof,
     BooleanProof,
     BranchFeasibility,
+    EntryBranchFeasibility,
 }
 
 impl QueryPurpose {
     pub(super) fn requests_snapshot<B: BV>(&self, solver: &Solver<B>, ast: &Ast) -> bool {
         match self {
-            Self::General => false,
+            Self::General | Self::EntryBranchFeasibility => false,
             Self::RangeProof => true,
             Self::BooleanProof | Self::BranchFeasibility => {
                 if SMT_CONFIG.get().unwrap().tactic != Tactic::Default || solver.incremental_checks {
