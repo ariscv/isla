@@ -735,6 +735,12 @@ fn isla_main() -> i32 {
         incremental_choice_dag: limits.path_merge.incremental_choice_dag,
         coi_query_slicing: limits.path_merge.coi_query_slicing,
         finite_domain_ground_eval: limits.path_merge.finite_domain_ground_eval,
+        branch_candidate_sparse_rewrite: limits.path_merge.branch_candidate_sparse_rewrite,
+        joint_candidate_sparse_rewrite: limits.path_merge.joint_candidate_sparse_rewrite,
+        structural_bool_cache: limits.path_merge.structural_bool_cache,
+        retain_ordinary_prefix_cache: limits.path_merge.retain_ordinary_prefix_cache,
+        reuse_narrow_truth: limits.path_merge.reuse_narrow_truth,
+        skip_independent_predicate_substitution: limits.path_merge.skip_independent_predicate_substitution,
         bv_rewrite: solver_region_options.bv_rewrite,
     });
     if solver_region_options.no_smt {

@@ -144,13 +144,64 @@ impl<B: BV> Solver<'_, B> {
     }
 }
 
+// 每个 Context 独占表。键区分原生默认参数与 Isla 的三项 BV 参数。
+#[derive(Default)]
+pub(super) struct StructuralBoolCache {
+    entries: ahash::AHashMap<(Z3_ast, bool), (Option<bool>, Z3_ast)>,
+}
+
+impl StructuralBoolCache {
+    pub(super) fn clear(&mut self, z3: Z3_context) {
+        for ((input, _), (_, output)) in self.entries.drain() {
+            unsafe {
+                Z3_dec_ref(z3, input);
+                Z3_dec_ref(z3, output);
+            }
+        }
+    }
+}
+
 impl Ast<'_> {
     pub(super) fn structural_bool(&mut self) -> Option<bool> {
         #[cfg(test)]
         finite_domain::STRUCTURAL_BOOLS.set(finite_domain::STRUCTURAL_BOOLS.get() + 1);
+        if !self.ctx.solver_options.structural_bool_cache || !self.ctx.has_unbounded_rewriting() {
+            return self.structural_bool_uncached();
+        }
+
+        let default_params = SMT_CONFIG.get().is_some_and(|config| config.tactic == Tactic::Default);
+        let key = (self.z3_ast, default_params);
+        let z3 = self.ctx.z3_ctx;
+        let mut cache = self.ctx.structural_bools.borrow_mut();
+        if let Some(&(truth, residual)) = cache.entries.get(&key) {
+            unsafe {
+                Z3_inc_ref(z3, residual);
+                Z3_dec_ref(z3, self.z3_ast);
+            }
+            self.z3_ast = residual;
+            return truth;
+        }
+
+        // 化简可能释放输入。先保活原 AST；失败退出时也由 Ast 释放。
+        let input = self.clone();
+        let truth = self.structural_bool_uncached();
+        if self.ctx.has_unbounded_rewriting() {
+            const MAX_ENTRIES: usize = 16_384;
+            if cache.entries.len() >= MAX_ENTRIES {
+                cache.clear(z3);
+            }
+            unsafe { Z3_inc_ref(z3, self.z3_ast) };
+            std::mem::forget(input);
+            cache.entries.insert(key, (truth, self.z3_ast));
+        }
+        truth
+    }
+
+    fn structural_bool_uncached(&mut self) -> Option<bool> {
         if let Some(value) = unsafe { structural_comparison(self.ctx, self.z3_ast) } {
             return Some(value);
         }
+        // 原生 Z3 在超时、步数耗尽或中断时报告失败。此处只有成功返回才入表。
         self.simplify();
         self.get_bool_value().or_else(|| unsafe { structural_comparison(self.ctx, self.z3_ast) })
     }

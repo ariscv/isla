@@ -823,6 +823,18 @@ witness_eval = true
 
 对可由候选赋值求出布尔常量的断言，默认使用 Isla 直接求值。无法判定时沿用 Z3 化简。可在 `[execution_limits.path_merge]` 设置 `finite_domain_ground_eval = false` 关闭直接求值。
 
+下列改写选项缺省开启。可在 `[execution_limits.path_merge]` 中逐项设为 `false`，也可通过 `--execution-limits-config=<文件>` 加载含这些字段的执行限制。
+
+| 字段 | 作用 |
+| --- | --- |
+| `branch_candidate_sparse_rewrite` | 仅重建分支候选代入所影响的 AST 节点。 |
+| `joint_candidate_sparse_rewrite` | 在联合候选之间共用有相同局部替换对的子图。 |
+| `structural_bool_cache` | 在同一 Z3 Context 内复用同一输入的完整结构布尔判定。 |
+| `retain_ordinary_prefix_cache` | 切换活动守卫时保留普通断言的翻译和已完成的候选检查。 |
+| `reuse_narrow_truth` | 复用窄化已经确定的真值与可证明稳定的布尔字面量。 |
+| `skip_independent_predicate_substitution` | 省去对不含候选锚点的谓词的代入。 |
+
+
 在 `[execution_limits.path_merge]` 中，符号标量统一具体化（`symbolic_scalar_resolver`）、扩展循环逐轮折叠（`loop_fold_shapes`）和历史释放（`prefix_compact`）默认开启。各项可在 TOML 中独立设为 `false`，也可通过对应 CLI 参数关闭。符号标量统一具体化允许延后区域把读长范围交给出口证明。[循环配置](specs/isarch-cli.md#分段合并候选与诊断配置) · [标量具体化配置](specs/isarch-cli.md#区域合并具体值)
 
 `partial_commit_prefix` 默认关闭。设为 `true` 并配合相应的原因类别开关，可在任意层保留已认证的子合并，从拒绝指令继续执行。[前缀固化配置](specs/isarch-cli.md#探索路径的限时与求解失败)
