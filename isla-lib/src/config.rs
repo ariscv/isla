@@ -2739,6 +2739,23 @@ end_column = 0
     }
 
     #[test]
+    fn obsolete_incremental_rewrite_fields_are_rejected() {
+        for field in [
+            "branch_candidate_sparse_rewrite",
+            "joint_candidate_sparse_rewrite",
+            "structural_bool_cache",
+            "retain_ordinary_prefix_cache",
+            "reuse_narrow_truth",
+            "skip_independent_predicate_substitution",
+        ] {
+            for value in [true, false] {
+                let error = merge_config(&format!("[execution_limits.path_merge]\n{field}={value}")).unwrap_err();
+                assert!(error.contains("unknown field") && error.contains(field), "{field}: {error}");
+            }
+        }
+    }
+
+    #[test]
     fn region_newbase_path_merge_fields_and_defaults() {
         let defaults = RegionOptions::from_config(&merge_config("[execution_limits.path_merge]").unwrap());
         assert!(defaults.defer_range_proofs && defaults.defer_ctor_checks);

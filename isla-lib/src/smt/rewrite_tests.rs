@@ -174,3 +174,79 @@ fn data_ite_equality_is_also_rewritten_inside_neq_translation() {
     let neq = solver.translate_exp(&Exp::Neq(Box::new(first), Box::new(Exp::Var(defined))));
     assert_eq!(neq.z3_ast, eq.mk_not().z3_ast, "neq 必须复用展开后的相等判断");
 }
+
+#[test]
+fn repeated_first_binding_read_reuses_identical_small_input() {
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let x = variable(&mut solver, 8);
+    let raw = x.mk_bvadd(&Ast::mk_bv_u64(&ctx, 8, 7));
+    let mut expected = raw.clone();
+    expected.simplify();
+    AST_SIMPLIFY_CALLS.set(0);
+    for _ in 0..16 {
+        let binding = ConstBinding::new(raw.clone(), true, false);
+        assert_eq!(binding.ast().z3_ast, expected.z3_ast);
+    }
+    assert_eq!(AST_SIMPLIFY_CALLS.get(), 1);
+}
+
+#[test]
+fn data_enum_leaf_equalities_match_original_constant_without_simplifying() {
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let id = solver.get_enum(Name::from_u32(17), 2);
+    let first = Ast::mk_enum_member(&solver.enums, id, 0);
+    let second = Ast::mk_enum_member(&solver.enums, id, 1);
+    let guard = variable(&mut solver, 1).mk_eq(&Ast::mk_bv_u64(&ctx, 1, 1));
+    let original = guard.ite(&first, &second).mk_eq(&first);
+    let mut equal = first.mk_eq(&first);
+    equal.simplify();
+    let mut different = second.mk_eq(&first);
+    different.simplify();
+    let expected = guard.ite(&equal, &different);
+    AST_SIMPLIFY_CALLS.set(0);
+    assert_eq!(apply(original, BvRewrite::parse("data-ite-eq").unwrap()).z3_ast, expected.z3_ast);
+    assert_eq!(AST_SIMPLIFY_CALLS.get(), 0);
+}
+
+#[test]
+fn multiplication_reuses_exact_implicit_extension_checks() {
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let a = variable(&mut solver, 8);
+    let b = variable(&mut solver, 8);
+    let mut a = a.zero_extend(8);
+    let mut b = b.zero_extend(8);
+    a.simplify();
+    b.simplify();
+    let expected = a.mk_bvmul(&b);
+    AST_SIMPLIFY_CALLS.set(0);
+    for _ in 0..16 {
+        assert_eq!(a.mk_bvmul(&b).z3_ast, expected.z3_ast);
+    }
+    assert_eq!(AST_SIMPLIFY_CALLS.get(), 0);
+}
+
+#[test]
+fn verified_small_fixpoint_is_shared_by_plain_simplification() {
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let mut term = variable(&mut solver, 8);
+    let raw = term.z3_ast;
+    term.simplify_small();
+    assert_eq!(term.z3_ast, raw);
+    let mut independent = term.clone();
+    AST_SIMPLIFY_CALLS.set(0);
+    independent.simplify();
+    assert_eq!(independent.z3_ast, raw);
+    assert_eq!(AST_SIMPLIFY_CALLS.get(), 1, "此前的原生输出必须复验一次");
+    AST_SIMPLIFY_CALLS.set(0);
+    term.simplify();
+    assert_eq!(term.z3_ast, raw);
+    assert_eq!(AST_SIMPLIFY_CALLS.get(), 0);
+}

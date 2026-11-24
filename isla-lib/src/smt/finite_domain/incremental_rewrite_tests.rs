@@ -17,6 +17,14 @@ fn native_config() -> Config {
     cfg
 }
 
+fn reference_narrow<'ctx>(original: &Ast<'ctx>, replacements: &[(Z3_ast, Z3_ast)]) -> (bool, Option<bool>, Ast<'ctx>) {
+    let (from, to): (Vec<_>, Vec<_>) = replacements.iter().copied().unzip();
+    let mut residual = original.substitute_many(&from, &to);
+    let unchanged = residual.z3_ast == original.z3_ast;
+    let truth = residual.reference_structural_bool();
+    (unchanged, truth, residual)
+}
+
 #[test]
 fn branch_sparse_rebuild_shares_neighbouring_assertions() {
     let ctx = Context::new(native_config());
@@ -36,11 +44,13 @@ fn branch_sparse_rebuild_shares_neighbouring_assertions() {
     let prefix = PathConditions::new(&solver).unwrap();
     let anchor = solver.translate_exp(&Var(x));
     let candidate = Ast::mk_bv_u64(&ctx, 8, 2);
+    PROJECT_SUBSTITUTIONS.set(0);
     let old = prefix.assertions().any(|exp| {
         let original = solver.translate_projection_assertion(exp);
         let mut residual = original.substitute(&anchor, &candidate);
-        original.z3_ast != residual.z3_ast && residual.structural_bool() == Some(false)
+        original.z3_ast != residual.z3_ast && residual.reference_structural_bool() == Some(false)
     });
+    assert_eq!(PROJECT_SUBSTITUTIONS.get(), 32);
     PROJECT_SUBSTITUTIONS.set(0);
     assert_eq!(prefix.excludes_branch_candidate(&solver, &anchor, &candidate), old);
     assert!(PROJECT_SUBSTITUTIONS.get() < 4, "整式代入次数 {}", PROJECT_SUBSTITUTIONS.get());
@@ -78,12 +88,12 @@ fn joint_sparse_rebuild_preserves_simultaneous_pairs_and_binders() {
     let mut deps = rewrites::InputDependencies::new(pairs.iter().map(|&(from, _)| from).enumerate());
     let actual: Vec<_> = roots.iter().map(|root| rewrites.narrow(&pairs, root, &mut deps)).collect();
     let calls = PROJECT_SUBSTITUTIONS.get();
+    PROJECT_SUBSTITUTIONS.set(0);
     for (root, (unchanged, truth, actual)) in roots.iter().zip(actual) {
-        let mut expected = root.substitute_many(&[x.z3_ast, y.z3_ast], &[y.z3_ast, z.z3_ast]);
-        assert_eq!(unchanged, expected.z3_ast == root.z3_ast);
-        assert_eq!(truth, expected.structural_bool());
-        assert_eq!(actual.z3_ast, expected.z3_ast);
+        let (old_unchanged, old_truth, expected) = reference_narrow(root, &pairs);
+        assert_eq!((unchanged, truth, actual.z3_ast), (old_unchanged, old_truth, expected.z3_ast));
     }
+    assert_eq!(PROJECT_SUBSTITUTIONS.get(), 24);
     assert!(calls < roots.len() / 2, "原生代入次数 {calls}");
 }
 
@@ -94,12 +104,19 @@ fn exact_boolean_simplification_reuses_input_not_assumed_output() {
     let x = solver.declare_bitvector(8, SourceLoc::unknown());
     let ast = solver.translate_exp(&eq(x, 1)).mk_not().mk_not();
     AST_SIMPLIFY_CALLS.set(0);
-    let mut first = ast.clone();
-    let expected = first.structural_bool();
+    let mut expected = ast.clone();
+    let truth = expected.reference_structural_bool();
     for _ in 0..8 {
         let mut next = ast.clone();
-        assert_eq!(next.structural_bool(), expected);
-        assert_eq!(next.z3_ast, first.z3_ast);
+        assert_eq!(next.reference_structural_bool(), truth);
+        assert_eq!(next.z3_ast, expected.z3_ast);
+    }
+    assert_eq!(AST_SIMPLIFY_CALLS.get(), 9);
+    AST_SIMPLIFY_CALLS.set(0);
+    for _ in 0..9 {
+        let mut next = ast.clone();
+        assert_eq!(next.structural_bool(), truth);
+        assert_eq!(next.z3_ast, expected.z3_ast);
     }
     assert_eq!(AST_SIMPLIFY_CALLS.get(), 1);
 }
@@ -127,6 +144,15 @@ fn ordinary_prefix_survives_guards_and_rechecks_replaced_suffix() {
     assert!(!check(&solver));
     assert_eq!(PROJECT_TRANSLATIONS.get(), 1, "只翻译新增守卫");
     assert_eq!(STRUCTURAL_BOOLS.get(), 0, "守卫切换不重新检查普通断言");
+    let prefix = PathConditions::new(&solver).unwrap();
+    let anchor = solver.translate_exp(&Var(x));
+    let value = Ast::mk_bv_u64(&ctx, 8, 1);
+    PROJECT_SUBSTITUTIONS.set(0);
+    assert!(!prefix.ordinary_suffix(0).any(|exp| {
+        let (unchanged, truth, _) = reference_narrow(&solver.translate_exp(exp), &[(anchor.z3_ast, value.z3_ast)]);
+        !unchanged && truth == Some(false)
+    }));
+    assert_eq!(PROJECT_SUBSTITUTIONS.get(), 32);
     solver.assert(Not(Box::new(eq(x, 1))));
     assert!(check(&solver));
     solver.rollback_transaction(inner);
@@ -162,8 +188,17 @@ fn independent_branch_predicate_omits_noop_substitution_but_keeps_empty_domain()
     let b = solver.declare_const(Ty::Bool, info);
     solver.assert(allowed(x));
     let p = solver.define_const(Or(Box::new(And(Box::new(eq(x, 1)), Box::new(Bool(false)))), Box::new(Var(b))), info);
+    let predicate = solver.translate_exp(&Var(p));
+    let anchor = solver.translate_exp(&Var(x));
+    let value = Ast::mk_bv_u64(&ctx, 8, 1);
     PROJECT_SUBSTITUTIONS.set(0);
-    assert_eq!(solver.finite_domain_bool(&Var(p)), None);
+    let (unchanged, truth, _) = reference_narrow(&predicate, &[(anchor.z3_ast, value.z3_ast)]);
+    assert!(unchanged);
+    assert_eq!(truth, None);
+    assert_eq!(PROJECT_SUBSTITUTIONS.get(), 1);
+
+    PROJECT_SUBSTITUTIONS.set(0);
+    assert_eq!(solver.finite_domain_bool(&Var(p)), truth);
     assert_eq!(PROJECT_SUBSTITUTIONS.get(), 0);
     solver.assert(Not(Box::new(eq(x, 1))));
     solver.assert(Not(Box::new(eq(x, 2))));
@@ -172,13 +207,9 @@ fn independent_branch_predicate_omits_noop_substitution_but_keeps_empty_domain()
 }
 
 #[test]
-fn randomized_joint_rewrites_match_original_structure_with_options_on_and_off() {
-    let mut cfg = native_config();
-    cfg.solver_options.structural_bool_cache = false;
-    cfg.solver_options.joint_candidate_sparse_rewrite = false;
-    let original_ctx = Context::new(cfg);
+fn randomized_joint_rewrites_match_native_substitution_and_simplification() {
+    let original_ctx = Context::new(native_config());
     let candidate_ctx = Context::new(native_config());
-    let original_rewrites = rewrites::Rewrites::new(&original_ctx);
     let candidate_rewrites = rewrites::Rewrites::new(&candidate_ctx);
     let mut original_solver = Solver::<B64>::new(&original_ctx);
     let mut candidate_solver = Solver::<B64>::new(&candidate_ctx);
@@ -210,17 +241,113 @@ fn randomized_joint_rewrites_match_original_structure_with_options_on_and_off() 
         let parent_replacement = if (rng >> 10) & 1 == 0 { &parent } else { &number };
         let mut replacements = [(&parent, parent_replacement), (&x, &y), (&y, &z), (&x, &z)];
         replacements.rotate_left(((rng >> 11) & 3) as usize);
-        let run = |solver: &Solver<'_, B64>, rewrites: &rewrites::Rewrites<'_>| {
-            let original = solver.translate_exp(&exp);
-            let replacements: Vec<_> =
-                replacements.iter().map(|(a, b)| (solver.translate_exp(a), solver.translate_exp(b))).collect();
-            let pairs: Vec<_> = replacements.iter().map(|(a, b)| (a.z3_ast, b.z3_ast)).collect();
-            let mut deps = rewrites::InputDependencies::new(pairs.iter().map(|&(source, _)| source).enumerate());
-            let (unchanged, truth, residual) = rewrites.narrow(&pairs, &original, &mut deps);
-            (unchanged, truth, unsafe {
-                CStr::from_ptr(Z3_ast_to_string(residual.ctx.z3_ctx, residual.z3_ast)).to_string_lossy().into_owned()
-            })
-        };
-        assert_eq!(run(&candidate_solver, &candidate_rewrites), run(&original_solver, &original_rewrites));
+        let (old_unchanged, old_truth, old) = compare_joint(&original_solver, None, &exp, &replacements);
+        let (unchanged, truth, actual) =
+            compare_joint(&candidate_solver, Some(&candidate_rewrites), &exp, &replacements);
+        assert_eq!((unchanged, truth), (old_unchanged, old_truth));
+        // 独立 Context 的 AST ID 复用顺序可能使 Z3 重排交换律操作数。
+        // 优先检查结构；出现重排时在新的求解器中认证两份残余等价。
+        unsafe {
+            let z3 = candidate_ctx.z3_ctx;
+            let expected = Z3_translate(original_ctx.z3_ctx, old.z3_ast, z3);
+            Z3_inc_ref(z3, expected);
+            let expected = Ast { ctx: &candidate_ctx, z3_ast: expected };
+            if expected.z3_ast != actual.z3_ast {
+                let check = Z3_mk_solver(z3);
+                Z3_solver_inc_ref(z3, check);
+                Z3_solver_assert(z3, check, expected.mk_eq(&actual).mk_not().z3_ast);
+                let result = Z3_solver_check(z3, check);
+                Z3_solver_dec_ref(z3, check);
+                assert_eq!(result, Z3_L_FALSE, "随机断言残余不等价");
+            }
+        }
+    }
+}
+
+fn compare_joint<'ctx>(
+    solver: &Solver<'ctx, B64>,
+    rewrites: Option<&rewrites::Rewrites<'ctx>>,
+    exp: &Exp<Sym>,
+    replacements: &[(&Exp<Sym>, &Exp<Sym>)],
+) -> (bool, Option<bool>, Ast<'ctx>) {
+    let original = solver.translate_exp(exp);
+    let replacements: Vec<_> =
+        replacements.iter().map(|(a, b)| (solver.translate_exp(a), solver.translate_exp(b))).collect();
+    let pairs: Vec<_> = replacements.iter().map(|(a, b)| (a.z3_ast, b.z3_ast)).collect();
+    if let Some(rewrites) = rewrites {
+        let mut deps = rewrites::InputDependencies::new(pairs.iter().map(|&(source, _)| source).enumerate());
+        rewrites.narrow(&pairs, &original, &mut deps)
+    } else {
+        reference_narrow(&original, &pairs)
+    }
+}
+
+#[test]
+fn finite_bits_reads_wide_numeral_without_native_simplification() {
+    let ctx = Context::new(native_config());
+    let bits: Vec<_> = (0..257).map(|i| i % 17 == 0).collect();
+    let mut literal = Ast::mk_bv(&ctx, 257, &bits);
+    AST_SIMPLIFY_CALLS.set(0);
+    assert_eq!(literal.finite_bits(), Some(Bits(bits)));
+    assert_eq!(AST_SIMPLIFY_CALLS.get(), 0);
+}
+
+#[test]
+fn structurally_known_boolean_literal_needs_no_native_rewrite() {
+    let ctx = Context::new(native_config());
+    AST_SIMPLIFY_CALLS.set(0);
+    for truth in [false, true] {
+        let mut value = Ast::mk_bool(&ctx, truth);
+        let original = value.z3_ast;
+        assert_eq!(value.structural_bool(), Some(truth));
+        assert_eq!(value.z3_ast, original);
+    }
+    assert_eq!(AST_SIMPLIFY_CALLS.get(), 0);
+}
+
+#[test]
+fn unknown_narrowed_residual_keeps_the_second_rewrite() {
+    let ctx = Context::new(native_config());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let x = solver.declare_bitvector(8, SourceLoc::unknown());
+    let y = solver.declare_bitvector(8, SourceLoc::unknown());
+    let a = solver.translate_exp(&Var(x));
+    let b = solver.translate_exp(&Var(y));
+    let n = |n| Ast::mk_bv_u64(&ctx, 8, n);
+    let one = a.mk_bvadd(&n(1)).mk_bvsub(&n(2).mk_bvshl(&b));
+    let original = a.mk_bvnot().mk_bvnot().mk_eq(&one).mk_not();
+    let rewrites = rewrites::Rewrites::new(&ctx);
+    let (truth, once) = rewrites.simplified(original);
+    assert_eq!(truth, None);
+    let mut native_twice = once.clone();
+    let truth = native_twice.reference_structural_bool();
+    AFTER_NARROW.set(0);
+    let (result, twice) = rewrites.after_narrow(None, once);
+    assert_eq!((result, twice.z3_ast), (truth, native_twice.z3_ast));
+    assert_eq!(AFTER_NARROW.get(), 1);
+}
+
+#[test]
+fn symbolic_boolean_absorbers_and_reflexive_equality_keep_literal_structure() {
+    let ctx = Context::new(native_config());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let x = solver.declare_bitvector(8, SourceLoc::unknown());
+    let atom = solver.translate_exp(&eq(x, 1));
+    let false_ast = Ast::mk_bool(&ctx, false);
+    let true_ast = Ast::mk_bool(&ctx, true);
+    let examples = [
+        (atom.mk_and(&false_ast), false),
+        (true_ast.mk_or(&atom), true),
+        (atom.mk_eq(&atom), true),
+        (false_ast.mk_not(), true),
+    ];
+    for (original, expected) in examples {
+        let mut native = original.clone();
+        native.simplify_native();
+        let mut candidate = original;
+        AST_SIMPLIFY_CALLS.set(0);
+        assert_eq!(candidate.structural_bool(), Some(expected));
+        assert_eq!(candidate.z3_ast, native.z3_ast);
+        assert_eq!(AST_SIMPLIFY_CALLS.get(), 0);
     }
 }

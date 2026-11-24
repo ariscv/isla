@@ -78,12 +78,6 @@ fn isla_main() -> i32 {
         isla_lib::smt::configure_solver_options(isla_lib::smt::SolverOptions {
             incremental_choice_dag: config.path_merge.incremental_choice_dag,
             coi_query_slicing: config.path_merge.coi_query_slicing,
-            branch_candidate_sparse_rewrite: config.path_merge.branch_candidate_sparse_rewrite,
-            joint_candidate_sparse_rewrite: config.path_merge.joint_candidate_sparse_rewrite,
-            structural_bool_cache: config.path_merge.structural_bool_cache,
-            retain_ordinary_prefix_cache: config.path_merge.retain_ordinary_prefix_cache,
-            reuse_narrow_truth: config.path_merge.reuse_narrow_truth,
-            skip_independent_predicate_substitution: config.path_merge.skip_independent_predicate_substitution,
             ..Default::default()
         });
     }

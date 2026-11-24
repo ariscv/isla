@@ -389,8 +389,7 @@ impl<'ctx> PrefixIndex<'ctx> {
                 .get_mut()
                 .retain(|_, bound| bound.definition < first && bound.proof_assertions <= retained);
             self.arm_facts.get_mut().truncate_assertions(self.assertions.len());
-            let preserve = if self.incremental_choices || self.retain_ordinary() { self.assertions.len() } else { 0 };
-            self.clear_candidate_caches(preserve);
+            self.clear_candidate_caches(self.assertions.len());
         }
     }
 
@@ -412,14 +411,6 @@ impl<'ctx> PrefixIndex<'ctx> {
         self.clear_candidate_caches(0);
     }
 
-    fn retain_ordinary(&self) -> bool {
-        self.asts.ctx.solver_options.retain_ordinary_prefix_cache
-    }
-
-    fn stable_assertions(&self) -> bool {
-        self.retain_ordinary() || super::scalar::enabled() || self.incremental_choices
-    }
-
     pub(in crate::smt) fn guarded_suffix(&mut self, offset: usize, guard_depth: usize) {
         let retained = self.assertions.partition_point(|p| *p < Position(BUFFERED, offset));
         if self.incremental_choices && retained < self.choice_assertions.len() {
@@ -429,12 +420,11 @@ impl<'ctx> PrefixIndex<'ctx> {
         self.symbol_upper_bounds.get_mut().retain(|_, bound| bound.proof_assertions <= retained);
         self.arm_facts.get_mut().truncate_assertions(retained);
         self.truncate_guards(guard_depth);
-        self.clear_candidate_caches(if self.incremental_choices || self.retain_ordinary() { retained } else { 0 });
+        self.clear_candidate_caches(retained);
     }
 
     fn clear_candidate_caches(&mut self, preserve: usize) {
         self.bounds.get_mut().clear();
-        let stable = self.stable_assertions();
         let cache = self.projection.get_mut();
         let preserve = preserve.min(cache.assertions.len());
         if preserve < cache.assertions.len() {
@@ -453,9 +443,7 @@ impl<'ctx> PrefixIndex<'ctx> {
                 facts.related.clear();
             }
             for key in cache.assertions.drain(preserve..) {
-                if stable {
-                    self.asts.release_stable(key);
-                }
+                self.asts.release_stable(key);
             }
         }
         self.clear_guard_caches();
@@ -484,16 +472,13 @@ impl<'ctx> PrefixIndex<'ctx> {
     }
 
     fn clear_guard_caches(&mut self) {
-        let stable_assertions = self.stable_assertions();
-        let retain_ordinary = self.retain_ordinary();
         let cache = self.projection.get_mut();
         cache.active = ProjectionLayer::default();
-        if !retain_ordinary || self.ordinary_asts.retained_count() > 32_768 {
+        // 与普通纯改写用相同数量级的软水位，释放缓存中跨臂累积的锚点和候选。
+        const ORDINARY_PROJECTION_AST_WATERMARK: usize = 32_768;
+        if self.ordinary_asts.retained_count() > ORDINARY_PROJECTION_AST_WATERMARK {
             cache.ordinary = ProjectionLayer::default();
             self.ordinary_asts.release_all();
-        }
-        if !stable_assertions {
-            cache.assertions.clear();
         }
         if !self.incremental_choices {
             cache.guards.clear();
@@ -713,12 +698,7 @@ impl<'a, B: BV> PathConditions<'a, B> {
     pub(super) fn translate_projection_suffix(&self, solver: &Solver<'_, B>, cache: &mut ProjectionCache) {
         for &position in &self.index.assertions[cache.assertions.len()..] {
             let ast = solver.translate_projection_assertion(self.assertion(position));
-            let key = if self.index.stable_assertions() {
-                self.index.asts.keep_stable(ast)
-            } else {
-                self.index.asts.keep(ast)
-            };
-            cache.assertions.push(key);
+            cache.assertions.push(self.index.asts.keep_stable(ast));
         }
         for guard in &self.guards[cache.guards.len()..] {
             let ast = solver.translate_projection_assertion(guard);
@@ -772,8 +752,6 @@ impl<'a, B: BV> PathConditions<'a, B> {
         let mut cache = self.index.projection.borrow_mut();
         self.translate_projection_suffix(solver, &mut cache);
         let ProjectionCache { assertions, guards, ordinary, active } = &mut *cache;
-        let evaluator = ground::AstEvaluator::new(asts.ctx);
-        let replacement = [(anchor.z3_ast, value.z3_ast)];
         let mut rebuilt = HashMap::new();
         for (is_guard, layer, roots, owners) in
             [(false, ordinary, assertions, &self.index.ordinary_asts), (true, active, guards, asts)]
@@ -792,22 +770,10 @@ impl<'a, B: BV> PathConditions<'a, B> {
             }
             facts.indexed = roots.len();
             let result = facts.related[checked..].iter().find_map(|&(index, key)| {
-                let excluded = if asts.ctx.solver_options.branch_candidate_sparse_rewrite {
-                    let fact =
-                        self.index.rewrites.for_assertion(is_guard).single(anchor.z3_ast, value.z3_ast, key, || {
-                            facts.projection.project_assertion(asts, key, anchor, value, &mut rebuilt)
-                        });
-                    !fact.unchanged && fact.truth == Some(false)
-                } else {
-                    evaluator.evaluate(key, &replacement).map_or_else(
-                        || {
-                            let mut residual = asts.get(key).substitute(anchor, value);
-                            residual.z3_ast != key && residual.structural_bool() == Some(false)
-                        },
-                        |(truth, changed)| changed && !truth,
-                    )
-                };
-                excluded.then_some(index)
+                let fact = self.index.rewrites.for_assertion(is_guard).single(anchor.z3_ast, value.z3_ast, key, || {
+                    facts.projection.project_assertion(asts, key, anchor, value, &mut rebuilt)
+                });
+                (!fact.unchanged && fact.truth == Some(false)).then_some(index)
             });
             let progress = result.map_or(BranchCheck::Checked(facts.related.len()), BranchCheck::ExcludedAt);
             facts.candidates.insert(owners.keep(value.clone()), progress);

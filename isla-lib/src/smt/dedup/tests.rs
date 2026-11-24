@@ -652,6 +652,26 @@ fn unify_optional_candidate_checks_keep_real_unknown_and_obligations() {
 }
 
 #[test]
+fn atomic_jump_pair_skips_rewriting_open_boolean_and_preserves_branch_result() {
+    configure_tastic(Tactic::Qfaufbv);
+    let mut config = Config::new();
+    config.solver_options.skip_branch_checks = true;
+    let ctx = Context::new(config);
+    let mut solver = Solver::<B64>::new(&ctx);
+    let info = SourceLoc::unknown();
+    let sym = solver.declare_const(Ty::Bool, info);
+    let yes = Exp::Var(sym);
+    let no = Exp::Not(Box::new(yes.clone()));
+    assert_eq!(solver.translate_exp(&yes).reference_structural_bool(), None);
+    assert_eq!(solver.translate_exp(&no).reference_structural_bool(), None);
+    AST_SIMPLIFY_CALLS.set(0);
+    assert_eq!(solver.structural_bool(&yes), None);
+    assert_eq!(solver.check_sat_with_for_branch(&yes, info, false), None);
+    assert_eq!(solver.check_sat_with_for_branch(&no, info, false), None);
+    assert_eq!(AST_SIMPLIFY_CALLS.get(), 0);
+}
+
+#[test]
 fn entry_branch_retained_models_check_both_polarities_and_new_assertions() {
     configure_tastic(Tactic::Qfaufbv);
     let ctx = Context::new(Config::new());

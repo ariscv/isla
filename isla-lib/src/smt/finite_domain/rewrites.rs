@@ -54,44 +54,34 @@ impl<'ctx, K, V> Recent<'ctx, K, V> {
 
 /// 普通断言的改写按 AST 和实际代入项共享。守卫及临时绑定随活跃臂换代。
 pub(super) struct ScopedRewriteCache<'ctx> {
-    base_rewrites: Option<Rewrites<'ctx>>,
+    base_rewrites: Rewrites<'ctx>,
     guard_rewrites: Rewrites<'ctx>,
 }
 
 impl<'ctx> ScopedRewriteCache<'ctx> {
     pub(super) fn new(ctx: &'ctx Context) -> Self {
-        Self {
-            base_rewrites: (ctx.solver_options.retain_ordinary_prefix_cache
-                || ctx.solver_options.incremental_choice_dag)
-                .then(|| Rewrites::new(ctx)),
-            guard_rewrites: Rewrites::new(ctx),
-        }
+        Self { base_rewrites: Rewrites::new(ctx), guard_rewrites: Rewrites::new(ctx) }
     }
 
     pub(super) fn for_assertion(&self, is_guard: bool) -> &Rewrites<'ctx> {
         if is_guard {
             &self.guard_rewrites
         } else {
-            self.base_rewrites.as_ref().unwrap_or(&self.guard_rewrites)
+            &self.base_rewrites
         }
     }
 
     pub(super) fn advance(&mut self) {
         self.guard_rewrites.advance();
-        // 释放缓存页的软水位。约束与可枚举候选的数量不受此值限制。
-        if let Some(base) = &mut self.base_rewrites {
-            if base.single.current.asts.ctx.solver_options.retain_ordinary_prefix_cache {
-                if base.retained_ast_count() > 32_768 {
-                    base.advance();
-                }
-            } else if base.retained_ast_count() > 32_768 {
-                *base = Rewrites::new(base.single.current.asts.ctx);
-            }
+        // 沿用普通纯改写的 32,768 引用软水位，换代时保留上一代热查询。
+        const BASE_REWRITE_AST_WATERMARK: usize = 32_768;
+        if self.base_rewrites.retained_ast_count() > BASE_REWRITE_AST_WATERMARK {
+            self.base_rewrites.advance();
         }
     }
 
     pub(super) fn heap_bytes(&self) -> usize {
-        self.guard_rewrites.heap_bytes() + self.base_rewrites.as_ref().map_or(0, Rewrites::heap_bytes)
+        self.guard_rewrites.heap_bytes() + self.base_rewrites.heap_bytes()
     }
 }
 
@@ -197,12 +187,7 @@ impl<'ctx> Rewrites<'ctx> {
                     residual: self.joint.current.asts.keep(Ast::mk_bool(original.ctx, truth)),
                 };
             }
-            let mut residual = if original.ctx.solver_options.joint_candidate_sparse_rewrite {
-                self.substitute_subgraphs(original, replacements, dependencies)
-            } else {
-                let (from, to): (Vec<_>, Vec<_>) = replacements.iter().copied().unzip();
-                original.substitute_many(&from, &to)
-            };
+            let mut residual = self.substitute_subgraphs(original, replacements, dependencies);
             Narrowed {
                 unchanged: residual.z3_ast == original.z3_ast,
                 truth: residual.structural_bool(),
@@ -226,10 +211,7 @@ impl<'ctx> Rewrites<'ctx> {
     }
 
     pub(super) fn after_narrow(&self, truth: Option<bool>, residual: Ast<'ctx>) -> (Option<bool>, Ast<'ctx>) {
-        if residual.ctx.solver_options.reuse_narrow_truth
-            && residual.ctx.has_unbounded_rewriting()
-            && (truth.is_some() || projection::is_literal_shape(&residual))
-        {
+        if residual.ctx.has_unbounded_rewriting() && (truth.is_some() || projection::is_literal_shape(&residual)) {
             return (truth, residual);
         }
         // 未知的复杂残余仍需走原入口，不能用前一次 Z3 输出推定不动点。

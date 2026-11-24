@@ -283,6 +283,62 @@ pub(super) fn eval_assertion<'a>(
     .boolean()
 }
 
+// 读绑定时，其直接操作数已经翻译。只读取已存在的常量，不遍历长定义 DAG。
+pub(in crate::smt) fn fold_shallow<'ctx>(input: &Ast<'ctx>) -> Option<Ast<'ctx>> {
+    let z3 = input.ctx.z3_ctx;
+    let evaluator = AstEvaluator::new(input.ctx);
+    let value = unsafe {
+        if evaluator.constant(input.z3_ast).is_some() {
+            return Some(input.clone());
+        }
+        if Z3_get_ast_kind(z3, input.z3_ast) != AstKind::App {
+            return None;
+        }
+        let app = Z3_to_app(z3, input.z3_ast);
+        let arity = Z3_get_app_num_args(z3, app) as usize;
+        if !(1..=3).contains(&arity) {
+            return None;
+        }
+        let kind = rewrite::decl_kind_raw(z3, Z3_get_app_decl(z3, app));
+        let arg = |i| Z3_get_app_arg(z3, app, i);
+        if kind == DeclKind::EQ as u32 && arg(0) == arg(1) {
+            return Some(Ast::mk_bool(input.ctx, true));
+        }
+        if kind == DeclKind::ITE as u32 {
+            let chosen = if arg(1) == arg(2) {
+                arg(1)
+            } else {
+                match evaluator.constant(arg(0)) {
+                    Some(Value::Bool(true)) => arg(1),
+                    Some(Value::Bool(false)) => arg(2),
+                    _ => return None,
+                }
+            };
+            // 选中的复合臂本身仍可能被原生化简，只有字面量可直接返回。
+            evaluator.constant(chosen)?;
+            Z3_inc_ref(z3, chosen);
+            return Some(Ast { ctx: input.ctx, z3_ast: chosen });
+        }
+        let mut values = [Value::Bool(false); 3];
+        for (i, value) in values[..arity].iter_mut().enumerate() {
+            *value = evaluator.constant(Z3_get_app_arg(z3, app, i as u32))?;
+        }
+        let op = match evaluator.term(input.z3_ast)? {
+            Term::Unary(op, _) | Term::Binary(op, _, _) | Term::Ternary(op, _, _, _) | Term::Many(op, _) => op,
+            Term::Alias(_) | Term::Constant(_) => unreachable!("复合式必须有运算符"),
+        };
+        op.apply(&values[..arity])?
+    };
+    match value {
+        Value::Bool(truth) => Some(Ast::mk_bool(input.ctx, truth)),
+        Value::Bits(bits) if bits.len() <= 64 => Some(Ast::mk_bv_u64(input.ctx, bits.len(), bits.lower_u64())),
+        Value::Bits(bits) => {
+            let raw: Vec<_> = (0..bits.len()).map(|i| bits.slice(i, 1) == Some(B129::BIT_ONE)).collect();
+            Some(Ast::mk_bv(input.ctx, bits.len(), &raw))
+        }
+    }
+}
+
 pub(super) struct AstEvaluator<'a> {
     ctx: &'a Context,
 }

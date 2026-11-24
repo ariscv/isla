@@ -2,7 +2,7 @@
 use super::*;
 
 mod arithmetic;
-mod ground;
+pub(super) mod ground;
 mod guard_conflict;
 mod prefix_index;
 mod projection;
@@ -322,7 +322,11 @@ impl<'ctx> Ast<'ctx> {
     }
 
     fn finite_bits(&mut self) -> Option<Exp<Sym>> {
-        self.simplify();
+        let unbounded = self.ctx.has_unbounded_rewriting();
+        let literal = unsafe { Z3_is_numeral_ast(self.ctx.z3_ctx, self.z3_ast) };
+        if !unbounded || !literal {
+            self.simplify_small();
+        }
         let width = unsafe {
             let ctx = self.ctx.z3_ctx;
             let sort = Z3_get_sort(ctx, self.z3_ast);
@@ -333,6 +337,11 @@ impl<'ctx> Ast<'ctx> {
         };
         if width <= 64 {
             return Some(bits64(self.get_numeral_u64().expect("位向量常量必须能读取"), width));
+        }
+        if unbounded {
+            let text = unsafe { CStr::from_ptr(Z3_get_numeral_string(self.ctx.z3_ctx, self.z3_ast)) };
+            let value = num_bigint::BigUint::parse_bytes(text.to_bytes(), 10).expect("位向量常量应为十进制整数");
+            return Some(Exp::Bits((0..width).map(|bit| value.bit(u64::from(bit))).collect()));
         }
         let mut bits = Vec::with_capacity(width as usize);
         for low in (0..width).step_by(64) {
@@ -435,11 +444,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 if *candidate.excluded.get_or_insert_with(|| prefix.excludes_branch_candidate(self, &anchor, &value)) {
                     continue;
                 }
-                let truth = if self.ctx.solver_options.skip_independent_predicate_substitution
-                    && *independent.get_or_insert_with(|| {
-                        let mut dependencies = rewrites::InputDependencies::new(std::iter::once((0, anchor.z3_ast)));
-                        dependencies.mask(predicate.z3_ast, self.ctx.z3_ctx) == 0
-                    }) {
+                let truth = if *independent.get_or_insert_with(|| {
+                    let mut dependencies = rewrites::InputDependencies::new(std::iter::once((0, anchor.z3_ast)));
+                    dependencies.mask(predicate.z3_ast, self.ctx.z3_ctx) == 0
+                }) {
                     *independent_truth.get_or_insert_with(|| predicate.clone().structural_bool())
                 } else {
                     predicate.substitute(&anchor, &value).structural_bool()

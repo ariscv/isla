@@ -139,8 +139,6 @@ fn candidate_fixture<T>(stage3: bool, direct: bool, check: impl FnOnce(&mut Solv
     configure_tastic(Tactic::Qfaufbv);
     let mut config = Config::new();
     config.solver_options.finite_domain_ground_eval = direct;
-    // 这里对照直接求值与整式 Z3 代入；稀疏代入有独立回归测试。
-    config.solver_options.branch_candidate_sparse_rewrite = false;
     config.solver_options.incremental_choice_dag = stage3;
     config.solver_options.coi_query_slicing = stage3;
     let ctx = Context::new(config);
@@ -165,20 +163,20 @@ fn ground_branch_exclusions_preserve_candidate_order() {
         candidate_fixture(stage3, direct, |solver, x, _, _| {
             let prefix = PathConditions::new(solver).unwrap();
             let anchor = solver.translate_exp(&Var(x));
-            let before = PROJECT_SUBSTITUTIONS.get();
+            let before = STRUCTURAL_BOOLS.get();
             let excluded = [1, 2].map(|n| {
                 let value = Ast::mk_bv_u64(solver.ctx, 8, n);
                 prefix.excludes_branch_candidate(solver, &anchor, &value)
             });
-            (excluded, PROJECT_SUBSTITUTIONS.get() - before)
+            (excluded, STRUCTURAL_BOOLS.get() - before)
         })
     };
     for stage3 in [false, true] {
-        let (direct, direct_substitutions) = run(stage3, true);
-        let (native, native_substitutions) = run(stage3, false);
+        let (direct, direct_checks) = run(stage3, true);
+        let (sparse_only, sparse_checks) = run(stage3, false);
         assert_eq!(direct, [false, true], "阶段 3={stage3}");
-        assert_eq!(direct, native, "阶段 3={stage3}");
-        assert!(direct_substitutions < native_substitutions, "阶段 3={stage3} 时应跳过原生代入");
+        assert_eq!(direct, sparse_only, "阶段 3={stage3}");
+        assert!(direct_checks < sparse_checks, "阶段 3={stage3} 时直接求值应跳过结构判定");
     }
 }
 

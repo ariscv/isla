@@ -214,10 +214,207 @@ fn data_equal<'ctx>(a: &Ast<'ctx>, b: &Ast<'ctx>, memo: &mut HashMap<(Z3_ast, Z3
         let xs = b.rewrite_args();
         xs[0].ite(&data_equal(a, &xs[1], memo), &data_equal(a, &xs[2], memo))
     } else {
-        let mut eq = a.mk_eq(b);
-        eq.simplify();
-        eq
+        if a.ctx.has_unbounded_rewriting() && is_enum_member(a) && is_enum_member(b) {
+            Ast::mk_bool(a.ctx, a.z3_ast == b.z3_ast)
+        } else {
+            let mut eq = a.mk_eq(b);
+            eq.simplify_small();
+            eq
+        }
     };
     memo.insert(key, value.clone());
     value
+}
+
+// Datatype 等号的两侧若均为零元构造子，Z3 只检查构造子身份。
+fn is_enum_member(ast: &Ast<'_>) -> bool {
+    unsafe {
+        let z3 = ast.ctx.z3_ctx;
+        Z3_get_ast_kind(z3, ast.z3_ast) == AstKind::App
+            && Z3_get_app_num_args(z3, Z3_to_app(z3, ast.z3_ast)) == 0
+            && ast.rewrite_kind(DeclKind::DT_CONSTRUCTOR)
+    }
+}
+
+#[derive(Default)]
+pub(super) struct SmallSimplifications {
+    entries: ahash::AHashMap<(Z3_ast, bool), Z3_ast>,
+    // 原生输出由 entries 持有。复验过同一输出且结构恒等后才标记。
+    outputs: ahash::AHashMap<(Z3_ast, bool), bool>,
+    uninterpreted_kind: Option<u32>,
+}
+
+impl SmallSimplifications {
+    fn uninterpreted_kind(&mut self, z3: Z3_context) -> u32 {
+        // z3-sys 的编号早于当前 libz3，通过未解释常量读取本库的实际值。
+        *self.uninterpreted_kind.get_or_insert_with(|| unsafe {
+            let sort = Z3_mk_bool_sort(z3);
+            let constant = Z3_mk_fresh_const(z3, ptr::null(), sort);
+            decl_kind_raw(z3, Z3_get_app_decl(z3, Z3_to_app(z3, constant)))
+        })
+    }
+
+    pub(super) fn clear(&mut self, z3: Z3_context) {
+        self.outputs.clear();
+        for ((input, _), output) in self.entries.drain() {
+            unsafe {
+                Z3_dec_ref(z3, input);
+                Z3_dec_ref(z3, output);
+            }
+        }
+    }
+}
+
+impl Ast<'_> {
+    // 对可独立取真、假的原子与其否定，两侧都无须先化简来判定为非恒值。
+    pub(super) fn is_open_branch_atom(&self) -> bool {
+        let z3 = self.ctx.z3_ctx;
+        unsafe {
+            let app = |term| (Z3_get_ast_kind(z3, term) == AstKind::App).then(|| Z3_to_app(z3, term));
+            let kind = |node| decl_kind_raw(z3, Z3_get_app_decl(z3, node));
+            let Some(mut node) = app(self.z3_ast) else { return false };
+            if kind(node) == DeclKind::NOT as u32 {
+                let Some(inner) = app(Z3_get_app_arg(z3, node, 0)) else { return false };
+                node = inner;
+            }
+            let is_variable = |node| {
+                Z3_get_app_num_args(z3, node) == 0
+                    && kind(node) == self.ctx.small_simplifications.borrow_mut().uninterpreted_kind(z3)
+            };
+            if Z3_get_app_num_args(z3, node) == 0 {
+                return Z3_get_sort_kind(z3, Z3_get_sort(z3, self.z3_ast)) == SortKind::Bool && is_variable(node);
+            }
+            if kind(node) != DeclKind::EQ as u32 {
+                return false;
+            }
+            let lhs = Z3_get_app_arg(z3, node, 0);
+            let rhs = Z3_get_app_arg(z3, node, 1);
+            if lhs == rhs || !matches!(Z3_get_sort_kind(z3, Z3_get_sort(z3, lhs)), SortKind::Bool | SortKind::BV) {
+                return false;
+            }
+            let lhs_var = app(lhs).is_some_and(is_variable);
+            let rhs_var = app(rhs).is_some_and(is_variable);
+            let literal = |term| Z3_is_numeral_ast(z3, term) || Z3_get_bool_value(z3, term) != Z3_L_UNDEF;
+            (lhs_var && (rhs_var || literal(rhs))) || (rhs_var && literal(lhs))
+        }
+    }
+
+    pub(super) fn simplify_with_verified_fixpoint(&mut self) {
+        if !self.ctx.has_unbounded_rewriting() {
+            self.simplify_native();
+            return;
+        }
+        let default_params = SMT_CONFIG.get().is_some_and(|config| config.tactic == Tactic::Default);
+        let key = (self.z3_ast, default_params);
+        let verified = self.ctx.small_simplifications.borrow().outputs.get(&key).copied();
+        if verified == Some(true) {
+            return;
+        }
+        self.simplify_native();
+        if verified == Some(false) && self.z3_ast == key.0 {
+            self.ctx.small_simplifications.borrow_mut().outputs.insert(key, true);
+        }
+    }
+
+    /// 在首次读定义、数据相等和扩展检查中共用小式子的精确输入。
+    pub(super) fn simplify_small(&mut self) {
+        if !self.ctx.has_unbounded_rewriting() {
+            self.simplify_native();
+            return;
+        }
+        let default_params = SMT_CONFIG.get().is_some_and(|config| config.tactic == Tactic::Default);
+        let key = (self.z3_ast, default_params);
+        let z3 = self.ctx.z3_ctx;
+        let mut table = self.ctx.small_simplifications.borrow_mut();
+        if let Some(&result) = table.entries.get(&key) {
+            unsafe {
+                Z3_inc_ref(z3, result);
+                Z3_dec_ref(z3, self.z3_ast);
+            }
+            self.z3_ast = result;
+            return;
+        }
+        let uninterpreted_kind = table.uninterpreted_kind(z3);
+        if !small_rewrite_input(z3, self.z3_ast, uninterpreted_kind) {
+            self.simplify_native();
+            return;
+        }
+        let original = self.clone();
+        self.simplify_native();
+        // 保留至多 8,192 对小输入和结果。大图仍走原生入口，避免占用长根的缓存空间。
+        const SMALL_REWRITE_LIMIT: usize = 8_192;
+        if table.entries.len() >= SMALL_REWRITE_LIMIT {
+            table.clear(z3);
+        }
+        unsafe { Z3_inc_ref(z3, self.z3_ast) };
+        std::mem::forget(original);
+        table.entries.insert(key, self.z3_ast);
+        let output = (self.z3_ast, default_params);
+        if let Some(unchanged) = table.outputs.get_mut(&key) {
+            *unchanged |= key == output;
+        }
+        if small_rewrite_input(z3, self.z3_ast, uninterpreted_kind) {
+            table.outputs.entry(output).or_insert(false);
+        }
+    }
+}
+
+// 只允许无需依赖共享引用数即可化简的小型 BV／布尔式。排除 ITE、除法、
+// 绑定器及非原子数据项，避免重用受 Z3 引用数启发式影响的结构。
+fn small_rewrite_input(z3: Z3_context, root: Z3_ast, uninterpreted_kind: u32) -> bool {
+    use DeclKind::*;
+    let mut pending = [root; 16];
+    let mut count = 1;
+    // 只检查少量节点。失败后沿用同一个化简调用，预算和表达式结果保持原有语义。
+    for _ in 0..pending.len() {
+        if count == 0 {
+            return true;
+        }
+        count -= 1;
+        let term = pending[count];
+        unsafe {
+            if Z3_get_ast_kind(z3, term) == AstKind::Numeral {
+                if Z3_get_sort_kind(z3, Z3_get_sort(z3, term)) != SortKind::BV {
+                    return false;
+                }
+                continue;
+            }
+            if Z3_get_ast_kind(z3, term) != AstKind::App {
+                return false;
+            }
+            let app = Z3_to_app(z3, term);
+            let arity = Z3_get_app_num_args(z3, app) as usize;
+            let kind = decl_kind_raw(z3, Z3_get_app_decl(z3, app));
+            let sort = Z3_get_sort_kind(z3, Z3_get_sort(z3, term));
+            match kind {
+                k if k == DT_CONSTRUCTOR as u32 => {
+                    if arity != 0 {
+                        return false;
+                    }
+                }
+                k if k == uninterpreted_kind => {
+                    if arity != 0 || !matches!(sort, SortKind::Bool | SortKind::BV | SortKind::Datatype) {
+                        return false;
+                    }
+                }
+                k if [
+                    TRUE, FALSE, NOT, AND, OR, EQ, BADD, BSUB, BMUL, BNOT, BAND, BOR, BXOR, CONCAT, EXTRACT, ZERO_EXT,
+                    SIGN_EXT, ULEQ, ULT, SLEQ, SLT,
+                ]
+                .into_iter()
+                .any(|op| k == op as u32) =>
+                {
+                    if count + arity > pending.len() {
+                        return false;
+                    }
+                    for i in 0..arity {
+                        pending[count + i] = Z3_get_app_arg(z3, app, i as u32);
+                    }
+                    count += arity;
+                }
+                _ => return false,
+            }
+        }
+    }
+    count == 0
 }

@@ -926,12 +926,6 @@ pub struct SolverOptions {
     pub incremental_choice_dag: bool,
     pub coi_query_slicing: bool,
     pub finite_domain_ground_eval: bool,
-    pub branch_candidate_sparse_rewrite: bool,
-    pub joint_candidate_sparse_rewrite: bool,
-    pub structural_bool_cache: bool,
-    pub retain_ordinary_prefix_cache: bool,
-    pub reuse_narrow_truth: bool,
-    pub skip_independent_predicate_substitution: bool,
     pub bv_rewrite: rewrite::BvRewrite,
 }
 
@@ -948,12 +942,6 @@ impl Default for SolverOptions {
             incremental_choice_dag: false,
             coi_query_slicing: false,
             finite_domain_ground_eval: defaults.finite_domain_ground_eval,
-            branch_candidate_sparse_rewrite: defaults.branch_candidate_sparse_rewrite,
-            joint_candidate_sparse_rewrite: defaults.joint_candidate_sparse_rewrite,
-            structural_bool_cache: defaults.structural_bool_cache,
-            retain_ordinary_prefix_cache: defaults.retain_ordinary_prefix_cache,
-            reuse_narrow_truth: defaults.reuse_narrow_truth,
-            skip_independent_predicate_substitution: defaults.skip_independent_predicate_substitution,
             bv_rewrite: Default::default(),
         }
     }
@@ -1043,6 +1031,7 @@ pub struct Context {
     native_timeout: Option<Duration>,
     enum_cache: RefCell<HashMap<EnumSortKey, Enum>>,
     structural_bools: RefCell<no_smt::StructuralBoolCache>,
+    small_simplifications: RefCell<rewrite::SmallSimplifications>,
 }
 
 fn z3_version_supported(version: (c_uint, c_uint, c_uint, c_uint)) -> bool {
@@ -1068,6 +1057,7 @@ impl Context {
                 native_timeout: cfg.native_timeout,
                 enum_cache: RefCell::new(HashMap::new()),
                 structural_bools: RefCell::default(),
+                small_simplifications: RefCell::default(),
             }
         }
     }
@@ -1094,6 +1084,7 @@ impl Drop for Context {
             enumeration.dec_refs(self.z3_ctx);
         }
         self.structural_bools.get_mut().clear(self.z3_ctx);
+        self.small_simplifications.get_mut().clear(self.z3_ctx);
         unsafe { Z3_del_context(self.z3_ctx) }
     }
 }
@@ -1395,6 +1386,10 @@ impl<'ctx> Ast<'ctx> {
     }
 
     fn simplify(&mut self) {
+        self.simplify_with_verified_fixpoint();
+    }
+
+    fn simplify_native(&mut self) {
         #[cfg(test)]
         AST_SIMPLIFY_CALLS.set(AST_SIMPLIFY_CALLS.get() + 1);
         let cost_scope =
@@ -3378,7 +3373,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 }
                 self.performance_info.add_var_node(*v, info);
                 let fd = FuncDecl::new(self.ctx, *v, &self.enums, &[], ty, &self.symbol_namer);
-                self.bind_constant(*v, ConstBinding::new(Ast::mk_constant(&fd), false));
+                self.bind_constant(*v, ConstBinding::new(Ast::mk_constant(&fd), false, false));
                 if self.def_attrs.attrs & 2 != 0 {
                     self.tag_bitvector(*v);
                 }
@@ -3410,12 +3405,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                         self.performance_info.add_var_edge(used, v)
                     }
                 }
-                // 翻译时冻结操作数的绑定，第一次取值时再化简。
+                // 翻译时冻结操作数的绑定，重放保留未折叠的原始表达式。
                 let ast = self.translate_exp(exp);
-                let mut binding = ConstBinding::new(ast, true);
-                if self.replaying_arm_entry && self.replay_assertions.is_some() {
-                    binding.keep_replay_ast();
-                }
+                let keep_replay = self.replaying_arm_entry && self.replay_assertions.is_some();
+                let binding = ConstBinding::new(ast, true, keep_replay);
                 self.bind_constant(*v, binding);
                 if self.def_attrs.attrs & 2 != 0 {
                     self.tag_bitvector(*v);
@@ -4837,7 +4830,7 @@ mod tests {
             replayed.define_const(Bvadd(Box::new(smtlib::bits64(3, 16)), Box::new(smtlib::bits64(4, 16))), info);
         let before = AST_SIMPLIFY_CALLS.get();
         assert_eq!(replayed.translate_exp(&Var(constant)).get_numeral_u64().unwrap(), 7);
-        assert_eq!(AST_SIMPLIFY_CALLS.get(), before + 1, "新定义首次取值仍须化简");
+        assert_eq!(AST_SIMPLIFY_CALLS.get(), before, "新定义的已知常量可直接求值");
         eprintln!("重放／原执行的化简次数：{replay_calls}／{original_calls}");
         assert!(replay_calls * 10 < original_calls, "重放／原执行的化简次数：{replay_calls}／{original_calls}");
     }
