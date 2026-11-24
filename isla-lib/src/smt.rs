@@ -3842,7 +3842,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     fn check_sat_with_strategy(&mut self, exp: &Exp<Sym>, info: SourceLoc, purpose: query::QueryPurpose) -> SmtResult {
         let label = match purpose {
-            query::QueryPurpose::General => "general",
+            query::QueryPurpose::General | query::QueryPurpose::EntryBranchFeasibility => "general",
             query::QueryPurpose::RangeProof => "range_proof",
             query::QueryPurpose::BooleanProof => "boolean_proof",
             query::QueryPurpose::BranchFeasibility => "branch_feasibility",
@@ -3909,7 +3909,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let pending = self.transaction_assertions();
         let mut assumptions: Vec<_> = pending.iter().map(|ast| ast.z3_ast).collect();
         assumptions.push(ast.z3_ast);
-        if self.witness_fast_sat(&assumptions) {
+        if self.witness_fast_sat(&assumptions, matches!(purpose, query::QueryPurpose::EntryBranchFeasibility)) {
             self.knowledge.literal = dedup::literal(exp);
             self.performance_info.assign_cost(exp);
             return Sat;
@@ -4030,7 +4030,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let started = Instant::now();
         let pending = self.transaction_assertions();
         let assumptions: Vec<_> = pending.iter().map(|ast| ast.z3_ast).collect();
-        if self.witness_fast_sat(&assumptions) {
+        if self.witness_fast_sat(&assumptions, false) {
             return Sat;
         }
         let query = self.query_solver(&assumptions, false);
@@ -4083,7 +4083,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     Z3_model_inc_ref(self.ctx.z3_ctx, model);
                     self.clear_stashed_model();
                     self.stashed_model = Some(model);
-                    if witness_shadow::enabled() {
+                    if self.transaction_depth() == 0 || witness_shadow::enabled() {
                         self.shadow_witnesses.remember(model);
                     }
                 }
@@ -4160,7 +4160,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let started = Instant::now();
         let pending = self.transaction_assertions();
         let assumptions: Vec<_> = pending.iter().map(|ast| ast.z3_ast).collect();
-        if self.witness_fast_sat(&assumptions) {
+        if self.witness_fast_sat(&assumptions, false) {
             return Sat;
         }
         let query = self.query_solver(&assumptions, false);
