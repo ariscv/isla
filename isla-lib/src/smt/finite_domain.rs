@@ -3,6 +3,7 @@ use super::*;
 
 mod arithmetic;
 mod ground;
+mod guard_conflict;
 mod prefix_index;
 mod projection;
 mod rewrites;
@@ -52,7 +53,7 @@ fn union(lhs: Bound, rhs: Bound) -> Bound {
     Some(lhs)
 }
 
-fn resolve<'a, B: BV>(mut exp: &'a Exp<Sym>, prefix: &'a PathConditions<'_, B>) -> &'a Exp<Sym> {
+fn resolve<'a, 'prefix: 'a, B: BV>(mut exp: &'a Exp<Sym>, prefix: &PathConditions<'prefix, B>) -> &'a Exp<Sym> {
     while let Exp::Var(sym) = exp {
         let Some(definition) = prefix.definition(*sym) else { break };
         exp = definition;
@@ -388,9 +389,18 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         result
     }
 
+    pub(crate) fn arm_error_guard_is_dead(&self, reach: &Exp<Sym>) -> bool {
+        PathConditions::new(self)
+            .is_some_and(|prefix| guard_conflict::contradiction(&prefix, reach, &self.transaction_conditions))
+            || self.structural_bool(reach) == Some(false)
+    }
+
     /// 条件在所有剩余候选中同值时才折叠。只证明蕴含，完整前缀仍由原入口认证。
     pub(crate) fn finite_domain_bool(&self, exp: &Exp<Sym>) -> Option<bool> {
         let prefix = PathConditions::new(self)?;
+        if let Some(truth) = prefix.excluded_slice_comparison(exp) {
+            return Some(truth);
+        }
         let mut subjects = Vec::new();
         prefix.comparison_subjects(exp, &mut subjects);
         let predicate = self.translate_exp(exp);
