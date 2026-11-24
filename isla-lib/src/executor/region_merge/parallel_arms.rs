@@ -10,11 +10,12 @@ pub(super) use region_arm::ArmCell;
 pub(super) type Entry<'a, B> = (Option<ThreadSlot<'a>>, Checkpoint<B>);
 
 /// B 只执行能在私有帧和事务中隔离的指令。按实际路径检查，允许被调函数内的循环和递归。
-pub(super) fn transferable_instruction<B: BV>(frame: &LocalFrame<B>, shared: &SharedState<B>) -> bool {
-    let effect_ok = |effect| {
-        effect == Some(primop::Effect::Pure)
-            || (effect == Some(primop::Effect::ReadsMemory) && frame.memory.is_pure_reader())
-    };
+pub(super) fn transferable_instruction<B: BV>(
+    frame: &LocalFrame<B>,
+    shared: &SharedState<B>,
+    variadic_effect: Option<primop::Effect>,
+) -> bool {
+    use primop::Effect;
     match &frame.instrs[frame.pc] {
         Instr::Decl(..)
         | Instr::Init(..)
@@ -24,9 +25,10 @@ pub(super) fn transferable_instruction<B: BV>(frame: &LocalFrame<B>, shared: &Sh
         | Instr::Jump(..)
         | Instr::Exit(..)
         | Instr::Arbitrary => true,
-        Instr::PrimopUnary(_, f, ..) => effect_ok(primop::unary_effect(*f)) || constraint_unary(*f),
-        Instr::PrimopBinary(_, f, ..) => effect_ok(primop::binary_effect(*f)) || constraint_binary(*f),
-        Instr::PrimopVariadic(_, f, ..) => effect_ok(primop::variadic_effect(*f)),
+        Instr::PrimopUnary(_, f, ..) => primop::unary_effect(*f) == Some(Effect::Pure) || constraint_unary(*f),
+        Instr::PrimopBinary(_, f, ..) => primop::binary_effect(*f) == Some(Effect::Pure) || constraint_binary(*f),
+        // 多元内存读已通过共同的 preflight 读取检查。
+        Instr::PrimopVariadic(..) => matches!(variadic_effect, Some(Effect::Pure | Effect::ReadsMemory)),
         Instr::Call(_, _, name, ..) => {
             shared.functions.contains_key(name)
                 || shared.type_info.union_ctors.contains(name)

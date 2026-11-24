@@ -69,6 +69,7 @@ speculative_reject_reasons! {
     FragmentLimit => Limit,
     /// 平铺循环的继续/退出前沿不能在同一边界收敛。
     StateEffect => StateIncompatible,
+    ImpureMemoryRead => StateIncompatible,
     UnknownExtern => Unsupported,
     RecursiveEffect => Unsupported,
     CalleeStateWrite => StateIncompatible,
@@ -170,6 +171,7 @@ impl SpeculativeRejectReason {
                 (options.partial_commit_structure, Ordinary)
             }
             Self::StateEffect
+            | Self::ImpureMemoryRead
             | Self::UnknownExtern
             | Self::CalleeStateWrite
             | Self::RegisterReadAfterWrite
@@ -320,6 +322,7 @@ mod tests {
                 |options| options.partial_commit_state_effect = true,
                 &[
                     StateEffect,
+                    ImpureMemoryRead,
                     UnknownExtern,
                     CalleeStateWrite,
                     RegisterReadAfterWrite,
@@ -440,6 +443,7 @@ mod tests {
                 StateIncompatible,
                 &[
                     StateEffect,
+                    ImpureMemoryRead,
                     CalleeStateWrite,
                     RegisterReadAfterWrite,
                     RepeatedRegisterWrite,
