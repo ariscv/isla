@@ -27,7 +27,7 @@ python3 test/path-merge/run_scenarios.py --bitvector both \
 python3 -m unittest discover -s test/path-merge
 ```
 
-加上 `--sym-bits` 可在同一组场景开启 `path_merge.sym_bits`。对照时分别指定输出目录。`A23-symbolic-level-mask` 用 `sym_bits_expected_paths` 登记开启后的路径数。
+`A23-symbolic-level-mask` 在三种合并模式下均要求一条完成路径，并逐一检查四种输入层级的掩码结果。`A24-symbolic-bitwidth-abstract` 将同一个掩码传给抽象原语，每种合并模式均要求按可行位宽生成四条完成路径。
 
 ## 新增场景
 

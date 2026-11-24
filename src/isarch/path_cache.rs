@@ -994,15 +994,7 @@ fn load_inner<B: BV>(
         "缓存 manifest 路径清单不同"
     );
     let started = Instant::now();
-    {
-        let mut validator = PathValidator::new(&manifest.names, &manifest.pre_state, &manifest.pma_sizes);
-        for segment in &segments {
-            validator.segment(segment);
-        }
-        for path in &paths {
-            validator.path(path);
-        }
-    }
+    PathValidator::validate_read(&manifest.names, &manifest.pre_state, &manifest.pma_sizes, &segments, &paths);
     timing.validate_seconds = started.elapsed().as_secs_f64();
     stages.record("cache_validate", timing.validate_seconds, json!({"paths":paths.len(),"segments":segments.len()}));
     let started = Instant::now();

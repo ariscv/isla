@@ -1132,14 +1132,20 @@ pub(crate) fn eq_bits<B: BV>(
     if matches!(x, Val::Guarded(..)) || matches!(y, Val::Guarded(..)) {
         return compare_guarded(x, y, solver, info, eq_bits);
     }
+    equal_bits(x, y, "eq_bits", solver, info)
+}
+
+fn equal_bits<B: BV>(
+    x: Val<B>,
+    y: Val<B>,
+    operation: &str,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
     if sym_bits::is_dynamic(&x) || sym_bits::is_dynamic(&y) {
-        return sym_bits::compare(&x, &y, true, solver, info);
+        return sym_bits::compare(&x, &y, Some(operation), solver, info);
     }
-    let x_len = length_bits(&x, solver, info)?;
-    let y_len = length_bits(&y, solver, info)?;
-    if x_len != y_len {
-        return Err(ExecError::Type(format!("eq_bits operands have different lengths: {} and {}", x_len, y_len), info));
-    }
+    check_fixed_bit_widths(&x, &y, operation, solver, info)?;
     let x = replace_mixed_bits(x, solver, info)?;
     let y = replace_mixed_bits(y, solver, info)?;
     if let (Val::Bits(x), Val::Bits(y)) = (&x, &y) {
@@ -1154,7 +1160,10 @@ pub(crate) fn neq_bits<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
-    not_bool(eq_bits(x, y, solver, info)?, solver, info)
+    if matches!(x, Val::Guarded(..)) || matches!(y, Val::Guarded(..)) {
+        return compare_guarded(x, y, solver, info, neq_bits);
+    }
+    not_bool(equal_bits(x, y, "neq_bits", solver, info)?, solver, info)
 }
 unary_primop_copy!(not_fixed_bits, "not_bits".to_string(), Val::Bits, Val::Bits, B::not, Exp::Bvnot, define_bitvector);
 pub fn not_bits<B: BV>(value: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
@@ -1163,6 +1172,19 @@ pub fn not_bits<B: BV>(value: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -
     } else {
         not_fixed_bits(value, solver, info)
     }
+}
+
+fn check_fixed_bit_widths<B: BV>(
+    left: &Val<B>,
+    right: &Val<B>,
+    operation: &str,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<(), ExecError> {
+    if length_bits(left, solver, info)? != length_bits(right, solver, info)? {
+        return Err(sym_bits::length_or_range_error(operation, info));
+    }
+    Ok(())
 }
 
 macro_rules! sym_bit_binop {
@@ -1176,6 +1198,7 @@ macro_rules! sym_bit_binop {
             if sym_bits::is_dynamic(&x) || sym_bits::is_dynamic(&y) {
                 sym_bits::bit_binary(&x, &y, Exp::$op, $modular, stringify!($name), solver, info)
             } else {
+                check_fixed_bit_widths(&x, &y, stringify!($name), solver, info)?;
                 $fixed(x, y, solver, info)
             }
         }
@@ -3357,13 +3380,11 @@ pub fn eq_anything<B: BV>(
         && guarded_bits::is_bits(&lhs, solver)
         && guarded_bits::is_bits(&rhs, solver)
     {
-        return sym_bits::compare(&lhs, &rhs, false, solver, info);
+        return sym_bits::compare(&lhs, &rhs, None, solver, info);
     }
     let (mut lhs, mut rhs) = (lhs, rhs);
-    if solver.sym_bits_enabled() {
-        sym_bits::concretize(&mut lhs, solver, info)?;
-        sym_bits::concretize(&mut rhs, solver, info)?;
-    }
+    sym_bits::concretize(&mut lhs, solver, info)?;
+    sym_bits::concretize(&mut rhs, solver, info)?;
     if let (Some(left), Some(right)) = (merge_bit_width(&lhs, solver, info)?, merge_bit_width(&rhs, solver, info)?) {
         if left != right {
             return Ok(Val::Bool(false));
@@ -6741,7 +6762,7 @@ mod tests {
             SourceLoc::unknown(),
         )
         .expect_err("负索引必须返回越界错误");
-        assert!(matches!(error, ExecError::Type(message, _) if message == "vector_subrange out of bounds"));
+        assert!(matches!(error, ExecError::Type(message, _) if message == "subrange 的长度或范围无效"));
     }
 
     #[test]
@@ -6755,16 +6776,18 @@ mod tests {
         solver.assert_eq(Exp::Var(high), smt_i128(7));
         solver.assert_eq(Exp::Var(low), smt_i128(4));
 
-        match subrange_internal(
+        let info = SourceLoc::unknown();
+        let mut slice = subrange_internal(
             Val::Bits(B64::new(0b1011_0010, 8)),
             Val::Symbolic(high),
             Val::Symbolic(low),
             &mut solver,
-            SourceLoc::unknown(),
-        )? {
-            Val::Bits(bits) => assert_eq!(bits, B64::new(0b1011, 4)),
-            value => panic!("expected concrete extracted bits, got {:?}", value),
-        }
+            info,
+        )?;
+        sym_bits::concretize(&mut slice, &mut solver, info)?;
+        assert_eq!(length_bits(&slice, &mut solver, info)?, 4);
+        let mismatch = Exp::Neq(Box::new(smt_value(&slice, info)?), Box::new(bits64(0b1011, 4)));
+        assert_eq!(solver.check_sat_with(&mismatch, info), SmtResult::Unsat);
 
         Ok(())
     }
@@ -6787,33 +6810,23 @@ mod tests {
                 &mut solver,
                 SourceLoc::unknown(),
             ),
-            Err(ExecError::SymbolicLength("vector_subrange", _))
+            Err(ExecError::RetryCondition(..))
         ));
         solver.assert(Exp::Bvsge(Box::new(Exp::Var(low)), Box::new(smt_i128(0))));
         solver.assert(Exp::Bvsle(Box::new(Exp::Var(low)), Box::new(Exp::Var(high))));
         solver.assert(Exp::Bvslt(Box::new(Exp::Var(high)), Box::new(smt_i128(64))));
 
-        match subrange_internal(
-            Val::Symbolic(solver.declare_const(Ty::BitVec(64), SourceLoc::unknown())),
-            Val::Symbolic(high),
-            Val::Symbolic(low),
-            &mut solver,
-            SourceLoc::unknown(),
-        )? {
-            Val::Symbolic(bits) => assert_eq!(solver.length(bits), Some(8)),
-            value => panic!("expected symbolic extracted byte, got {:?}", value),
-        }
+        let info = SourceLoc::unknown();
+        let symbolic = solver.declare_bitvector(64, info);
+        let args = (Val::Symbolic(high), Val::Symbolic(low));
+        let slice = subrange_internal(Val::Symbolic(symbolic), args.0.clone(), args.1.clone(), &mut solver, info)?;
+        assert_eq!(length_bits(&slice, &mut solver, info)?, 8);
 
-        match subrange_internal(
-            Val::Bits(B64::zeros(64)),
-            Val::Symbolic(high),
-            Val::Symbolic(low),
-            &mut solver,
-            SourceLoc::unknown(),
-        )? {
-            Val::Bits(bits) => assert_eq!(bits, B64::zeros(8)),
-            value => panic!("expected concrete zero byte, got {:?}", value),
-        }
+        let mut slice = subrange_internal(Val::Bits(B64::zeros(64)), args.0, args.1, &mut solver, info)?;
+        sym_bits::concretize(&mut slice, &mut solver, info)?;
+        assert_eq!(length_bits(&slice, &mut solver, info)?, 8);
+        let mismatch = Exp::Neq(Box::new(smt_value(&slice, info)?), Box::new(smt_zeros(8)));
+        assert_eq!(solver.check_sat_with(&mismatch, info), SmtResult::Unsat);
 
         Ok(())
     }
@@ -6856,10 +6869,8 @@ mod tests {
         crate::smt::reset_test_mandatory_query_count();
         let transaction = solver.start_transaction();
         let result = solver.with_deferred_region_queries(|solver| {
-            match subrange_internal(Val::Symbolic(bits), Val::Symbolic(high), Val::Symbolic(low), solver, info)? {
-                Val::Symbolic(slice) => assert_eq!(solver.length(slice), Some(9)),
-                value => panic!("expected symbolic 9-bit slice, got {value:?}"),
-            }
+            let slice = subrange_internal(Val::Symbolic(bits), Val::Symbolic(high), Val::Symbolic(low), solver, info)?;
+            assert_eq!(length_bits(&slice, solver, info)?, 9);
             Ok(())
         });
         solver.rollback_transaction(transaction);
@@ -6993,7 +7004,7 @@ mod tests {
         let vpn = solver.declare_const(Ty::BitVec(36), SourceLoc::unknown());
         let result = and_bits(Val::Symbolic(vpn), Val::Bits(B64::zeros(27)), &mut solver, SourceLoc::unknown());
         match result {
-            Err(ExecError::Type(message, _)) => assert!(message.contains("左 36，右 27"), "{message}"),
+            Err(ExecError::Type(message, _)) => assert_eq!(message, "and_bits 的长度或范围无效"),
             other => panic!("位宽不一致应返回类型错误：{other:?}"),
         }
     }

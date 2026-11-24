@@ -171,8 +171,6 @@ pub struct PathMergeConfig {
     pub loop_fold_shapes: bool,
     /// 跨过纯包装调用，在变长临时值用完后汇合。默认关闭。
     pub width_closed_continuation: bool,
-    /// 用定长 SMT 位向量保存变长数据。缺省关闭。
-    pub sym_bits: bool,
     pub diagnostics: PathMergeDiagnostics,
     pub regions: Option<Vec<PathMergeRegionConfig>>,
     #[serde(deserialize_with = "deserialize_enumeration")]
@@ -219,7 +217,6 @@ impl Default for PathMergeConfig {
             prefix_compact: true,
             loop_fold_shapes: true,
             width_closed_continuation: false,
-            sym_bits: false,
             diagnostics: PathMergeDiagnostics::default(),
             regions: None,
             enumeration: None,

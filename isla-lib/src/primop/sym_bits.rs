@@ -40,11 +40,30 @@ pub(crate) fn concretize<B: BV>(value: &mut Val<B>, solver: &mut Solver<B>, info
                 Val::Symbolic(solver.define_bitvector(Exp::Extract(length - 1, 0, Box::new(Exp::Var(*data))), info))
             };
         }
-        Val::Guarded(_, values) => {
-            concretize(&mut values.0, solver, info)?;
-            concretize(&mut values.1, solver, info)?;
+        Val::Guarded(guard, values) if values.0.contains_sym_bits() || values.1.contains_sym_bits() => {
+            let selected = prove_boundary_guard(Exp::Var(*guard), solver, info)?;
+            *value = if selected { values.0.clone() } else { values.1.clone() };
+            concretize(value, solver, info)?;
         }
-        Val::Struct(fields) | Val::SymbolicCtor(_, fields) => {
+        Val::SymbolicCtor(tag, fields) if fields.values().any(Val::contains_sym_bits) => {
+            let mut inactive = Vec::new();
+            for (ctor, payload) in fields.iter_mut().filter(|(_, payload)| payload.contains_sym_bits()) {
+                let guard = Exp::Eq(Box::new(Exp::Var(*tag)), Box::new(ctor.to_smt()));
+                if solver.path_implies_tag(*tag, *ctor) || prove_boundary_guard(guard, solver, info)? {
+                    concretize(payload, solver, info)?;
+                    *value = Val::Ctor(*ctor, Box::new(payload.clone()));
+                    return Ok(());
+                }
+                inactive.push(*ctor);
+            }
+            for ctor in inactive {
+                fields.remove(&ctor);
+            }
+            if fields.is_empty() {
+                return Err(ExecError::SolverDroppedPath);
+            }
+        }
+        Val::Struct(fields) => {
             for value in fields.values_mut() {
                 concretize(value, solver, info)?;
             }
@@ -58,6 +77,26 @@ pub(crate) fn concretize<B: BV>(value: &mut Val<B>, solver: &mut Solver<B>, info
         _ => (),
     }
     Ok(())
+}
+
+// 动态载荷的范围约束只在持有该载荷的守卫下成立。
+fn prove_boundary_guard<B: BV>(guard: Exp<Sym>, solver: &mut Solver<B>, info: SourceLoc) -> Result<bool, ExecError> {
+    if let Some(selected) = solver.structural_bool(&guard) {
+        return Ok(selected);
+    }
+    if solver.no_smt() {
+        return Err(ExecError::Smt(solver.no_smt_cannot_continue(LENGTH_BOUNDARY, info)));
+    }
+    let opposite = Exp::Not(Box::new(guard.clone()));
+    // 即使跳过普通分支查询，出口也须知道哪个载荷有意义。
+    let selected = !solver.check_sat_with_for_range(&guard, info).is_unsat()?;
+    let rejected = !solver.check_sat_with_for_range(&opposite, info).is_unsat()?;
+    match (selected, rejected) {
+        (true, false) => Ok(true),
+        (false, true) => Ok(false),
+        (false, false) => Err(ExecError::SolverDroppedPath),
+        (true, true) => Err(ExecError::RetryCondition(guard, info)),
+    }
 }
 
 #[cfg(test)]
@@ -198,19 +237,24 @@ fn finish<B: BV>(
     Ok(Val::SymBits { data, len: len.expect("符号长度必须有定义"), cap })
 }
 
+pub(super) fn length_or_range_error(operation: &str, info: SourceLoc) -> ExecError {
+    ExecError::Type(format!("{operation} 的长度或范围无效"), info)
+}
+
 fn require<B: BV>(condition: Term, operation: &str, solver: &mut Solver<B>, info: SourceLoc) -> Result<(), ExecError> {
     match solver.structural_bool(&condition) {
         Some(true) => return Ok(()),
-        Some(false) => return Err(ExecError::Type(format!("{operation} 的长度或范围无效"), info)),
+        Some(false) => return Err(length_or_range_error(operation, info)),
         None => (),
     }
-    if solver.range_check_handled(&condition, info)
+    if (solver.no_smt() && solver.finite_domain_predicate(&condition) == Some(true))
+        || solver.range_check_handled(&condition, info)
         || solver.check_sat_with_for_range(&Exp::Not(Box::new(condition.clone())), info).is_unsat()?
     {
         return Ok(());
     }
     if solver.check_sat_with_for_range(&condition, info).is_unsat()? {
-        return Err(ExecError::Type(format!("{operation} 的长度或范围无效"), info));
+        return Err(length_or_range_error(operation, info));
     }
     Err(ExecError::RetryCondition(condition, info))
 }
@@ -229,7 +273,7 @@ pub(super) fn fill<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Option<Val<B>>, ExecError> {
-    if !solver.sym_bits_enabled() || !matches!(len, Val::Symbolic(_)) {
+    if !matches!(len, Val::Symbolic(_)) {
         return Ok(None);
     }
     let len = int_exp_128(len, solver, "位向量构造", info)?;
@@ -269,7 +313,7 @@ pub(super) fn bit_binary<B: BV>(
 pub(super) fn compare<B: BV>(
     left: &Val<B>,
     right: &Val<B>,
-    require_equal_width: bool,
+    same_width_operation: Option<&str>,
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
@@ -281,8 +325,8 @@ pub(super) fn compare<B: BV>(
         return try_concretize_bool_exp(data_equal, solver, info);
     }
     let same_width = binary(Exp::Eq, left.len, right.len);
-    let result = if require_equal_width {
-        require(same_width, "eq_bits", solver, info)?;
+    let result = if let Some(operation) = same_width_operation {
+        require(same_width, operation, solver, info)?;
         data_equal
     } else {
         binary(Exp::And, same_width, data_equal)
@@ -297,7 +341,7 @@ pub(super) fn extend<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Option<Val<B>>, ExecError> {
-    if !is_dynamic(value) && (!solver.sym_bits_enabled() || !matches!(len, Val::Symbolic(_))) {
+    if !is_dynamic(value) && !matches!(len, Val::Symbolic(_)) {
         return Ok(None);
     }
     let len = int_exp_128(len, solver, "extension", info)?;
@@ -317,7 +361,7 @@ pub(super) fn slice<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Option<Val<B>>, ExecError> {
-    if !is_dynamic(value) && (!solver.sym_bits_enabled() || !matches!(len, Val::Symbolic(_))) {
+    if !is_dynamic(value) && !matches!(len, Val::Symbolic(_)) {
         return Ok(None);
     }
     let len = int_exp_128(len, solver, "slice", info)?;
@@ -352,7 +396,7 @@ pub(super) fn truncate_lsb<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Option<Val<B>>, ExecError> {
-    if !is_dynamic(value) && (!solver.sym_bits_enabled() || !matches!(len, Val::Symbolic(_))) {
+    if !is_dynamic(value) && !matches!(len, Val::Symbolic(_)) {
         return Ok(None);
     }
     let word = Word::from_value(value, solver, info)?;
@@ -372,9 +416,7 @@ pub(super) fn subrange<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Option<Val<B>>, ExecError> {
-    if !is_dynamic(value)
-        && (!solver.sym_bits_enabled() || !matches!((high, low), (Val::Symbolic(_), _) | (_, Val::Symbolic(_))))
-    {
+    if !is_dynamic(value) && !matches!((high, low), (Val::Symbolic(_), _) | (_, Val::Symbolic(_))) {
         return Ok(None);
     }
     let word = Word::from_value(value, solver, info)?;

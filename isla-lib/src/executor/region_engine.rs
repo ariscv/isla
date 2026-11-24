@@ -1070,6 +1070,10 @@ fn prepare_state<'ir, B: BV>(
                 }
             })?
         };
+        if value.contains_sym_bits() {
+            // 寄存器的后态和读取事件必须保持定长。沿用区域的分离或重放保留两臂。
+            return Err(incompatible());
+        }
         merged.regs_mut().assign(*reg, value, shared);
     }
     for reg in read_or_written {

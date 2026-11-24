@@ -972,21 +972,12 @@ fn merge_val_inner_mode<B: BV, const CONCRETE: bool>(
     let a_width = merge_bit_width(val_a, solver, info)?;
     let b_width = merge_bit_width(val_b, solver, info)?;
     let dynamic = crate::primop::sym_bits::is_dynamic(val_a) || crate::primop::sym_bits::is_dynamic(val_b);
-    if solver.sym_bits_enabled()
-        && (dynamic
-            || (CONCRETE
-                && (a_width != b_width || matches!(val_a, Val::Guarded(..)) || matches!(val_b, Val::Guarded(..)))))
+    if (dynamic
+        || (CONCRETE && (a_width != b_width || matches!(val_a, Val::Guarded(..)) || matches!(val_b, Val::Guarded(..)))))
         && guarded_bits::is_bits_with(val_a, solver)
         && guarded_bits::is_bits_with(val_b, solver)
     {
         return crate::primop::sym_bits::merge(cond, val_a, val_b, solver, info);
-    }
-    if CONCRETE
-        && (a_width != b_width || matches!(val_a, Val::Guarded(..)) || matches!(val_b, Val::Guarded(..)))
-        && guarded_bits::is_bits_with(val_a, solver)
-        && guarded_bits::is_bits_with(val_b, solver)
-    {
-        return Ok(if val_a == val_b { val_a.clone() } else { guarded_bits::merge(cond, val_a, val_b, solver, info) });
     }
     if a_width != b_width {
         return Err(ExecError::IncompatibleMerge);

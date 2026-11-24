@@ -333,6 +333,18 @@ impl<B: BV> SamplePath<B> {
             .collect()
     }
 
+    fn sample_result(&self, model: &mut Model<B>, shared: &SharedState<B>) -> Result<(Value, String), ExecError> {
+        // v1 同时发布结构化结果和可读文本。两者共享同一模型选出的实际位宽。
+        let concrete;
+        let result = if self.result.contains_sym_bits() {
+            concrete = model.get_val(&self.result)?;
+            &concrete
+        } else {
+            &self.result
+        };
+        Ok((materialized(result, model, shared)?, result.to_string(shared)))
+    }
+
     pub fn materialize(
         &self,
         model: &mut Model<B>,
@@ -417,7 +429,7 @@ impl<B: BV> SamplePath<B> {
         let cells = |map: BTreeMap<u64, Option<u8>>| {
             map.into_iter().map(|(address, value)| MemoryCell { address, value, bytes: 1 }).collect()
         };
-        let result = materialized(&self.result, model, shared)?;
+        let (result, ret_val) = self.sample_result(model, shared)?;
         Ok(Sample {
             terminal: self.terminal.clone(),
             schema_version: 1,
@@ -432,7 +444,7 @@ impl<B: BV> SamplePath<B> {
             pre_memory: cells(pre),
             post_memory: cells(post),
             result,
-            ret_val: self.result.to_string(shared),
+            ret_val,
         })
     }
 
@@ -701,7 +713,7 @@ impl<B: BV> SamplePath<B> {
         let cells = |map: BTreeMap<u64, Option<u8>>| {
             map.into_iter().map(|(address, value)| MemoryCell { address, value, bytes: 1 }).collect()
         };
-        let result = materialized(&self.result, model, shared)?;
+        let (result, ret_val) = self.sample_result(model, shared)?;
         Ok(Sample {
             terminal: self.terminal.clone(),
             schema_version: 1,
@@ -716,7 +728,7 @@ impl<B: BV> SamplePath<B> {
             pre_memory: cells(pre),
             post_memory: cells(post),
             result,
-            ret_val: self.result.to_string(shared),
+            ret_val,
         })
     }
 }
@@ -1086,6 +1098,29 @@ mod tests {
         assert_eq!(path.export_dag(&solver, &shared, &[], 1)["certification"], "uncertified");
         assert!(sat(&mut solver).unwrap());
         assert!(path.materialize(&mut Model::new(&solver), &shared, "fork", 1, None).is_err());
+    }
+
+    #[test]
+    fn sample_return_text_concretizes_nested_sym_bits() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&context);
+        let info = SourceLoc::unknown();
+        let data = solver.define_bitvector(crate::smt::smtlib::bits64(3, 4), info);
+        let len = solver.define_const(crate::primop_util::smt_i128(2), info);
+        let shared = SharedState::empty(crate::ir::Symtab::new());
+        let path = SamplePath {
+            terminal: Default::default(),
+            pre: BTreeMap::new(),
+            post: BTreeMap::new(),
+            result: Val::Vector(vec![Val::SymBits { data, len, cap: 4 }]),
+            memory: Vec::new(),
+            memory_guards: BTreeMap::new(),
+        };
+        assert!(sat(&mut solver).unwrap());
+        let sample = path.materialize(&mut Model::new(&solver), &shared, "fork", 1, None).unwrap();
+        assert_eq!(sample.result, json!({"vector":[{"bits":"11"}]}));
+        assert_eq!(sample.ret_val, Val::Vector(vec![Val::Bits(B64::new(3, 2))]).to_string(&shared));
     }
 
     #[test]

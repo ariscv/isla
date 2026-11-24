@@ -29,6 +29,8 @@ Isla has also been used for test generation, generating simplified
 semantics (summaries) for concrete opcodes, and there are many other
 possible use cases.
 
+符号执行可在同一条路径中保留符号位宽，发布执行迹和路径缓存时按可行位宽收束。[运行值数据模型](specs/data-model.md)
+
 ## Build
 
 Get Rust and its dependencies, probably the easiest is with [rustup](https://rustup.rs/).

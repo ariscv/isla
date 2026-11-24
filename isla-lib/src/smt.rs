@@ -926,7 +926,6 @@ pub struct SolverOptions {
     pub incremental_choice_dag: bool,
     pub coi_query_slicing: bool,
     pub finite_domain_ground_eval: bool,
-    pub sym_bits: bool,
     pub bv_rewrite: rewrite::BvRewrite,
 }
 
@@ -942,7 +941,6 @@ impl Default for SolverOptions {
             incremental_choice_dag: false,
             coi_query_slicing: false,
             finite_domain_ground_eval: crate::config::PathMergeConfig::default().finite_domain_ground_eval,
-            sym_bits: false,
             bv_rewrite: Default::default(),
         }
     }
@@ -2918,10 +2916,6 @@ unsafe fn new_z3_solver(ctx: Z3_context, tactic: &CStr, seed: Option<(&CStr, u32
 }
 
 impl<'ctx, B: BV> Solver<'ctx, B> {
-    pub(crate) fn sym_bits_enabled(&self) -> bool {
-        self.ctx.solver_options.sym_bits
-    }
-
     /// 同线程辅助求解可共享AST管理器；各Solver的断言仍相互独立。
     pub fn context(&self) -> &'ctx Context {
         self.ctx

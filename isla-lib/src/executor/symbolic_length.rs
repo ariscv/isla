@@ -179,6 +179,9 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
     if let ExecError::SymbolicNatural { symbol, minimum, maximum, .. } = error {
         let range = i128::from(minimum)..=i128::from(maximum);
         let bounds = if op == primop::sym_bits::LENGTH_BOUNDARY {
+            if !finite_enabled && solver.check_sat(info).is_unsat()? {
+                return Ok(false);
+            }
             OperandBounds::Established(range)
         } else {
             OperandBounds::RequireWithin(range)

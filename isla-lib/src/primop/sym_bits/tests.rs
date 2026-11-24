@@ -1,14 +1,115 @@
 use super::*;
+use crate::bitvector::b129::B129;
 use crate::bitvector::b64::B64;
 use crate::smt::{checkpoint, Config, Context};
+
+#[test]
+fn same_width_operations_reject_unequal_operands() {
+    let info = SourceLoc::unknown();
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let choice = solver.declare_const(Ty::Bool, info);
+    let len = solver.define_const(choose(Exp::Var(choice), int(2), int(3)), info);
+    let data = solver.define_bitvector(zero(3), info);
+    let symbolic = solver.declare_bitvector(2, info);
+    let mixed = Val::MixedBits(vec![BitsSegment::Symbolic(symbolic), BitsSegment::Concrete(B64::BIT_ZERO)]);
+    let narrow = Val::Bits(B64::BIT_ZERO);
+    let operations: [(&str, Binary<B64>); 7] = [
+        ("and_bits", and_bits),
+        ("or_bits", or_bits),
+        ("xor_bits", xor_bits),
+        ("add_bits", add_bits),
+        ("sub_bits", sub_bits),
+        ("eq_bits", eq_bits),
+        ("neq_bits", neq_bits),
+    ];
+    for (name, op) in operations {
+        let error_message = format!("{name} 的长度或范围无效");
+        for wide in
+            [Val::Bits(B64::zeros(3)), Val::Symbolic(symbolic), mixed.clone(), Val::SymBits { data, len, cap: 3 }]
+        {
+            for (left, right) in [(wide.clone(), narrow.clone()), (narrow.clone(), wide)] {
+                let result = op(left, right, &mut solver, info);
+                assert!(matches!(&result, Err(ExecError::Type(message, _)) if *message == error_message), "{result:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn symbolic_length_keeps_range_errors_and_zero_padded_slice() -> Result<(), ExecError> {
+    let info = SourceLoc::unknown();
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    let context = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&context);
+    let choice = solver.declare_const(Ty::Bool, info);
+    let len = solver.define_const(choose(Exp::Var(choice), int(2), int(3)), info);
+    let data = solver.define_bitvector(bits64(0b11, 3), info);
+    for bits in [Val::Bits(B64::new(0b11, 2)), Val::SymBits { data, len, cap: 3 }] {
+        for extend in [zero_extend as Binary<B64>, sign_extend] {
+            assert!(matches!(extend(bits.clone(), Val::I128(1), &mut solver, info), Err(ExecError::Type(..))));
+        }
+        for (high, low) in [(0, -1), (0, 1), (3, 0)] {
+            let result = subrange_internal(bits.clone(), Val::I128(high), Val::I128(low), &mut solver, info);
+            assert!(matches!(result, Err(ExecError::Type(..))), "{result:?}");
+        }
+        let padded = slice_internal(bits, Val::I128(1), Val::I128(4), &mut solver, info)?;
+        assert_eq!(length_bits(&padded, &mut solver, info)?, 4);
+        let wrong = binary(Exp::Neq, smt_value(&padded, info)?, bits64(1, 4));
+        assert_eq!(solver.check_sat_with(&wrong, info), SmtResult::Unsat);
+    }
+
+    let length = solver.define_const(choose(Exp::Var(choice), int(2), smt_i128(-1)), info);
+    let Err(ExecError::RetryCondition(valid, _)) = zeros(Val::Symbolic(length), &mut solver, info) else {
+        panic!("有负长度和合法长度时必须按范围条件重试");
+    };
+    assert_eq!(solver.check_sat_with(&binary(Exp::Neq, valid, Exp::Var(choice)), info), SmtResult::Unsat);
+    Ok(())
+}
+
+#[test]
+fn signed_and_unsigned_conversion_at_128_and_129_bits() -> Result<(), ExecError> {
+    let info = SourceLoc::unknown();
+    crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
+    let context = Context::new(Config::new());
+    let min = B129::from_u128(1 << 127, 128);
+    let max = i128::MAX as u128;
+    let cases = [
+        (B129::from_u128(max, 128), Some(i128::MAX), Some(i128::MAX)),
+        (min, Some(i128::MIN), None),
+        (B129::from_u128(max, 129), Some(i128::MAX), Some(i128::MAX)),
+        (min.sign_extend(129), Some(i128::MIN), None),
+        (min.zero_extend(129), None, None),
+        (B129::zeros(129).set_slice(128, B129::BIT_ONE), None, None),
+    ];
+    for (bits, signed, unsigned) in cases {
+        let mut solver = Solver::<B129>::new(&context);
+        let choice = solver.declare_const(Ty::Bool, info);
+        let len = solver.define_const(choose(Exp::Var(choice), int(bits.len()), int(0)), info);
+        let data = solver.define_bitvector(choose(Exp::Var(choice), smt_sbits(bits), zero(bits.len())), info);
+        solver.assert(Exp::Var(choice));
+        for input in [Val::Bits(bits), Val::SymBits { data, len, cap: bits.len() }] {
+            for (convert, expected) in [(sail_signed as Unary<B129>, signed), (sail_unsigned, unsigned)] {
+                let result = convert(input.clone(), &mut solver, info);
+                match expected {
+                    Some(expected) => {
+                        let wrong = binary(Exp::Neq, smt_value(&result?, info)?, smt_i128(expected));
+                        assert_eq!(solver.check_sat_with(&wrong, info), SmtResult::Unsat, "{input:?}");
+                    }
+                    None => assert!(matches!(result, Err(ExecError::Overflow)), "{input:?} {result:?}"),
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
 #[test]
 fn sym_bits_primitive_equivalence() -> Result<(), ExecError> {
     let info = SourceLoc::unknown();
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
-    let mut config = Config::new();
-    config.solver_options.sym_bits = true;
-    let context = Context::new(config);
+    let context = Context::new(Config::new());
     let oracle_context = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&context);
     let choice = solver.declare_bitvector(2, info);
@@ -87,7 +188,7 @@ fn sym_bits_primitive_equivalence() -> Result<(), ExecError> {
     assert!(matches!(actual[3].1, Val::Symbolic(_)));
     let point = checkpoint(&mut solver);
     for width in 0..=3 {
-        // 在独立的 Z3 上下文只重放公开的 SMT 定义，再用旧原语构造该位宽的参照。
+        // 参照只接收定长位向量和具体整数，因此独立执行各原语的定长实现。
         let mut oracle = Solver::from_checkpoint(&oracle_context, point.clone());
         oracle.assert(Exp::Eq(Box::new(Exp::Var(len)), Box::new(smt_i128(i128::from(width)))));
         let fixed = |raw, s: &mut Solver<B64>| {
@@ -109,6 +210,7 @@ fn sym_bits_primitive_equivalence() -> Result<(), ExecError> {
             Val::I128(i128::from(width) + 1),
         )?;
         for ((name, actual), (_, expected)) in actual.iter().zip(expected) {
+            assert!(!is_dynamic(&expected), "{name} 的参照必须保持定长");
             let comparison = match *name {
                 "length" | "signed" | "unsigned" | "eq_bits" | "neq_bits" => {
                     Exp::Eq(Box::new(smt_value(actual, info)?), Box::new(smt_value(&expected, info)?))
@@ -151,9 +253,7 @@ fn sym_bits_primitive_equivalence() -> Result<(), ExecError> {
 fn sym_bits_merge_and_constant_collapse() -> Result<(), ExecError> {
     let info = SourceLoc::unknown();
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
-    let mut config = Config::new();
-    config.solver_options.sym_bits = true;
-    let context = Context::new(config);
+    let context = Context::new(Config::new());
     let mut solver = Solver::<B64>::new(&context);
     let condition = solver.declare_const(Ty::Bool, info);
     let a = Val::Bits(B64::new(1, 2));

@@ -2,9 +2,8 @@
 // title = "超级页层级决定掩码位宽"
 // intent = "按 add_to_TLB 的写法构造变长 levelMask，再将掩码和页号收束为定长。"
 // inputs = { path_level = 2 }
-// expect_paths_unmerged = 4
-// expect_paths_merged = 4
-// sym_bits_expected_paths = 1
+// expect_paths_unmerged = 1
+// expect_paths_merged = 1
 // ---
 default Order dec
 $include <prelude.sail>

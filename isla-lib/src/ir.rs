@@ -431,6 +431,18 @@ impl<B: BV> Val<B> {
         vars
     }
 
+    /// 检查值及其全部载荷是否包含内部的符号位宽。
+    pub fn contains_sym_bits(&self) -> bool {
+        match self {
+            Val::SymBits { .. } => true,
+            Val::Guarded(_, values) => values.0.contains_sym_bits() || values.1.contains_sym_bits(),
+            Val::Struct(values) | Val::SymbolicCtor(_, values) => values.values().any(Val::contains_sym_bits),
+            Val::Vector(values) | Val::List(values) => values.iter().any(Val::contains_sym_bits),
+            Val::Ctor(_, value) => value.contains_sym_bits(),
+            _ => false,
+        }
+    }
+
     pub fn is_concrete(&self) -> bool {
         self.symbolic_variables().is_empty()
     }

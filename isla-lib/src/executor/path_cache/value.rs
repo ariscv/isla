@@ -44,7 +44,27 @@ pub enum Val<B> {
     Ref(Name),
     Poison,
     Guarded(u32, Box<(Val<B>, Val<B>)>),
-    SymBits { data: u32, len: u32, cap: u32 },
+    // 保留原型的标签和编号，供读端报告旧缓存中的内部值。
+    #[serde(skip_serializing)]
+    SymBits {
+        data: u32,
+        len: u32,
+        cap: u32,
+    },
+}
+impl<B> Val<B> {
+    pub(super) fn legacy_sym_bits(&self) -> Option<(u32, u32, u32)> {
+        match self {
+            Val::SymBits { data, len, cap } => Some((*data, *len, *cap)),
+            Val::Vector(values) | Val::List(values) => values.iter().find_map(Val::legacy_sym_bits),
+            Val::Struct(fields) | Val::SymbolicCtor(_, fields) => {
+                fields.iter().find_map(|(_, value)| value.legacy_sym_bits())
+            }
+            Val::Ctor(_, value) => value.legacy_sym_bits(),
+            Val::Guarded(_, values) => values.0.legacy_sym_bits().or_else(|| values.1.legacy_sym_bits()),
+            _ => None,
+        }
+    }
 }
 impl<B> From<crate::ir::Val<B>> for Val<B> {
     fn from(value: crate::ir::Val<B>) -> Self {
@@ -76,7 +96,7 @@ impl<B> From<crate::ir::Val<B>> for Val<B> {
                 let (left, right) = *values;
                 Val::Guarded(guard.id, Box::new((left.into(), right.into())))
             }
-            crate::ir::Val::SymBits { data, len, cap } => Val::SymBits { data: data.id, len: len.id, cap },
+            crate::ir::Val::SymBits { .. } => panic!("未收束位宽的 SymBits 不能写入路径缓存"),
             crate::ir::Val::Poison => Val::Poison,
         }
     }
@@ -116,11 +136,7 @@ impl<B> From<Val<B>> for crate::ir::Val<B> {
                 let (left, right) = *values;
                 crate::ir::Val::Guarded(crate::smt::Sym::from_u32(guard), Box::new((left.into(), right.into())))
             }
-            Val::SymBits { data, len, cap } => crate::ir::Val::SymBits {
-                data: crate::smt::Sym::from_u32(data),
-                len: crate::smt::Sym::from_u32(len),
-                cap,
-            },
+            Val::SymBits { .. } => panic!("版本 7 路径缓存不能包含 SymBits"),
             Val::Poison => crate::ir::Val::Poison,
         }
     }
@@ -130,19 +146,26 @@ impl<B> From<Val<B>> for crate::ir::Val<B> {
 mod concrete_tests {
     use super::*;
     #[test]
-    fn sym_bits_cache_keeps_both_symbols() {
+    #[should_panic(expected = "不能写入路径缓存")]
+    fn sym_bits_cache_capture_rejects_nested_values() {
         use crate::bitvector::b64::B64;
         use crate::smt::Sym;
         let (data, len) = (Sym::from_u32(7), Sym::from_u32(12));
         let original = crate::ir::Val::<B64>::SymBits { data, len, cap: 4 };
-        let dto = Val::from(original.clone());
-        let json: Val<B64> = serde_json::from_slice(&serde_json::to_vec(&dto).unwrap()).unwrap();
-        let bin: Val<B64> = bincode::deserialize(&bincode::serialize(&dto).unwrap()).unwrap();
-        assert_eq!(original, json.into());
-        assert_eq!(original, bin.into());
-        let symbols = original.symbolic_variables();
-        assert_eq!(symbols.len(), 2);
-        assert!(symbols.contains(&data) && symbols.contains(&len));
+        let _ = Val::from(crate::ir::Val::Vector(vec![crate::ir::Val::List(vec![original])]));
+    }
+
+    #[test]
+    fn sym_bits_cache_tag_is_read_only_in_both_encodings() {
+        use crate::bitvector::b64::B64;
+        let json = br#"{"SymBits":{"data":7,"len":12,"cap":4}}"#;
+        // 原型在 Guarded 之后追加了 bincode 变体 17。
+        let bin = [17u32, 7, 12, 4].into_iter().flat_map(u32::to_le_bytes).collect::<Vec<_>>();
+        let legacy = Val::<B64>::SymBits { data: 7, len: 12, cap: 4 };
+        assert_eq!(serde_json::from_slice::<Val<B64>>(json).unwrap(), legacy);
+        assert_eq!(bincode::deserialize::<Val<B64>>(&bin).unwrap(), legacy);
+        assert!(serde_json::to_vec(&legacy).is_err());
+        assert!(bincode::serialize(&legacy).is_err());
     }
 
     #[test]

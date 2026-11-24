@@ -43,7 +43,6 @@ DEFAULTS = {
     "expect_local_rejection": None,
     "expect_prefix_rejection": None,
     "require_coi_slice": False,
-    "sym_bits_expected_paths": None,
 }
 
 
@@ -77,8 +76,6 @@ def read_scene(path):
         require(type(scene[key]) is int and scene[key] >= 0, f"{key} 须是非负整数")
     for key in ("ordered_events", "ordered_memory_events", "sequential_ram", "reverse_region_ready", "require_coi_slice"):
         require(type(scene[key]) is bool, f"{key} 须是布尔值")
-    paths = scene["sym_bits_expected_paths"]
-    require(paths is None or (type(paths) is int and paths >= 0), "sym_bits_expected_paths 须是非负整数")
     reads = scene["register_reads"]
     require(isinstance(reads, dict) and all(NAME.fullmatch(name) and type(count) is int and count >= 0
                                             for name, count in reads.items()),
@@ -308,7 +305,7 @@ def rejects_as(row, reason):
     return observed.replace("_", "").casefold() == reason.casefold()
 
 
-def run_mode(scene, shape, mode, binary, directory, seconds, *, reverse=False, sym_bits=False):
+def run_mode(scene, shape, mode, binary, directory, seconds, *, reverse=False):
     result = ModeResult()
     output_name = f"{mode}-reverse" if reverse else mode
     target = directory / f"{output_name}.paths.json"
@@ -322,10 +319,6 @@ def run_mode(scene, shape, mode, binary, directory, seconds, *, reverse=False, s
                 "[execution_limits.path_merge]\n"
                 f"enabled = {str(enabled).lower()}\nstrategy = {json.dumps(strategy)}\n"
                 f"ordered_events = {ordered}\n")
-    if sym_bits:
-        settings += "sym_bits = true\n"
-        if scene["sym_bits_expected_paths"] is not None:
-            expected = scene["sym_bits_expected_paths"]
     merge_concrete = scene["merge_concrete_values"]
     if merge_concrete is not None:
         settings += f"merge_concrete_values = {str(merge_concrete).lower()}\n"
@@ -402,7 +395,7 @@ def run_mode(scene, shape, mode, binary, directory, seconds, *, reverse=False, s
     return result
 
 
-def run_scene(scene, source, binary, plugin, directory, seconds, *, sym_bits=False):
+def run_scene(scene, source, binary, plugin, directory, seconds):
     results = {mode: ModeResult() for mode in MODES}
     if scene["status"] == "todo":
         for result in results.values():
@@ -421,12 +414,12 @@ def run_scene(scene, source, binary, plugin, directory, seconds, *, sym_bits=Fal
         return results
 
     shape = source.with_suffix(".shape")
-    results = {mode: run_mode(scene, shape, mode, binary, directory, seconds, sym_bits=sym_bits) for mode in MODES}
+    results = {mode: run_mode(scene, shape, mode, binary, directory, seconds) for mode in MODES}
     off, recursive, flat = (results[mode] for mode in MODES)
     if scene["reverse_region_ready"]:
         for mode in ("recursive", "flat"):
             forward = results[mode]
-            reverse = run_mode(scene, shape, mode, binary, directory, seconds, reverse=True, sym_bits=sym_bits)
+            reverse = run_mode(scene, shape, mode, binary, directory, seconds, reverse=True)
             forward.errors.extend(reverse.errors)
             forward.assertions.extend(reverse.assertions)
             if forward.observations != reverse.observations:
@@ -510,7 +503,6 @@ def main():
     parser.add_argument("--markdown", type=Path, help="写出含 Sail 源码的 Markdown")
     parser.add_argument("--bitvector", choices=("64", "129", "both"), default="64")
     parser.add_argument("--timeout", type=int, default=30, help="每条外部命令的墙钟外限，单位秒")
-    parser.add_argument("--sym-bits", action="store_true", help="为所有测试配置开启符号位向量长度")
     args = parser.parse_args()
     try:
         selector = re.compile(args.path_merge_filter)
@@ -532,7 +524,7 @@ def main():
                 require(args.plugin.is_file(), f"找不到 Sail 插件 {args.plugin}")
             for scene, source in scenes:
                 directory = args.output_dir.resolve() / scene["id"] / f"B{width}"
-                results = run_scene(scene, source, binary, args.plugin.resolve(), directory, args.timeout, sym_bits=args.sym_bits)
+                results = run_scene(scene, source, binary, args.plugin.resolve(), directory, args.timeout)
                 records.append((scene, f"B{width}", results))
         table = summary(records)
         diagnostics = list(details(records))
