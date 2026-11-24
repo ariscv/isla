@@ -136,11 +136,12 @@ fn is_arm_execution_error(error: &ExecError) -> bool {
 pub(super) fn close_arm<B: BV>(
     result: Result<Run<B>, ExecError>,
     tx: crate::smt::SolverTransaction,
-    arm: &LocalFrame<B>,
+    arm: &mut LocalFrame<B>,
     shared: &SharedState<B>,
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<bool, ExecError> {
+    arm.arrival_facts = None;
     match result {
         Ok(Run::Suspended) if region_merge::prefix_commit::is_cut(arm) => {
             // 失败指令已撤销。各组使用各自完整守卫，在区域边界统一认证。
@@ -154,6 +155,20 @@ pub(super) fn close_arm<B: BV>(
             match close_result {
                 None | Some(SmtResult::Sat) => {
                     assert!(!solver.transaction_invalid(), "臂提交前保存点必须有效");
+                    if let Some(access) = &arm.local_state.speculative_access {
+                        let mut symbols = Default::default();
+                        for name in &access.writes.modified_vars {
+                            if let Some(UVal::Init(value)) = arm.vars().get(name).or_else(|| arm.lets().get(name)) {
+                                value.collect_symbolic_variables(&mut symbols);
+                            }
+                        }
+                        for &reg in &access.writes.modified_regs {
+                            if let Some(value) = arm.regs().get_last_if_initialized(reg) {
+                                value.collect_symbolic_variables(&mut symbols);
+                            }
+                        }
+                        arm.arrival_facts = solver.arrival_fact_summary(symbols);
+                    }
                     solver.commit_transaction();
                     Ok(true)
                 }
@@ -544,14 +559,33 @@ pub(super) fn finish_prepared_region<'ir, B: BV>(
             record_single_arrival(&mut arm, base, region, record_id, condition, info, RegionRecordOutcome::Merged);
             arm
         }
-        (Some(left), Some(right)) => match prepared {
-            Some(prepared) => {
-                join_terms::emit(prepared.operations, solver);
-                assemble_state(prepared.state, record_id, condition, base, left, right, region, info)
-            }
-            None => merge_states(record_id, condition, base, left, right, region, state, shared, solver, info)
-                .inspect_err(|error| diagnostics::note_failure_phase(diagnostics::FailurePhase::StateMerge, error))?,
-        },
+        (Some(left), Some(right)) => {
+            let start = prepared
+                .as_ref()
+                .and_then(|pair| {
+                    pair.operations
+                        .iter()
+                        .filter_map(|op| match op {
+                            join_terms::Operation::Define(sym, ..) => Some(sym.as_u32()),
+                            _ => None,
+                        })
+                        .min()
+                })
+                .unwrap_or_else(|| solver.next_join_symbol());
+            let facts = [left.arrival_facts.clone(), right.arrival_facts.clone()];
+            let merged = match prepared {
+                Some(prepared) => {
+                    join_terms::emit(prepared.operations, solver);
+                    assemble_state(prepared.state, record_id, condition, base, left, right, region, info)
+                }
+                None => merge_states(record_id, condition, base, left, right, region, state, shared, solver, info)
+                    .inspect_err(|error| {
+                        diagnostics::note_failure_phase(diagnostics::FailurePhase::StateMerge, error)
+                    })?,
+            };
+            solver.install_arrival_choices(start, facts[0].as_deref(), facts[1].as_deref());
+            merged
+        }
     };
     let record = merged.region_merge_records.last_mut().expect("成功合并必须有记录");
     let mut symbols = HashSet::with_hasher(ahash::RandomState::new());

@@ -2,10 +2,13 @@
 use super::*;
 
 mod arithmetic;
+mod ground;
 mod prefix_index;
 mod projection;
 mod rewrites;
 mod scalar;
+pub(crate) use arithmetic::ArrivalFactSummary;
+pub(super) use arithmetic::IncrementalChoiceDag;
 use prefix_index::{BranchCandidates, Candidate, PathConditions, ProjectionCache};
 pub(super) use prefix_index::{PrefixIndex, BUFFERED};
 use projection::{AnchorProjection, ProjectedFact};
@@ -379,6 +382,9 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.finite_prefix = Some(index);
         let result = use_domain(self);
         self.finite_prefix = None;
+        if let Some(dag) = &mut self.choice_dag {
+            dag.clear();
+        }
         result
     }
 
@@ -404,7 +410,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let prepared = &mut cache.as_mut().unwrap().subjects;
         for (index, subject) in subjects.into_iter().enumerate() {
             if index == prepared.len() {
-                prepared.push(prefix.bounds(subject).map(|candidates| {
+                prepared.push(self.choice_bounds(&prefix, subject).map(|candidates| {
                     candidates.into_iter().map(|value| Candidate { value, excluded: None }).collect()
                 }));
             }
@@ -620,8 +626,16 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                         })
                         .unwrap();
                     let value = if changed {
-                        let mut ast = self.translate_exp(&expression);
-                        ast.finite_bits().or_else(|| ast.structural_bool().map(Exp::Bool))
+                        let direct = self
+                            .ctx
+                            .solver_options
+                            .finite_domain_ground_eval
+                            .then(|| ground::eval_assertion(definition, |sym| projected[&sym].as_ref(), |_| None))
+                            .flatten();
+                        direct.map(Exp::Bool).or_else(|| {
+                            let mut ast = self.translate_exp(&expression);
+                            ast.finite_bits().or_else(|| ast.structural_bool().map(Exp::Bool))
+                        })
                     } else {
                         None
                     };
@@ -723,11 +737,11 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let mut independent_residual = false;
         for (&key, is_guard) in assertions.iter().rev().map(|k| (k, false)).chain(guards.iter().map(|k| (k, true))) {
             if probe.as_ref().is_some_and(|p| facts.contains_anchor(key, &anchor, p, &mut independent)) {
-                dependent.push(key);
+                dependent.push((key, is_guard));
                 continue;
             }
             let (truth, residual) = simplified.entry(key).or_insert_with(|| {
-                let (truth, residual) = prefix.index.rewrites.simplified(asts.get(key));
+                let (truth, residual) = prefix.index.rewrites.for_assertion(is_guard).simplified(asts.get(key));
                 (truth, asts.keep(residual))
             });
             match truth {
@@ -747,8 +761,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             let value = self.translate_exp(&candidate);
             let binding = (!free).then(|| Ast::mk_eq(&anchor, &value));
             let mut rebuilt = HashMap::new();
-            let path_facts = dependent.iter().map(|&key| {
-                prefix.index.rewrites.single(anchor.z3_ast, value.z3_ast, key, || {
+            let path_facts = dependent.iter().map(|&(key, is_guard)| {
+                prefix.index.rewrites.for_assertion(is_guard).single(anchor.z3_ast, value.z3_ast, key, || {
                     facts.project_assertion(asts, key, &anchor, &value, &mut rebuilt)
                 })
             });
@@ -857,3 +871,6 @@ mod branch_tests;
 
 #[cfg(test)]
 mod arithmetic_tests;
+
+#[cfg(test)]
+mod ground_tests;

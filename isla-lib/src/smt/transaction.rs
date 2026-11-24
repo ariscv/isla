@@ -326,7 +326,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         restore_path_smt_stats(savepoint.smt_stats);
         if let Some(prefix) = &mut self.finite_prefix {
             prefix.guards_changed(self.transaction_conditions.len());
-            prefix.remove_suffix(BUFFERED, &self.transaction_events, savepoint.events_len);
+            prefix.remove_suffix(BUFFERED, &self.transaction_events, savepoint.events_len, false);
         }
         self.invalidate_error_snapshot(savepoint.events_len);
         // 只保留本层的全局枚举定义；内层回滚也不能提前发布到迹。
@@ -476,7 +476,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             // 主solver和其模型各自持有引用；释放辅助资源不改变已提交约束。
             self.region_query = None;
             if let Some(prefix) = &mut self.finite_prefix {
-                prefix.remove_suffix(BUFFERED, &self.transaction_events, 0);
+                prefix.remove_suffix(BUFFERED, &self.transaction_events, 0, true);
             }
             if self.logical_arms.has_register_reads() {
                 let mut reads = self.project_register_reads(None);
@@ -934,7 +934,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
 
     fn remove_published_suffix(&mut self, start: usize) {
         if let Some(prefix) = &mut self.finite_prefix {
-            prefix.remove_suffix(self.trace.checkpoints, &self.trace.head, start);
+            prefix.remove_suffix(self.trace.checkpoints, &self.trace.head, start, false);
         }
     }
 

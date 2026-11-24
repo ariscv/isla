@@ -821,6 +821,8 @@ witness_eval = true
 
 精确有限域识别默认开启，只在长度、索引等消费者需要具体值时枚举。已确认的候选可以直接复用，有穷上界内的每个候选仍受完整路径约束。结构层不能确定上界时，有 SMT 的执行沿用模型枚举，无 SMT 的执行报告缺少具体值。候选数量没有隐式上限。可用 `--finite-domain-enumeration=false` 或在 `[execution_limits.path_merge]` 设置 `finite_domain_enumeration = false` 关闭。旧字段 `finite_domain_max` 会产生配置错误。
 
+对可由候选赋值求出布尔常量的断言，默认使用 Isla 直接求值。无法判定时沿用 Z3 化简。可在 `[execution_limits.path_merge]` 设置 `finite_domain_ground_eval = false` 关闭直接求值。
+
 在 `[execution_limits.path_merge]` 中，符号标量统一具体化（`symbolic_scalar_resolver`）、扩展循环逐轮折叠（`loop_fold_shapes`）和历史释放（`prefix_compact`）默认开启。各项可在 TOML 中独立设为 `false`，也可通过对应 CLI 参数关闭。符号标量统一具体化允许延后区域把读长范围交给出口证明。[循环配置](specs/isarch-cli.md#分段合并候选与诊断配置) · [标量具体化配置](specs/isarch-cli.md#区域合并具体值)
 
 `partial_commit_prefix` 默认关闭。设为 `true` 并配合相应的原因类别开关，可在任意层保留已认证的子合并，从拒绝指令继续执行。[前缀固化配置](specs/isarch-cli.md#探索路径的限时与求解失败)
@@ -828,6 +830,8 @@ witness_eval = true
 在 `[execution_limits.path_merge]` 中，`arms_as_tasks` 缺省为 `false`，设为 `true` 可尝试并行执行区域 B 臂。`[execution_limits.path_merge.parallel]` 的 `min_arm_instructions` 缺省为 32，按区域中的 IR 指令和直接被调函数的指令数估算。设为 0 可取消指令数门槛。`arm_cost_ratio_percent` 缺省为 200。每个函数的区域入口 PC 先串行取样，预计 B 正文 CPU 大于入口与 A 导入开销的 2 倍时才尝试派发。两个门槛均设为 0 可强制尝试并行。任务规模过小或没有可用线程时，当前执行线程继续处理。
 
 `[execution_limits.path_merge.parallel].min_error_leaves` 设置根错误叶并行认证的最小叶数。缺省为 `isize::MAX`（64 位平台为 `9223372036854775807`），实际走串行认证。两轮本机 LOAD（`-T 64`、600 秒）中，P-G 开启后用串行认证，相对关闭 P-G 的 CPU 比值由 1.19–1.20 降至 1.00–1.02，`translateDataAddr@6` 成功根分别增加 1 个和 2 个。开启 `arms_as_tasks` 后，可显式设 `min_error_leaves = 64`，在求解配置支持且有空闲线程时对达到阈值的根并行认证。
+
+纯包装调用后的定长汇合默认关闭。使用 `--width-closed-continuation`，或在 `[execution_limits.path_merge]` 设置 `width_closed_continuation = true`。执行器保留各臂位宽，在变长局部值用完或收束为定长后汇合。指令需要访问寄存器、内存，或生成模型事件时，延续在该指令前结束。
 
 Jump 的条件恒值折叠默认开启，可用 `--prune-constant-branches=false` 或在 `[execution_limits.path_merge]` 设置 `prune_constant_branches = false` 关闭。求值后，执行器先用表达式结构和已启用的有限域前缀识别恒真／恒假，再作分支限制决策。能判定时只执行可达侧，未知时沿用原规则。不查询 SMT、不取模型，也不重复求值 IR；普通执行、defer、跳过分支检查及无 SMT 均适用。启用执行统计时，`folded_true_conditions`／`folded_false_conditions` 记录包括回滚尝试在内的折叠次数。
 

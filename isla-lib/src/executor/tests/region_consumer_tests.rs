@@ -295,3 +295,222 @@ fn region_consumer_uses_callee_local_last_use() {
         );
     }
 }
+
+#[test]
+fn region_consumer_closes_widths_through_wrappers() {
+    if !run_in_diagnostics_process(concat!(module_path!(), "::region_consumer_closes_widths_through_wrappers")) {
+        return;
+    }
+    // 关闭开关可重跑旧行为的红测，仍要求在纯包装后留下新的汇合记录。
+    let enabled = std::env::var_os("ISLA_TEST_DISABLE_WIDTH_CLOSED_CONTINUATION").is_none();
+    crate::config::RegionOptions { width_closed_continuation: enabled, ..Default::default() }.configure();
+    crate::executor::stats::merge_diagnostics::configure("detail").unwrap();
+    // 先生成有状态读拒绝，再在同一诊断进程记录定长汇合成功。
+    stateful_memory_callback_preserves_read_count_after_diamond();
+    for writes_register in [false, true] {
+        let mut shared = empty_shared_state();
+        let outer = shared.symtab.intern("zwidth_outer_wrapper");
+        let inner = shared.symtab.intern("zwidth_inner_wrapper");
+        let before = shared.symtab.intern("zwidth_before");
+        let after = shared.symtab.intern("zwidth_after");
+        let effect = shared.symtab.intern("zwidth_effect");
+        for reg in [before, after, effect] {
+            shared.registers.insert(reg, Ty::Bool);
+        }
+        let [source, bits, forwarded, length, param] = [1800, 1801, 1802, 1803, 1804].map(test_name);
+        let mut inner_body = Vec::new();
+        if writes_register {
+            inner_body.push(Instr::Copy(Loc::Id(effect), Exp::Bool(true), info()));
+        }
+        inner_body.extend([Instr::Copy(Loc::Id(RETURN), Exp::Id(param), info()), Instr::End]);
+        shared
+            .functions
+            .insert(inner, (vec![(param, &Ty::AnyBits)], &Ty::AnyBits, Box::leak(inner_body.into_boxed_slice())));
+        shared.functions.insert(
+            outer,
+            (
+                vec![(param, &Ty::AnyBits)],
+                &Ty::AnyBits,
+                Box::leak(Box::new([
+                    Instr::Call(Loc::Id(RETURN), false, inner, vec![Exp::Id(param)], info()),
+                    Instr::End,
+                ])),
+            ),
+        );
+        let code = vec![
+            Instr::Copy(Loc::Id(before), Exp::Bool(true), info()),
+            Instr::Decl(bits, Ty::AnyBits, info()),
+            Instr::Decl(forwarded, Ty::AnyBits, info()),
+            Instr::Decl(length, Ty::I128, info()),
+            Instr::PrimopBinary(
+                Loc::Id(bits),
+                primop::binary_primops()["vector_access"],
+                Exp::Id(source),
+                Exp::I128(0),
+                info(),
+            ),
+            Instr::Call(Loc::Id(forwarded), false, outer, vec![Exp::Id(bits)], info()),
+            Instr::PrimopUnary(Loc::Id(length), primop::length, Exp::Id(forwarded), info()),
+            Instr::Copy(Loc::Id(after), Exp::Bool(false), info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::Eq, vec![Exp::Id(length), Exp::I128(4)]), info()),
+            Instr::End,
+        ];
+        let run = |strategy, merge| {
+            let mut settings = limits(strategy).with_path_merging(merge);
+            settings.ordered_events = true;
+            let [narrow, wide] = [1805, 1806].map(test_name);
+            let mut code = code.clone();
+            if !merge {
+                code.splice(
+                    0..0,
+                    [
+                        Instr::Jump(input(0), 3, info()),
+                        Instr::Copy(Loc::Id(source), Exp::Id(wide), info()),
+                        Instr::Goto(4),
+                        Instr::Copy(Loc::Id(source), Exp::Id(narrow), info()),
+                    ],
+                );
+            }
+            paths_with_solver_state(
+                code,
+                &shared,
+                1,
+                settings,
+                crate::memory::Memory::new(),
+                |frame, solver| {
+                    let UVal::Init(Val::Symbolic(guard)) = frame.vars()[&test_name(900)] else { unreachable!() };
+                    let make = |width, solver: &mut Solver<B64>| {
+                        Val::Vector(vec![Val::Symbolic(solver.declare_bitvector(width, info()))])
+                    };
+                    let (a, b) = (make(4, solver), make(8, solver));
+                    if merge {
+                        frame.vars_mut().insert(source, UVal::Init(Val::Guarded(guard, Box::new((a, b)))));
+                    } else {
+                        frame.vars_mut().extend([
+                            (source, UVal::Init(Val::Unit)),
+                            (narrow, UVal::Init(a)),
+                            (wide, UVal::Init(b)),
+                        ]);
+                    }
+                },
+                false,
+            )
+            .0
+        };
+        let plain = run(MergeStrategy::Recursive, false);
+        for strategy in strategies() {
+            let merged = run(strategy, true);
+            let expected = if writes_register {
+                vec![(before, true), (effect, true), (after, false)]
+            } else {
+                vec![(before, true), (after, false)]
+            };
+            for path in plain.iter().chain(&merged) {
+                let events: Vec<_> = path
+                    .events
+                    .iter()
+                    .filter_map(|event| match event {
+                        Event::Smt(..) | Event::Fork(..) | Event::Merge(..) => None,
+                        Event::WriteReg(reg, accessors, Val::Bool(value)) if accessors.is_empty() => {
+                            Some((*reg, *value))
+                        }
+                        other => panic!("出现额外的模型事件：{other:?}"),
+                    })
+                    .collect();
+                assert_eq!(events, expected);
+            }
+            assert_eq!(
+                merged.iter().any(|path| path.records.iter().any(|record| {
+                    record.branch_pc == 4 && record.join == crate::ir::regions::RegionPoint::Instruction(7)
+                })),
+                !writes_register,
+                "{strategy:?}"
+            );
+            assert_eq!(equivalent_paths(&plain, &merged, 1, true), (2, 1));
+        }
+    }
+}
+
+#[test]
+fn region_consumer_carries_four_widths_across_return() {
+    if !run_in_diagnostics_process(concat!(module_path!(), "::region_consumer_carries_four_widths_across_return")) {
+        return;
+    }
+    crate::config::RegionOptions { width_closed_continuation: true, ..Default::default() }.configure();
+
+    let mut shared = empty_shared_state();
+    let producer = shared.symtab.intern("zwidth_producer");
+    let wrapper = shared.symtab.intern("zwidth_return_wrapper");
+    let caller = shared.symtab.intern("zwidth_return_caller");
+    let [source, bits, length] = [1800, 1801, 1802].map(test_name);
+    let source_ty = Box::leak(Box::new(Ty::Vector(Box::new(Ty::AnyBits))));
+    shared.functions.insert(
+        producer,
+        (
+            vec![(source, source_ty)],
+            &Ty::AnyBits,
+            Box::leak(Box::new([
+                Instr::PrimopBinary(
+                    Loc::Id(RETURN),
+                    primop::binary_primops()["vector_access"],
+                    Exp::Id(source),
+                    Exp::I128(0),
+                    info(),
+                ),
+                Instr::End,
+            ])),
+        ),
+    );
+    shared.functions.insert(
+        wrapper,
+        (
+            vec![(source, source_ty)],
+            &Ty::AnyBits,
+            Box::leak(Box::new([
+                Instr::Call(Loc::Id(RETURN), false, producer, vec![Exp::Id(source)], info()),
+                Instr::End,
+            ])),
+        ),
+    );
+    shared.functions.insert(
+        caller,
+        (
+            vec![(source, source_ty)],
+            &Ty::Bool,
+            Box::leak(Box::new([
+                Instr::Decl(bits, Ty::AnyBits, info()),
+                Instr::Decl(length, Ty::I128, info()),
+                Instr::Call(Loc::Id(bits), false, wrapper, vec![Exp::Id(source)], info()),
+                Instr::PrimopUnary(Loc::Id(length), primop::length, Exp::Id(bits), info()),
+                Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::Eq, vec![Exp::Id(length), Exp::I128(32)]), info()),
+                Instr::End,
+            ])),
+        ),
+    );
+    let expected = paths(
+        vec![Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::And, vec![input(0), input(1)]), info()), Instr::End],
+        &shared,
+        2,
+        false,
+    );
+    for strategy in strategies() {
+        let (merged, _, _) = paths_with_solver_state(
+            vec![Instr::Call(Loc::Id(RETURN), false, caller, vec![Exp::Id(source)], info()), Instr::End],
+            &shared,
+            2,
+            limits(strategy),
+            crate::memory::Memory::new(),
+            |frame, _| set_width_candidates(frame, |width| Val::Vector(vec![Val::Bits(B64::new(0, width as u32))])),
+            false,
+        );
+        assert_eq!(equivalent_paths(&expected, &merged, 2, true), (1, 1), "{strategy:?}");
+        assert!(
+            merged[0].records.iter().any(|record| {
+                record.function == caller
+                    && record.branch_pc == 2
+                    && record.join == crate::ir::regions::RegionPoint::Instruction(4)
+            }),
+            "四种位宽应穿过两个返回边界，{strategy:?}"
+        );
+    }
+}

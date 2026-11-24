@@ -126,6 +126,10 @@ pub struct PathMergeConfig {
     pub max_fragments: Option<i64>,
     /// 按当前臂的定义和断言解析符号标量。默认开启。
     pub symbolic_scalar_resolver: bool,
+    /// 在当前臂复用增量选择图。默认关闭。
+    pub incremental_choice_dag: bool,
+    /// 使用约束依赖切片检查分支和出口可行性。默认关闭。
+    pub coi_query_slicing: bool,
     /// 延后推演时，范围证明转为出口待证义务；默认开启。
     pub defer_range_proofs: bool,
     /// 延后推演时，构造子解包标签转为出口待证义务；默认开启。
@@ -158,11 +162,15 @@ pub struct PathMergeConfig {
     pub lazy_z3_scope: bool,
     /// 需要具体值时按精确有限域枚举；默认开启。
     pub finite_domain_enumeration: bool,
+    /// 使用 Isla 求值检查全为具体值的有限域候选。缺省开启。
+    pub finite_domain_ground_eval: bool,
     pub witness_eval: bool,
     /// 迭代边界前缀固化并释放已完成轮次的历史。默认开启。
     pub prefix_compact: bool,
     /// 扩展循环逐轮折叠形状。默认开启。
     pub loop_fold_shapes: bool,
+    /// 跨过纯包装调用，在变长临时值用完后汇合。默认关闭。
+    pub width_closed_continuation: bool,
     pub diagnostics: PathMergeDiagnostics,
     pub regions: Option<Vec<PathMergeRegionConfig>>,
     #[serde(deserialize_with = "deserialize_enumeration")]
@@ -181,6 +189,8 @@ impl Default for PathMergeConfig {
             max_merge_depth: None,
             max_fragments: None,
             symbolic_scalar_resolver: true,
+            incremental_choice_dag: false,
+            coi_query_slicing: false,
             defer_range_proofs: true,
             defer_ctor_checks: true,
             merge_poison_slots: true,
@@ -202,9 +212,11 @@ impl Default for PathMergeConfig {
             defer_call_effect_checks: true,
             lazy_z3_scope: false,
             finite_domain_enumeration: true,
+            finite_domain_ground_eval: true,
             witness_eval: false,
             prefix_compact: true,
             loop_fold_shapes: true,
+            width_closed_continuation: false,
             diagnostics: PathMergeDiagnostics::default(),
             regions: None,
             enumeration: None,

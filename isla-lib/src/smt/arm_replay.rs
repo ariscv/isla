@@ -128,6 +128,7 @@ impl<'ctx, B: BV> ArmReplay<'ctx, B> {
                 prefix.rewind(
                     segment,
                     offset,
+                    false,
                     old.iter().enumerate().skip(segment).rev().flat_map(|(index, trace)| {
                         let start = if segment == index { offset } else { 0 };
                         let end = trace.arm_event_count();

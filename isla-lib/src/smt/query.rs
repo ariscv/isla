@@ -320,6 +320,22 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
     }
 
+    pub(super) fn query_from_assertions(&self, assertions: &[Z3_ast]) -> QuerySolver<'ctx> {
+        let _setup = WorkTimer::start(WorkKind::QuerySetup);
+        let config = SMT_CONFIG.get().expect("查询前必须初始化SMT");
+        unsafe {
+            let z3_solver = new_z3_solver(
+                self.ctx.z3_ctx,
+                config.tactic.as_c_str(),
+                self.seed.map(|seed| (config.seed_param, seed)),
+            );
+            for &assertion in assertions {
+                Z3_solver_assert(self.ctx.z3_ctx, z3_solver, assertion);
+            }
+            QuerySolver { ctx: self.ctx, z3_solver, independent: true }
+        }
+    }
+
     /// 同Context、同配置／种子，复制完整逻辑式。资源上限只存在此独立查询中。
     pub(super) fn independent_query(&self, assumptions: &[Z3_ast], limit: Option<u32>) -> QuerySolver<'ctx> {
         let config = SMT_CONFIG.get().expect("查询前必须初始化SMT");
@@ -882,7 +898,7 @@ fn prefix_compaction_enabled() -> bool {
 impl<'ctx, B: BV> Solver<'ctx, B> {
     /// 辅助查询的完整前提；实验开启时先放稳定断言，再放当前臂和目标。
     /// 活动guard必须留在可撤销后缀，不能被固化成跨臂事实。
-    fn region_query_complete(&self, assumptions: &[Z3_ast], stable_order: bool) -> (Vec<Z3_ast>, usize) {
+    pub(super) fn region_query_complete(&self, assumptions: &[Z3_ast], stable_order: bool) -> (Vec<Z3_ast>, usize) {
         unsafe {
             let assertions = Z3_solver_get_assertions(self.ctx.z3_ctx, self.z3_solver);
             Z3_ast_vector_inc_ref(self.ctx.z3_ctx, assertions);

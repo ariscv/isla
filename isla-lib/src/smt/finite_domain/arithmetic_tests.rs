@@ -144,3 +144,95 @@ fn i128_to_i64_roundtrip_skips_finite_search() {
     assert_eq!(solver.check_sat_with(&Neq(Box::new(Var(result)), Box::new(Var(width))), info), SmtResult::Unsat);
     assert_eq!(searches, 0, "符号扩展后窄回原宽度，无需推导候选");
 }
+
+#[test]
+fn stage3_choice_dag_matches_reenumeration_through_scope_changes() {
+    configure_tastic(Tactic::Qfaufbv);
+    let evaluate = |enabled| {
+        let mut cfg = Config::new();
+        cfg.solver_options.incremental_choice_dag = enabled;
+        let ctx = Context::new(cfg);
+        let mut solver = Solver::<B64>::new(&ctx);
+        let loc = SourceLoc::unknown();
+        let pick = solver.declare_const(Ty::Bool, loc);
+        let n = solver.declare_bitvector(128, loc);
+        solver.assert(Or(Box::new(eq(n, 2)), Box::new(eq(n, 3))));
+        let value = solver.define_const(Ite(Box::new(Var(pick)), Box::new(Var(n)), Box::new(integer(7))), loc);
+        let summed = solver.define_const(Bvadd(Box::new(Var(value)), Box::new(integer(1))), loc);
+        let query = |solver: &Solver<B64>| {
+            let feasible = |value| solver.finite_domain_predicate(&eq(summed, value));
+            (numeric(solver.finite_domain(summed)), [2, 3, 4, 7, 8].map(feasible))
+        };
+        let mut results = vec![query(&solver), query(&solver)];
+        let parent = solver.start_transaction();
+        let left = solver.start_transaction_with_guard(Some(Var(pick)));
+        solver.assert(Not(Box::new(eq(n, 2))));
+        results.extend([query(&solver), query(&solver)]);
+        solver.rollback_transaction(left);
+        results.push(query(&solver));
+        solver.start_transaction_with_guard(Some(Not(Box::new(Var(pick)))));
+        results.extend([query(&solver), query(&solver)]);
+        solver.commit_transaction();
+        results.push(query(&solver));
+        solver.start_transaction_with_guard(Some(Not(Box::new(Var(pick)))));
+        solver.commit_dead_transaction();
+        results.push(query(&solver));
+        solver.rollback_transaction(parent);
+        results.push(query(&solver));
+        results
+    };
+    assert_eq!(evaluate(true), evaluate(false));
+}
+
+#[test]
+fn stage3_choice_dag_reuses_completed_combinations_and_remaps_arrival_bounds() {
+    configure_tastic(Tactic::Qfaufbv);
+    let mut cfg = Config::new();
+    cfg.solver_options.incremental_choice_dag = true;
+    let ctx = Context::new(cfg);
+    let mut solver = Solver::<B64>::new(&ctx);
+    let site = SourceLoc::unknown();
+    let guard = solver.declare_const(Ty::Bool, site);
+    let from = solver.declare_bitvector(128, site);
+    let mapped = solver.declare_bitvector(128, site);
+    let root = solver.start_transaction();
+    solver.start_transaction_with_guard(Some(Var(guard)));
+    solver.assert(eq(from, 3));
+    solver.assert(eq(mapped, 3));
+    assert_eq!(numeric(solver.finite_domain(from)), [3]);
+    let mut arrival = solver.arrival_fact_summary([from]).expect("应交付臂内的已知候选");
+    Arc::make_mut(&mut arrival).remap_symbols(&SymRemap::from_pairs([(from, mapped)]));
+    solver.commit_transaction();
+    let start = solver.next_join_symbol();
+    let out = solver.define_const(Ite(Box::new(Var(guard)), Box::new(Var(mapped)), Box::new(integer(9))), site);
+    solver.install_arrival_choices(start, Some(&arrival), None);
+    assert!(PathConditions::new(&solver).unwrap().index.joined_choices.contains_key(&out));
+
+    let collect = |solver: &Solver<B64>, reference: bool| {
+        let prefix = PathConditions::new(solver).unwrap();
+        let exp = Var(out);
+        let mut values = Vec::new();
+        let accept = |mut value: Ast<'_>, exact| {
+            let pair = (value.finite_bits().unwrap(), exact);
+            if !values.contains(&pair) {
+                values.push(pair);
+            }
+            true
+        };
+        if reference {
+            solver.reference_combined_values(&prefix, &exp, accept).unwrap();
+        } else {
+            solver.combined_values(&prefix, &exp, accept).unwrap();
+        }
+        values
+    };
+    // 原枚举需从逻辑式中取得输入上界。整个符号仍可在另一个臂自由取值。
+    solver.assert(eq(mapped, 3));
+    let expected = collect(&solver, true);
+    assert_eq!(collect(&solver, false), expected);
+    let before = BOUND_SEARCHES.get();
+    assert_eq!(collect(&solver, false), expected);
+    assert_eq!(BOUND_SEARCHES.get(), before);
+    solver.rollback_transaction(root);
+    assert!(!PathConditions::new(&solver).unwrap().index.joined_choices.contains_key(&out));
+}

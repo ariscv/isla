@@ -902,7 +902,17 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                     failure_phase = FailurePhase::ExitCertification;
                     log_phase("exit_check_start", None);
                     let _scope = stats::region_progress::QueryScope::enter("region_exit");
-                    let checked = solver.check_candidate_sat(info);
+                    let checked = if solver.validates_candidates() && solver.coi_query_slicing_enabled() {
+                        let candidate = candidate_frame.as_ref().expect("出口认证必须有候选帧");
+                        let mut symbols = Default::default();
+                        candidate.collect_symbolic_variables(&mut symbols);
+                        for arrival in &candidate.region_arrivals {
+                            arrival.collect_symbolic_variables(&mut symbols);
+                        }
+                        Some(solver.check_exit_feasibility(symbols, info))
+                    } else {
+                        solver.check_candidate_sat(info)
+                    };
                     log_phase("exit_check_end", checked.as_ref());
                     match checked {
                         None | Some(SmtResult::Sat) => result,
@@ -1529,6 +1539,14 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 catcher, record_id, condition, base, arms, tid, task_id, fraction, timeout, stop, sink, frame, state,
                 shared, solver, info,
             );
+        }
+    }
+    if consumer.is_some() && crate::config::RegionOptions::current().width_closed_continuation {
+        if let Some(result) = consumer_continuation::try_width_closed_join(
+            record_id, condition, &base, &arms, tid, task_id, fraction, timeout, stop, sink, frame, state, shared,
+            solver, info,
+        )? {
+            return Ok(result);
         }
     }
     finish_arrivals(

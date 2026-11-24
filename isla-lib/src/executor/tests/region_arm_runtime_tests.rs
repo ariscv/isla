@@ -709,22 +709,31 @@ fn region_arm_nested_two_arms() {
 #[test]
 fn region_arm_nested_imports_guarded_assertions() {
     const CHILD: &str = "ISLA_STAGE4_NESTED_ASSERT";
-    if std::env::var_os(CHILD).is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "executor::tests::region_arm_runtime_tests::region_arm_nested_imports_guarded_assertions",
-            ])
-            .env(CHILD, "1")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+    let Some(mode) = std::env::var_os(CHILD) else {
+        for mode in ["existing", "choice_dag_and_coi"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "executor::tests::region_arm_runtime_tests::region_arm_nested_imports_guarded_assertions",
+                ])
+                .env(CHILD, mode)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{mode}: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
         return;
+    };
+    if mode == "choice_dag_and_coi" {
+        crate::smt::configure_solver_options(crate::smt::SolverOptions {
+            incremental_choice_dag: true,
+            coi_query_slicing: true,
+            ..Default::default()
+        });
     }
     crate::config::RegionOptions { defer_exit_check: true, ..Default::default() }.configure();
     check_nested_b(Body::NestedAssert, "nested_assert");
@@ -893,16 +902,53 @@ fn region_arm_adaptive_gate_samples_then_claims_only_the_large_site() {
 
 #[test]
 fn region_arm_sequential_siblings_use_the_same_worker_at_t2() {
+    check_sequential_siblings_reuse();
+}
+
+#[test]
+fn region_arm_stage3_preserves_sequential_siblings_with_replay() {
+    const CHILD: &str = "ISLA_PG_STAGE3_SIBLING_REPLAY";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "executor::tests::region_arm_runtime_tests::region_arm_stage3_preserves_sequential_siblings_with_replay",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    crate::smt::configure_solver_options(crate::smt::SolverOptions {
+        incremental_choice_dag: true,
+        coi_query_slicing: true,
+        ..Default::default()
+    });
+    check_sequential_siblings_reuse();
+}
+
+fn check_sequential_siblings_reuse() {
     configure_tastic(Tactic::Qfaufbv);
     let (claim, claimed) = std::sync::mpsc::channel();
     let claimed = Mutex::new(claimed);
     let workers = Arc::new(Mutex::new(Vec::new()));
     let trace = Arc::clone(&workers);
+    let imports = Arc::new(AtomicUsize::new(0));
+    let imported = Arc::clone(&imports);
     let hook = Arc::new(move |point: &str| {
         match point {
             "worker_claimed" => {
                 trace.lock().unwrap().push(std::thread::current().id());
                 claim.send(()).unwrap();
+            }
+            "imported" => {
+                imported.fetch_add(1, Ordering::Relaxed);
             }
             "a_join" => claimed.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap(),
             _ => (),
@@ -912,6 +958,7 @@ fn region_arm_sequential_siblings_use_the_same_worker_at_t2() {
     let result = diamond_case(2, true, Some(hook), Body::SiblingReuse, None).0;
     assert_eq!(result, diamond_case(2, false, None, Body::SiblingReuse, None).0);
     let workers = workers.lock().unwrap();
+    assert_eq!(imports.load(Ordering::Relaxed), 2, "两个 B 后缀都应导入");
     assert_eq!(workers.len(), 2);
     assert_eq!(workers[0], workers[1], "同一任务的两个远端臂应复用执行线程");
 }

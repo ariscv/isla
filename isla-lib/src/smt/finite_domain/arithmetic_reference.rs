@@ -7,10 +7,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         exp: &Formula,
         mut accept: impl FnMut(Ast<'ctx>, bool) -> bool,
     ) -> Option<()> {
-        let mut graph =
-            Graph { solver: self, prefix, symbols: HashMap::new(), guards: HashMap::new(), inputs: Vec::new() };
+        let mut state = ChoiceGraph::default();
+        let mut graph = Graph { solver: self, prefix, state: &mut state, incremental: false };
         let root = graph.build(exp)?;
-        if graph.inputs.is_empty() {
+        if graph.state.inputs.is_empty() {
             return None;
         }
         let facts: Vec<_> = prefix.assertions().map(|exp| (exp, self.translate_exp(exp))).collect();
@@ -23,10 +23,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             literals.insert(negative.z3_ast, (sym, false));
             negative_atoms.push(negative);
         }
-        let mut assignments = vec![None; graph.inputs.len()];
+        let mut assignments = vec![None; graph.state.inputs.len()];
         let mut stack: Vec<(usize, usize)> = Vec::new();
         loop {
-            match root.evaluate(&assignments, &mut HashMap::new()) {
+            match root.evaluate(self.ctx, &assignments, &mut Evaluated::default()) {
                 Err(index) => stack.push((index, 0)),
                 Ok(value) => {
                     let mut projected = HashMap::new();
@@ -36,7 +36,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     let mut free_values = Vec::new();
                     let mut bindings = Vec::new();
                     for &(index, next) in &stack {
-                        let input = &graph.inputs[index];
+                        let input = &graph.state.inputs[index];
                         let assigned = assignments[index].as_ref().expect("活跃的有限域分支必须已有赋值");
                         if let Some(sym) = input.symbol {
                             projected.insert(sym, Some(input.choices[next - 1].clone()));
@@ -47,7 +47,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                             free_anchors.push(input.anchor.z3_ast);
                             free_values.push(assigned.z3_ast);
                         } else {
-                            bindings.push(input.anchor.mk_eq(assigned));
+                            bindings.push(input.anchor.get(self.ctx).mk_eq(assigned));
                         }
                     }
                     let mut residual = Ast::mk_bool(self.ctx, true);
@@ -111,7 +111,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 }
             }
             while let Some((index, next)) = stack.last_mut() {
-                if let Some(choice) = graph.inputs[*index].choices.get(*next) {
+                if let Some(choice) = graph.state.inputs[*index].choices.get(*next) {
                     assignments[*index] = Some(self.translate_exp(choice));
                     *next += 1;
                     break;

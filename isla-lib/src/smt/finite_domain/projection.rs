@@ -77,6 +77,11 @@ impl AnchorProjection {
         value: &Ast<'ctx>,
         rebuilt: &mut HashMap<Z3_ast, (Ast<'ctx>, Option<bool>)>,
     ) -> ProjectedFact {
+        let replacement = [(anchor.z3_ast, value.z3_ast)];
+        let replacements = if value.z3_ast == anchor.z3_ast { &replacement[..0] } else { &replacement };
+        if let Some((truth, changed)) = ground::AstEvaluator::new(asts.ctx).evaluate(root, replacements) {
+            return ProjectedFact { truth: Some(truth), literal: None, unchanged: !changed };
+        }
         let (mut residual, folded) = if value.z3_ast == anchor.z3_ast {
             (asts.get(root), None)
         } else {

@@ -102,7 +102,7 @@ fn branch_prefix_filters_and_reuses_candidate_checks() {
     let (new, before, cold) = run(&s, eq(x, 32));
     assert_eq!(new, Some(false));
     assert_eq!(before, [258 * 16, 259 * 16, 32]);
-    assert_eq!(cold, [258, 32, 32]);
+    assert_eq!(cold, [258, 16, 16]);
     // 不同谓词同一锚点，原有正反谓词缓存本身不能命中。
     assert_eq!(run(&s, eq(x, 33)).2, [0, 16, 16]);
     let (_, _, other_anchor) = run(&s, eq(y, 3));

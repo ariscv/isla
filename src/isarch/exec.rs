@@ -2155,7 +2155,18 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
                                 .expect("完成路径的合并计数失败")
                         } else if samples.enabled() {
                             if !solver.has_stashed_model() {
-                                if let Some(result) = solver.check_candidate_sat(SourceLoc::unknown()) {
+                                let info = SourceLoc::unknown();
+                                let checked = if samples.path_cache.dag_only
+                                    && solver.coi_query_slicing_enabled()
+                                    && !solver.no_smt()
+                                {
+                                    let mut symbols = ret_val.symbolic_variables();
+                                    frame.collect_symbolic_variables(&mut symbols);
+                                    Some(solver.check_exit_feasibility(symbols, info))
+                                } else {
+                                    solver.check_candidate_sat(info)
+                                };
+                                if let Some(result) = checked {
                                     if !error_recorder.terminal_path_is_sat(result, frame, shared_state) {
                                         return;
                                     }

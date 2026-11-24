@@ -157,6 +157,24 @@ impl ArmFacts {
         self.derived.clear();
     }
 
+    pub(super) fn choice<B: BV>(
+        &mut self,
+        exp: &Exp<Sym>,
+        solver: &Solver<'_, B>,
+        prefix: &PathConditions<'_, B>,
+    ) -> Option<bool> {
+        self.update(solver, prefix);
+        let mut result = self.evaluate(exp, solver);
+        while let Err(Some(sym)) = result {
+            self.value(sym, solver, prefix);
+            result = self.evaluate(exp, solver);
+        }
+        match result {
+            Ok(Exp::Bool(truth)) => Some(truth),
+            _ => None,
+        }
+    }
+
     fn update<B: BV>(&mut self, solver: &Solver<B>, prefix: &PathConditions<'_, B>) {
         for assertion in prefix.ordinary_suffix(self.ordinary.marks.len()) {
             self.ordinary.record(assertion, prefix);
