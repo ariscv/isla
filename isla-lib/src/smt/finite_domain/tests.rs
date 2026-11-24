@@ -1315,7 +1315,7 @@ fn scalar_resolver_only_records_new_predicates() {
 }
 
 #[test]
-fn scalar_resolver_two_round_range_scope() {
+fn scalar_resolver_two_round_range_reference() {
     two_round_range_scope(false);
 }
 
@@ -1329,9 +1329,8 @@ fn two_round_range_scope(persist: bool) {
     use crate::smt::test_query_count;
     use Exp::*;
     let name =
-        if persist { "scalar_resolver_two_round_range_persist" } else { "scalar_resolver_two_round_range_scope" };
-    let options = crate::config::RegionOptions { scalar_domain_persist: persist, ..Default::default() };
-    if !resolver_test_options(name, options) {
+        if persist { "scalar_resolver_two_round_range_persist" } else { "scalar_resolver_two_round_range_reference" };
+    if !resolver_test(name) {
         return;
     }
     configure_tastic(Tactic::Qfaufbv);
@@ -1371,7 +1370,8 @@ fn two_round_range_scope(persist: bool) {
         let consume = |s: &Solver<'_, B64>| {
             let combined = COMBINED_VALUES_CALLS.get();
             let native = test_query_count();
-            let domain = values(s.resolve_scalar_in_scope(len, site, true));
+            let domain = if persist { s.resolve_scalar_in_scope(len, site, true) } else { s.resolve_scalar(len, site) };
+            let domain = values(domain);
             (domain, COMBINED_VALUES_CALLS.get() - combined, test_query_count() - native)
         };
 

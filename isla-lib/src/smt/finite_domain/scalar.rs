@@ -573,10 +573,7 @@ impl<B: BV> Solver<'_, B> {
                 }
                 FiniteDomain::Unknown => FiniteDomain::Bounded(values),
             },
-            _ if persist
-                && self.region_queries_deferred()
-                && crate::config::RegionOptions::current().scalar_domain_persist =>
-            {
+            _ if persist && self.region_queries_deferred() => {
                 let key = (sym, self.has_stashed_model(), self.region_queries_deferred());
                 let current = prefix.index.domains.borrow().get(&key).cloned();
                 if let Some(domain) = current {

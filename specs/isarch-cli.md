@@ -582,7 +582,7 @@ partial_commit_control = false
 
 符号长度、位宽和索引的统一具体化默认开启。在 `[execution_limits.path_merge]` 设置 `symbolic_scalar_resolver = false`，或传入 `--symbolic-scalar-resolver=false`，可关闭此功能。读长的可表示范围是 `1..=u32::MAX/8` 字节。开启后，延后区域可以把读长范围登记为出口需要验证的安全义务，出口认证仍需排除越界反例。设置 `--obligation-dump-dir` 后，目录中的 `scalar-range-*.smt2` 保存登记义务之前的原始前缀和反例条件，可独立用 Z3 检查。若 ITE 的一个值臂直接来自有显式有限域的输入，解析器可按这些值拆分，并要求出口同时排除越界值和该集合之外的合法值。若反例可达，区域撤销推演并从原前缀重试。
 
-`scalar_domain_persist` 默认开启。延后推演的读长与范围消费者可在后续内层合并中复用目标定义前的候选上界。回退会恢复仅因被撤销断言而排除的候选。可在 `[execution_limits.path_merge]` 中设为 `false`，或传入 `--scalar-domain-persist=false`。
+延后推演的读长与范围消费者可在后续内层合并中复用目标定义前的候选上界。回退会恢复仅因被撤销断言而排除的候选。
 
 `[execution_limits.path_merge].merge_concrete_values` 默认开启，`--merge-concrete-values=true|false` 可覆盖。区域出口用守卫保留两臂不同的具体字符串或 I64。字符串相等比较直接计算对应的符号布尔值。需要具体操作数的指令沿原守卫重试，区域内重试通过共用汇合入口交回正常前沿。
 

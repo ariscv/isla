@@ -14,8 +14,6 @@ pub struct RegionOptions {
     pub max_merge_depth: Option<i64>,
     /// 按当前臂的定义和断言解析符号标量。默认开启。
     pub symbolic_scalar_resolver: bool,
-    /// 为延后推演中的标量范围消费者复用候选上界。默认开启。
-    pub scalar_domain_persist: bool,
     /// 延后推演时，范围证明转为出口待证义务；默认开启。
     pub defer_range_proofs: bool,
     /// 延后推演时，构造子解包标签转为出口待证义务；默认开启。
@@ -103,7 +101,6 @@ impl RegionOptions {
             bv_rewrite: limits.solver.bv_rewrite,
             max_merge_depth: merge.max_merge_depth,
             symbolic_scalar_resolver: merge.symbolic_scalar_resolver,
-            scalar_domain_persist: merge.scalar_domain_persist,
             defer_range_proofs: merge.defer_range_proofs,
             defer_ctor_checks: merge.defer_ctor_checks,
             skip_branch_checks: limits.solver.skip_branch_checks,

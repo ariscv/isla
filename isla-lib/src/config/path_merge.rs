@@ -126,8 +126,6 @@ pub struct PathMergeConfig {
     pub max_fragments: Option<i64>,
     /// 按当前臂的定义和断言解析符号标量。默认开启。
     pub symbolic_scalar_resolver: bool,
-    /// 为延后推演中的标量范围消费者复用候选上界。默认开启。
-    pub scalar_domain_persist: bool,
     /// 在当前臂复用增量选择图。默认关闭。
     pub incremental_choice_dag: bool,
     /// 使用约束依赖切片检查分支和出口可行性。默认关闭。
@@ -205,7 +203,6 @@ impl Default for PathMergeConfig {
             max_merge_depth: None,
             max_fragments: None,
             symbolic_scalar_resolver: true,
-            scalar_domain_persist: true,
             incremental_choice_dag: false,
             coi_query_slicing: false,
             defer_range_proofs: true,

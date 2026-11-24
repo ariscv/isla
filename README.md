@@ -837,7 +837,7 @@ witness_eval = true
 
 在 `[execution_limits.path_merge]` 中，符号标量统一具体化（`symbolic_scalar_resolver`）、扩展循环逐轮折叠（`loop_fold_shapes`）和历史释放（`prefix_compact`）默认开启。各项可在 TOML 中独立设为 `false`，也可通过对应 CLI 参数关闭。符号标量统一具体化允许延后区域把读长范围交给出口证明。[循环配置](specs/isarch-cli.md#分段合并候选与诊断配置) · [标量具体化配置](specs/isarch-cli.md#区域合并具体值)
 
-延后区域默认复用在共同前缀得到的标量候选上界。可用 `--scalar-domain-persist=false` 或在 `[execution_limits.path_merge]` 中设置 `scalar_domain_persist = false` 关闭。 [标量具体化配置](specs/isarch-cli.md#区域合并具体值)
+延后区域复用在共同前缀得到的标量候选上界。 [标量具体化配置](specs/isarch-cli.md#区域合并具体值)
 
 `partial_commit_prefix` 默认关闭。设为 `true` 并配合相应的原因类别开关，可在任意层保留已认证的子合并，从拒绝指令继续执行。[前缀固化配置](specs/isarch-cli.md#探索路径的限时与求解失败)
 
