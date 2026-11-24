@@ -10,6 +10,12 @@ struct Position(usize, usize);
 
 type GuardBounds = HashMap<Sym, Option<Arc<Vec<Exp<Sym>>>>>;
 
+struct ScalarUpperBound {
+    definition: Position,
+    proof_assertions: usize,
+    candidates: Vec<Exp<Sym>>,
+}
+
 pub(in crate::smt) struct PrefixIndex<'ctx> {
     choice_epoch: u64,
     choice_assertions: Vec<u64>,
@@ -20,6 +26,7 @@ pub(in crate::smt) struct PrefixIndex<'ctx> {
     pub(super) arm_facts: RefCell<ArmFacts>,
     pub(super) layouts: HashMap<Sym, ScalarLayout>,
     symbols: ahash::AHashMap<Sym, Position>,
+    symbol_upper_bounds: RefCell<HashMap<Sym, ScalarUpperBound>>,
     rebindings: usize,
     bounds: RefCell<HashMap<Sym, (usize, Bound)>>,
     guard_bounds: RefCell<Vec<GuardBounds>>,
@@ -174,6 +181,7 @@ impl<'ctx> PrefixIndex<'ctx> {
             arm_facts: Default::default(),
             layouts: Default::default(),
             symbols: Default::default(),
+            symbol_upper_bounds: Default::default(),
             rebindings: 0,
             bounds: Default::default(),
             guard_bounds: RefCell::default(),
@@ -287,6 +295,10 @@ impl<'ctx> PrefixIndex<'ctx> {
             }
         }
         if has_suffix {
+            let retained = self.assertions.len();
+            self.symbol_upper_bounds
+                .get_mut()
+                .retain(|_, bound| bound.definition < first && bound.proof_assertions <= retained);
             self.arm_facts.get_mut().truncate_assertions(self.assertions.len());
             let preserve = if self.incremental_choices || self.retain_ordinary() { self.assertions.len() } else { 0 };
             self.clear_candidate_caches(preserve);
@@ -298,6 +310,7 @@ impl<'ctx> PrefixIndex<'ctx> {
             self.choice_binding_revision = self.next_choice_epoch();
         }
         self.joined_choices.clear();
+        self.symbol_upper_bounds.get_mut().clear();
         *self.arm_facts.get_mut() = ArmFacts::default();
         self.guard_bounds.get_mut().clear();
         if self.incremental_choices {
@@ -324,6 +337,7 @@ impl<'ctx> PrefixIndex<'ctx> {
             let epoch = self.next_choice_epoch();
             self.choice_assertions[retained..].fill(epoch);
         }
+        self.symbol_upper_bounds.get_mut().retain(|_, bound| bound.proof_assertions <= retained);
         self.arm_facts.get_mut().truncate_assertions(retained);
         self.truncate_guards(guard_depth);
         self.clear_candidate_caches(if self.incremental_choices || self.retain_ordinary() { retained } else { 0 });
@@ -465,6 +479,16 @@ impl<'ctx> PrefixIndex<'ctx> {
                 })
                 .sum::<usize>()
             + map_bytes::<Sym, Position>(self.symbols.capacity())
+            + map_bytes::<Sym, ScalarUpperBound>(self.symbol_upper_bounds.borrow().capacity())
+            + self
+                .symbol_upper_bounds
+                .borrow()
+                .values()
+                .map(|bound| {
+                    bound.candidates.capacity() * size_of::<Exp<Sym>>()
+                        + bound.candidates.iter().map(exp_heap_bytes).sum::<usize>()
+                })
+                .sum::<usize>()
             + self.assertions.capacity() * size_of::<Position>()
             + self.bool_symbols.capacity() * size_of::<(Position, Sym)>()
             + self.branch.borrow().as_ref().map_or(0, |branch| {
@@ -606,6 +630,39 @@ impl<'a, B: BV> PathConditions<'a, B> {
             };
             cache.guards.push(key);
         }
+    }
+
+    pub(super) fn scalar_proof_prefix(&self, sym: Sym, savepoint: usize) -> Option<usize> {
+        let position = *self.index.symbols.get(&sym)?;
+        (position < Position(BUFFERED, savepoint)).then(|| self.index.assertions.partition_point(|p| *p < position))
+    }
+
+    pub(super) fn remember_scalar_upper(&self, sym: Sym, count: usize, values: Vec<Exp<Sym>>) {
+        let mut bounds = self.index.symbol_upper_bounds.borrow_mut();
+        // 只限制缓存开销。容量满时仍按原入口完整推导。
+        if bounds.len() < 64 {
+            bounds.insert(
+                sym,
+                ScalarUpperBound { definition: self.index.symbols[&sym], proof_assertions: count, candidates: values },
+            );
+        }
+    }
+
+    pub(super) fn scalar_upper(&self, solver: &Solver<'_, B>, sym: Sym) -> Option<Vec<Exp<Sym>>> {
+        let bounds = self.index.symbol_upper_bounds.borrow();
+        let upper = bounds.get(&sym)?;
+        let anchor = solver.translate_exp(&Exp::Var(sym));
+        Some(
+            upper
+                .candidates
+                .iter()
+                .filter(|value| {
+                    let candidate = solver.translate_exp(value);
+                    !self.excludes_branch_candidate(solver, &anchor, &candidate)
+                })
+                .cloned()
+                .collect(),
+        )
     }
 
     pub(super) fn excludes_branch_candidate(&self, solver: &Solver<'_, B>, anchor: &Ast, value: &Ast) -> bool {

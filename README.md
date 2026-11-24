@@ -839,6 +839,8 @@ witness_eval = true
 
 在 `[execution_limits.path_merge]` 中，符号标量统一具体化（`symbolic_scalar_resolver`）、扩展循环逐轮折叠（`loop_fold_shapes`）和历史释放（`prefix_compact`）默认开启。各项可在 TOML 中独立设为 `false`，也可通过对应 CLI 参数关闭。符号标量统一具体化允许延后区域把读长范围交给出口证明。[循环配置](specs/isarch-cli.md#分段合并候选与诊断配置) · [标量具体化配置](specs/isarch-cli.md#区域合并具体值)
 
+延后区域复用在共同前缀得到的标量候选上界。 [标量具体化配置](specs/isarch-cli.md#区域合并具体值)
+
 `partial_commit_prefix` 默认关闭。设为 `true` 并配合相应的原因类别开关，可在任意层保留已认证的子合并，从拒绝指令继续执行。[前缀固化配置](specs/isarch-cli.md#探索路径的限时与求解失败)
 
 在 `[execution_limits.path_merge]` 中，`arms_as_tasks` 缺省为 `false`，设为 `true` 可尝试并行执行区域 B 臂。`[execution_limits.path_merge.parallel]` 的 `min_arm_instructions` 缺省为 32，按区域中的 IR 指令和直接被调函数的指令数估算。设为 0 可取消指令数门槛。`arm_cost_ratio_percent` 缺省为 200。每个函数的区域入口 PC 先串行取样，预计 B 正文 CPU 大于入口与 A 导入开销的 2 倍时才尝试派发。两个门槛均设为 0 可强制尝试并行。任务规模过小或没有可用线程时，当前执行线程继续处理。

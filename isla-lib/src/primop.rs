@@ -1436,9 +1436,18 @@ pub(crate) fn proven_symbolic_i128<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Option<i128>, ExecError> {
+    proven_symbolic_i128_in_scope(sym, solver, info, false)
+}
+
+fn proven_symbolic_i128_in_scope<B: BV>(
+    sym: Sym,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+    persist: bool,
+) -> Result<Option<i128>, ExecError> {
     let Some(width) = solver.length(sym) else { return Ok(None) };
     use crate::smt::FiniteDomain;
-    let domain = solver.resolve_scalar(sym, info);
+    let domain = solver.resolve_scalar_in_scope(sym, info, persist);
     match &domain {
         FiniteDomain::Known(values) | FiniteDomain::Bounded(values) if values.len() == 1 => {
             if matches!(&domain, FiniteDomain::Bounded(_)) && !solver.region_queries_deferred() {
@@ -4962,7 +4971,12 @@ fn read_mem_byte_count<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<i128, ExecError> {
-    let value = concretize_proven_i128(value, solver, info)?;
+    let value = match value {
+        Val::Symbolic(symbol) => {
+            proven_symbolic_i128_in_scope(symbol, solver, info, true)?.map_or(Val::Symbolic(symbol), Val::I128)
+        }
+        value => value,
+    };
     if let Val::Symbolic(symbol) = value {
         // 符号内存使用非空位向量保存读数据，按字节展开后位宽须能用 u32 表示。
         return Err(ExecError::SymbolicNatural {
