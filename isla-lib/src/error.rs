@@ -58,6 +58,7 @@ impl IslaError for VoidError {
 /// 拒绝原因的统计类别，JSON 使用枚举变体名。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 pub enum ReasonCategory {
+    ProgramStop,
     Indeterminate,
     Limit,
     NeedsConcretization,
@@ -67,7 +68,8 @@ pub enum ReasonCategory {
 }
 
 impl ReasonCategory {
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 7] = [
+        Self::ProgramStop,
         Self::Indeterminate,
         Self::Limit,
         Self::NeedsConcretization,
@@ -118,6 +120,7 @@ pub(crate) use qualified_reason_enum;
 qualified_reason_enum! {
     #[derive(Clone, Debug)]
     pub enum SmtError {
+        ProgramStopped => ProgramStop,
         FiniteDomain { source_loc: SourceLoc, symbol: crate::smt::Sym, width: u32, candidates: Option<Vec<String>> } => Indeterminate,
         DeferredQuery { source_loc: SourceLoc, purpose: &'static str } => Indeterminate,
         NoSmt { reason: &'static str, source_loc: SourceLoc } => Indeterminate,
@@ -143,6 +146,7 @@ mod reason_category_tests {
             limit: None,
         };
         let cases = [
+            (SmtError::ProgramStopped, ReasonCategory::ProgramStop),
             (
                 SmtError::FiniteDomain { source_loc, symbol: crate::smt::Sym::from_u32(0), width: 8, candidates: None },
                 Indeterminate,
@@ -183,6 +187,7 @@ impl SmtError {
     pub fn reject_reason(&self) -> crate::executor::SpeculativeRejectReason {
         use crate::executor::SpeculativeRejectReason::*;
         match self {
+            Self::ProgramStopped => ProgramStopped,
             Self::FiniteDomain { .. } => UnknownFiniteDomain,
             Self::Z3Timeout(_) => Z3Timeout,
             Self::Z3ResourceExhausted(_) => Z3ResourceExhausted,
@@ -204,6 +209,7 @@ impl SmtError {
     pub fn diagnostic(&self) -> serde_json::Value {
         use serde_json::json;
         let mut details = match self {
+            Self::ProgramStopped => json!({}),
             Self::FiniteDomain { symbol, width, candidates, .. } => {
                 json!({"purpose":"symbolic_value_enumeration","symbol":symbol.as_u32(),"width":width,"candidates":candidates})
             }
@@ -226,6 +232,7 @@ impl SmtError {
 
     pub fn source_loc(&self) -> SourceLoc {
         match self {
+            Self::ProgramStopped => SourceLoc::unknown(),
             Self::Z3Timeout(Z3Timeout::Interrupted(timeout)) => timeout.source_loc(),
             Self::Z3Timeout(Z3Timeout::Native(query)) | Self::Z3ResourceExhausted(query) | Self::Z3Unknown(query) => {
                 query.source_loc
@@ -240,6 +247,7 @@ impl SmtError {
 impl PartialEq for SmtError {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
+            (Self::ProgramStopped, Self::ProgramStopped) => true,
             (
                 Self::FiniteDomain { source_loc: a, symbol: x, width: w, candidates: c },
                 Self::FiniteDomain { source_loc: b, symbol: y, width: v, candidates: d },
@@ -267,6 +275,7 @@ impl fmt::Display for SmtError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let variant = self.reason_name();
         let query = match self {
+            Self::ProgramStopped => return write!(f, "{variant}"),
             Self::FiniteDomain { source_loc, symbol, width, candidates } => {
                 return write!(
                     f,
@@ -358,6 +367,7 @@ pub enum ExecError {
     OutOfBounds(&'static str),
     MatchFailure(SourceLoc),
     Timeout,
+    ProgramStopped,
     Smt(SmtError),
     NoModel,
     Z3Error(String),
@@ -405,6 +415,7 @@ impl IslaError for ExecError {
             | NoElfEntry
             | OutOfBounds(_)
             | Timeout
+            | ProgramStopped
             | NoModel
             | Z3Error(_)
             | SolverDroppedPath
@@ -433,6 +444,7 @@ impl ExecError {
         match self {
             Self::SpeculativeReject { reason, .. } => Some(*reason),
             Self::Smt(error) | Self::Unproven(error) => Some(error.reject_reason()),
+            Self::ProgramStopped => Some(crate::executor::SpeculativeRejectReason::ProgramStopped),
             Self::Timeout => Some(crate::executor::SpeculativeRejectReason::PathTimeout),
             _ => None,
         }
@@ -507,6 +519,7 @@ impl fmt::Display for ExecError {
             NoElfEntry => write!(f, "No entry point specified"),
             OutOfBounds(func) => write!(f, "Out of bounds error in {}", func),
             MatchFailure(_) => write!(f, "Pattern match failure"),
+            ProgramStopped => fmt::Display::fmt(&crate::executor::SpeculativeRejectReason::ProgramStopped, f),
             Timeout => fmt::Display::fmt(&crate::executor::SpeculativeRejectReason::PathTimeout, f),
             Smt(error) => write!(f, "{}", error),
             NoModel => write!(f, "No SMT model found"),

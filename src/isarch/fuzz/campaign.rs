@@ -206,7 +206,8 @@ pub(super) fn run<B: BV>(
         let mut filtered = 0usize;
         let mut hardware_seconds = 0.0;
         let cancelled = |hardware: &Option<super::difftest::DifftestExecutor>| {
-            model_cancellation.as_ref().is_some_and(super::difftest::CampaignCancellation::is_requested)
+            isla_lib::executor::program_control::reason().is_some()
+                || model_cancellation.as_ref().is_some_and(super::difftest::CampaignCancellation::is_requested)
                 || hardware.as_ref().is_some_and(super::difftest::DifftestExecutor::is_cancelled)
         };
         while !cancelled(&hardware) {

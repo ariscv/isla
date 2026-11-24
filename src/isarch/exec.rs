@@ -1557,6 +1557,9 @@ pub fn solve_state_main<'ir, B: BV>(
         // encdec-guard-reject），下游 build/summary 与重放侧可见。
         let mut merged_encdec_guard_rejects: u64 = 0;
         for (batch_index, batch) in batches.iter().enumerate() {
+            if batch_index != 0 && isla_lib::executor::program_control::reason().is_some() {
+                break;
+            }
             let batch_label = batch.label.as_deref();
             log!(
                 log::SYM_EXEC,
@@ -1674,11 +1677,17 @@ pub fn solve_state_main<'ir, B: BV>(
         if trace_path.is_some() {
             shared_state.trace.dump();
         }
+        if isla_lib::executor::program_control::reason().is_some() {
+            break;
+        }
     }
 
     drop(stats_reporter);
     super::solve_summary::print_execution_stats(shared_state);
-    samples.finish(sample_options, success && sample_paths_complete);
+    samples.finish(
+        sample_options,
+        success && sample_paths_complete && isla_lib::executor::program_control::reason().is_none(),
+    );
     success
 }
 
@@ -1762,12 +1771,25 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         super::path_cache::restore_target(&loaded.manifest, target);
         let summary = loaded.filter_model_exceptions(&samples.filter_model_exceptions, shared_state);
         summary.print_model_exception_filter();
+        if samples.fuzz.is_none()
+            && samples.path_cache.recompute_facts
+            && isla_lib::executor::program_control::reason().is_none()
+        {
+            let started = std::time::Instant::now();
+            super::path_cache::recompute_facts(&loaded.paths, &loaded.facts, &mut loaded.timing);
+            cache.stages.record(
+                "fast_facts",
+                started.elapsed().as_secs_f64(),
+                serde_json::json!({"recomputed":true,"paths":loaded.paths.len()}),
+            );
+        }
         let paths = std::mem::take(&mut loaded.paths);
         cache.summary = summary.json();
         cache.loaded = Some(loaded);
-        if let Some(session) = &samples.fuzz {
+        let proceed = isla_lib::executor::program_control::reason().is_none();
+        if let Some(session) = samples.fuzz.as_ref().filter(|_| proceed) {
             super::fuzz::run(session, paths, shared_state, target, num_threads, 0.0, cache, execution_limits);
-        } else if let Some(checker) = &samples.resident {
+        } else if let Some(checker) = samples.resident.as_ref().filter(|_| proceed) {
             super::resident::run(
                 paths,
                 checker,
@@ -1785,6 +1807,9 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             }
             let context = Context::new(config);
             for path in paths {
+                if isla_lib::executor::program_control::reason().is_some() {
+                    break;
+                }
                 let mut solver = Solver::from_checkpoint(&context, path.checkpoint.clone());
                 super::samples::export_cached_path(
                     &path,
@@ -1928,7 +1953,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
 
     let mut path_limits = execution_limits.clone();
     path_limits.collect_merge_definitions |= samples.path_cache.write.is_some();
-    let task_state = TaskState::new().with_execution_limits(path_limits);
+    let task_state = TaskState::new().with_execution_limits(path_limits).with_program_control();
 
     // ExecuteAs 是同一机器指令的中间返回。new_call 保留该路径的寄存器、内存、
     // 路径身份、累计执行时间及分支预算；checkpoint 保留前段约束。
@@ -1940,6 +1965,11 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     let target = &*target;
     let collector: &ScopedCollector<'ir, '_, B, Mutex<SolveCollectorState>> =
         &|thread, task_id, mut exec_result, shared_state, mut solver, collected| {
+            if matches!(exec_result, Err((ExecError::ProgramStopped, _))) {
+                let mut state = collected.lock().expect("solve collector mutex poisoned");
+                state.summary.record_program_stop(1);
+                return;
+            }
             let path_profile = profile_paths.then(|| {
                 let frame = match &exec_result {
                     Ok((_, frame)) | Err((_, frame)) => frame,
@@ -3069,6 +3099,14 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         Err(_) => panic!("{} 执行结束后 result 收集器仍有共享引用", instruction_name),
     };
     let mut state = result_mutex.into_inner().expect("solve collector mutex poisoned");
+    if let Some(reason) = isla_lib::executor::program_control::reason() {
+        state.summary.record_program_stop(task_state.stopped_paths());
+        state.summary.stop_reason = Some(reason.into());
+        eprintln!(
+            "[PROGRAM_STOP] clause={instruction_name} reason={reason} unfinished_paths={}",
+            state.summary.unfinished_paths
+        );
+    }
     let quota = state.case_quota;
     if state.model_query_timeouts > 0 {
         log!(
@@ -3115,7 +3153,8 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     let invalid_exploration = state.summary.solver_path_drops.count > 0;
     state.summary.print_model_exception_filter();
     cache.summary = state.summary.json();
-    if let Some(session) = samples.fuzz.as_ref().filter(|_| !invalid_exploration) {
+    let start_consumers = !invalid_exploration && isla_lib::executor::program_control::reason().is_none();
+    if let Some(session) = samples.fuzz.as_ref().filter(|_| start_consumers) {
         super::fuzz::run(
             session,
             resident_paths.into_inner().unwrap(),
@@ -3131,7 +3170,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         paths.sort_by_key(|p| p.signature);
         let mut timing = super::path_cache::Timing::default();
         let facts_started = std::time::Instant::now();
-        let facts = if samples.path_cache.dag_only || invalid_exploration {
+        let facts = if samples.path_cache.dag_only || invalid_exploration || state.summary.stop_reason.is_some() {
             // 三个 false 都只表示没有充分证明，恢复后的完整 judge 仍走原求解。
             // 这避免 DAG 写出之前为可选快档重放每条路径，不改变可接受输入集合。
             paths
@@ -3157,7 +3196,10 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             &mut timing,
             &cache.stages,
         );
-    } else if let Some(checker) = samples.resident.as_ref().filter(|_| !invalid_exploration) {
+        if let Some(reason) = isla_lib::executor::program_control::reason() {
+            state.summary.stop_reason = Some(reason.into());
+        }
+    } else if let Some(checker) = samples.resident.as_ref().filter(|_| start_consumers) {
         super::resident::run(
             resident_paths.into_inner().unwrap(),
             checker,

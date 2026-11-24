@@ -491,8 +491,9 @@ impl Token {
 }
 impl<'ctx, B: BV> Solver<'ctx, B> {
     /// 不使用旧模型的有效标记：每次重新核验真实断言及全部缓冲条件。
-    pub(super) fn witness_fast_sat(&mut self, assumptions: &[Z3_ast]) -> bool {
-        if !fast_enabled() || self.transaction_depth() == 0 {
+    pub(super) fn witness_fast_sat(&mut self, assumptions: &[Z3_ast], entry_branch: bool) -> bool {
+        // 顶层分支也能使用更早的见证；与臂内一样，命中前核验完整前提。
+        if !entry_branch && (!fast_enabled() || self.transaction_depth() == 0) {
             return false;
         }
         let metadata = crate::executor::stats::region_progress::query_metadata();

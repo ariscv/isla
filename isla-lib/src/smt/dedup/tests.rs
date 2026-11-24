@@ -670,3 +670,29 @@ fn atomic_jump_pair_skips_rewriting_open_boolean_and_preserves_branch_result() {
     assert_eq!(solver.check_sat_with_for_branch(&no, info, false), None);
     assert_eq!(AST_SIMPLIFY_CALLS.get(), 0);
 }
+
+#[test]
+fn entry_branch_retained_models_check_both_polarities_and_new_assertions() {
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut s = Solver::<B64>::new(&ctx);
+    let info = SourceLoc::unknown();
+    let x = s.declare_const(Ty::Bool, info);
+    let y = s.declare_const(Ty::Bool, info);
+    let pos = Var(x);
+    let neg = Not(Box::new(Var(x)));
+    for side in [&pos, &neg] {
+        assert_eq!(s.check_sat_with(&And(Box::new(side.clone()), Box::new(Var(y))), info), Sat);
+    }
+    s.add(Def::Assert(Var(y)));
+    reset_path_smt_stats();
+    for (side, expected) in [(&pos, true), (&neg, false)] {
+        assert_eq!(s.check_sat_with_for_branch(side, info, false), Some(Sat));
+        assert!(matches!(Model::new(&s).get_exp(&pos), Ok(ModelVal::Exp(Bool(v))) if v == expected));
+        assert!(matches!(Model::new(&s).get_exp(&Var(y)), Ok(ModelVal::Exp(Bool(true)))));
+    }
+    assert_eq!(path_smt_stats().solver_checks, 0, "旧见证满足完整前提时入口不再重复原生求解");
+    s.add(Def::Assert(neg.clone()));
+    assert_eq!(s.check_sat_with_for_branch(&pos, info, false), Some(Unsat), "旧真侧模型已经违反新断言");
+    assert_eq!(s.check_sat_with_for_branch(&neg, info, false), Some(Sat));
+}

@@ -139,17 +139,7 @@ pub fn run<B: BV>(
     let facts = if let Some(loaded) = &cache.loaded {
         assert_eq!(paths.iter().map(|p| p.signature).collect::<Vec<_>>(), loaded.path_signatures, "缓存路径顺序变化");
         if cache.options.recompute_facts {
-            let recomputed = crate::isarch::path_cache::analyze(&paths, &mut cache_timing);
-            let verified =
-                recomputed.iter().cloned().map(Into::into).collect::<Vec<isla_lib::executor::path_cache::Facts>>();
-            // false 表示未证明，允许读回后取得更强证明；缓存声称已证明的条件仍须逐项核对。
-            assert_eq!(loaded.facts.len(), verified.len(), "缓存静态事实条目数变化");
-            for (saved, current) in loaded.facts.iter().zip(&verified) {
-                assert!(!saved.guard_unique || current.guard_unique, "缓存守卫唯一性证明重新分析不一致");
-                assert!(!saved.post_unique || current.post_unique, "缓存后态唯一性证明重新分析不一致");
-                assert!(!saved.simple_pre || current.simple_pre, "缓存前态形状证明重新分析不一致");
-            }
-            recomputed
+            crate::isarch::path_cache::recompute_facts(&paths, &loaded.facts, &mut cache_timing)
         } else {
             loaded.facts.iter().cloned().map(Into::into).collect::<Vec<FastFacts>>()
         }

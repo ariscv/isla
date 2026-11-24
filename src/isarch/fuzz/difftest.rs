@@ -34,7 +34,7 @@ pub struct Config {
 }
 
 pub(super) fn cancelled_requested() -> bool {
-    CANCELLED.load(Ordering::SeqCst)
+    CANCELLED.load(Ordering::SeqCst) || isla_lib::executor::program_control::reason().is_some()
 }
 
 pub(super) struct CampaignCancellation(Vec<(i32, libc::sigaction)>);
@@ -47,6 +47,10 @@ impl CampaignCancellation {
     pub(super) fn new() -> Self {
         assert!(!ACTIVE.swap(true, Ordering::SeqCst), "一个进程只能管理一场 campaign 的取消信号");
         CANCELLED.store(false, Ordering::SeqCst);
+        // solve-state 已持有进程信号；共用首次停止原因，不覆盖其处理器。
+        if isla_lib::executor::program_control::active() {
+            return Self(Vec::new());
+        }
         let mut handlers = Vec::new();
         unsafe {
             for signal in [libc::SIGINT, libc::SIGTERM] {
@@ -163,7 +167,7 @@ fn run(config: &Config, index: usize, sample: &Sample, stop: &AtomicBool) -> Val
         .stderr(log)
         .process_group(0);
     let failure = |bucket: &str, reason: String| json!({"sample_id":sample.sample_id,"bucket":bucket,"reason":reason,"agree":false,"isla_cause":Value::Null,"xs_cause":Value::Null,"nemu_cause":Value::Null,"isla_consistent_side":"unobserved","phase":"worker","mismatch":{"filtered":false,"known_rule":Value::Null,"group_key":Value::Null},"elf_sha256":Value::Null});
-    if stop.load(Ordering::SeqCst) || CANCELLED.load(Ordering::SeqCst) {
+    if stop.load(Ordering::SeqCst) || cancelled_requested() {
         return failure("cancelled", "批次已取消".into());
     }
     let parent_pid = std::process::id() as libc::pid_t;
@@ -181,7 +185,7 @@ fn run(config: &Config, index: usize, sample: &Sample, stop: &AtomicBool) -> Val
     let mut child = command.spawn().expect("无法启动 Python worker");
     let started = Instant::now();
     let result = loop {
-        if stop.load(Ordering::SeqCst) || CANCELLED.load(Ordering::SeqCst) {
+        if stop.load(Ordering::SeqCst) || cancelled_requested() {
             stop_process(&mut child);
             break failure("cancelled", "批次已取消，已清理进程树".into());
         }
@@ -305,7 +309,7 @@ a=p.parse_args();d=pathlib.Path(a.output);s=json.loads(pathlib.Path(a.input).rea
 if i==99:
  signal.signal(signal.SIGTERM,signal.SIG_IGN)
  c=subprocess.Popen([sys.executable,'-c','import time;time.sleep(300)'],start_new_session=True)
- (d/'child.pid').write_text(str(c.pid));time.sleep(300)
+ (d/'child.tmp').write_text(str(c.pid));(d/'child.tmp').rename(d/'child.pid');time.sleep(300)
 else:
  time.sleep((3-i)*.02)
  (d/'result.json').write_text(json.dumps(dict(sample_id=i,agree=True)))

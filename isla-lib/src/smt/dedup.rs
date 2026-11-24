@@ -76,6 +76,8 @@ impl<B: BV> Solver<'_, B> {
         Some(if speculative {
             // 分支可行性必须完整判定；仅复用复杂查询策略，不复用可选常量证明预算。
             self.check_sat_with_strategy(exp, info, query::QueryPurpose::BranchFeasibility)
+        } else if self.transaction_depth() == 0 {
+            self.check_sat_with_strategy(exp, info, query::QueryPurpose::EntryBranchFeasibility)
         } else {
             self.check_sat_with(exp, info)
         })

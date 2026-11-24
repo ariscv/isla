@@ -59,6 +59,7 @@ speculative_reject_reasons! {
     ExitUnsat => SemanticPolicy,
     SymbolicAssertion => SemanticPolicy,
     PathTimeout => Limit,
+    ProgramStopped => ProgramStop,
     NoJoin => Unsupported,
     HasBackEdge => Unsupported,
     ExceptionCheck => Unsupported,
@@ -186,6 +187,7 @@ impl SpeculativeRejectReason {
             Self::ExitUnsat
             | Self::SymbolicAssertion
             | Self::PathTimeout
+            | Self::ProgramStopped
             | Self::StepBudget
             | Self::FragmentLimit
             | Self::StackEscaped
@@ -339,6 +341,7 @@ mod tests {
             ExitUnsat,
             SymbolicAssertion,
             PathTimeout,
+            ProgramStopped,
             StackEscaped,
             StepBudget,
             FragmentLimit,
@@ -409,6 +412,7 @@ mod tests {
         use ReasonCategory::*;
         use SpeculativeRejectReason::*;
         let expected: &[(ReasonCategory, &[SpeculativeRejectReason])] = &[
+            (ProgramStop, &[ProgramStopped]),
             (Indeterminate, &[UnknownFiniteDomain, UnknownZ3, UnknownDeferredMode]),
             (
                 Limit,

@@ -100,6 +100,10 @@ impl Drop for StopOnPanic<'_> {
 }
 
 fn check<B: BV>(task: &Task<B>, solver: &Solver<B>, queries: Option<&mut ArmErrorQueries<'_, B>>) -> Option<SmtResult> {
+    let _checks = program_control::CheckScope::enter(task.state.stopped_paths.is_some());
+    if task.state.stopping() {
+        return Some(SmtResult::Error(SmtError::ProgramStopped));
+    }
     let Some((_, Event::Fork(_, guard, _, location))) = task.fork_cond.as_ref() else {
         unreachable!("失败前沿必须有分叉元数据")
     };
