@@ -100,42 +100,64 @@ fn region_consumer_mixed_integer_and_strict_operand_read() {
 
 #[test]
 fn region_consumer_known_domain_joins_native_widths() {
+    use crate::primop_util::{length_bits, smt_i128, smt_value};
+    use smtlib::Exp::*;
+
+    #[derive(Debug)]
+    enum Consumer {
+        Power,
+        Length,
+        Export,
+    }
+
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     for strategy in strategies() {
         for no_smt in [false, true] {
-            let width = Exp::Id(test_name(1800));
-            let consumers = [
-                (
-                    Instr::PrimopBinary(
-                        Loc::Id(RETURN),
-                        primop::binary_primops()["pow_int"],
-                        Exp::I128(-1),
-                        width.clone(),
-                        info(),
+            for consumer in [Consumer::Power, Consumer::Length, Consumer::Export] {
+                let width = Exp::Id(test_name(1800));
+                let zero_bits = test_name(1801);
+                let (mut code, expected_paths) = match consumer {
+                    Consumer::Power => (
+                        vec![Instr::PrimopBinary(
+                            Loc::Id(RETURN),
+                            primop::binary_primops()["pow_int"],
+                            Exp::I128(-1),
+                            width,
+                            info(),
+                        )],
+                        1,
                     ),
-                    1,
-                ),
-                (Instr::PrimopUnary(Loc::Id(RETURN), primop::unary_primops()["zeros"], width, info()), 1),
-            ];
-            for (consumer, expected) in consumers {
+                    Consumer::Length => (
+                        vec![
+                            Instr::Decl(zero_bits, Ty::AnyBits, info()),
+                            Instr::PrimopUnary(Loc::Id(zero_bits), primop::unary_primops()["zeros"], width, info()),
+                            Instr::PrimopUnary(
+                                Loc::Id(RETURN),
+                                primop::unary_primops()["length"],
+                                Exp::Id(zero_bits),
+                                info(),
+                            ),
+                        ],
+                        1,
+                    ),
+                    Consumer::Export => {
+                        (vec![Instr::PrimopUnary(Loc::Id(RETURN), primop::unary_primops()["zeros"], width, info())], 4)
+                    }
+                };
+                code.push(Instr::End);
                 let mut config = Config::new();
                 config.solver_options.no_smt = no_smt;
                 config.solver_options.finite_domain_enumeration = true;
                 let context = Context::new(config);
-                let mut solver = Solver::new(&context);
+                let mut solver = Solver::<B64>::new(&context);
                 let sym = solver.declare_bitvector(64, info());
-                use smtlib::Exp::*;
-                solver.assert(
-                    [32, 39, 48, 57]
-                        .into_iter()
-                        .map(|width| Eq(Box::new(Var(sym)), Box::new(smtlib::bits64(width, 64))))
-                        .reduce(|a, b| Or(Box::new(a), Box::new(b)))
-                        .unwrap(),
-                );
+                let widths = [32, 39, 48, 57];
+                let has_width = |width| Eq(Box::new(Var(sym)), Box::new(smtlib::bits64(width, 64)));
+                solver.assert(widths.into_iter().map(has_width).reduce(|a, b| Or(Box::new(a), Box::new(b))).unwrap());
                 assert!(
                     matches!(solver.finite_domain(sym), crate::smt::FiniteDomain::Known(values) if values.len() == 4)
                 );
-                let mut frame = make_frame(vec![consumer, Instr::End]);
+                let mut frame = make_frame(code);
                 frame.vars_mut().insert(test_name(1800), UVal::Init(Val::Symbolic(sym)));
                 let state = TaskState::new().with_execution_limits(limits(strategy));
                 let shared = empty_shared_state();
@@ -165,16 +187,48 @@ fn region_consumer_known_domain_joins_native_widths() {
                     )
                     .unwrap();
                     let Run::Finished(value) = result else { panic!("应正常完成") };
-                    assert!(
-                        frame.region_merge_records().iter().any(|record| record.branch_pc == 0),
-                        "{strategy:?}, no_smt={no_smt}, expected={expected}, value={value:?}",
-                    );
-                    outputs.push(value);
+                    if matches!(consumer, Consumer::Power | Consumer::Export) {
+                        assert!(frame.region_merge_records().iter().any(|record| record.branch_pc == 0));
+                    }
+                    assert!(!value.contains_sym_bits(), "顶层返回不能携带变长值");
+                    outputs.push((value, checkpoint(&mut solver)));
                 }
-                assert_eq!(outputs.len(), expected, "{strategy:?}, no_smt={no_smt}");
+                assert_eq!(outputs.len(), expected_paths, "{strategy:?}, no_smt={no_smt}, {consumer:?}");
                 if no_smt {
                     assert_eq!(crate::smt::test_query_count() - query_start, 0);
                 }
+
+                // 独立求解器复核每条返回路径的守卫与结果，执行阶段仍保持零查询。
+                let checking_context = Context::new(Config::new());
+                let mut covered = Vec::new();
+                for (value, point) in outputs {
+                    let mut solver = Solver::from_checkpoint(&checking_context, point);
+                    let mut feasible = false;
+                    for width in widths {
+                        let guard = has_width(width);
+                        if solver.check_sat_with(&guard, info()).is_unsat().unwrap() {
+                            continue;
+                        }
+                        feasible = true;
+                        covered.push(width);
+                        let expected = match consumer {
+                            Consumer::Power => smt_i128(if width % 2 == 0 { 1 } else { -1 }),
+                            Consumer::Length => smt_i128(i128::from(width)),
+                            Consumer::Export => {
+                                assert_eq!(length_bits(&value, &mut solver, info()).unwrap(), width as u32);
+                                smtlib::bits64(0, width as u32)
+                            }
+                        };
+                        let mismatch = And(
+                            Box::new(guard),
+                            Box::new(Neq(Box::new(smt_value(&value, info()).unwrap()), Box::new(expected))),
+                        );
+                        assert!(solver.check_sat_with(&mismatch, info()).is_unsat().unwrap());
+                    }
+                    assert!(feasible, "每条返回路径都须覆盖至少一个可行输入");
+                }
+                covered.sort_unstable();
+                assert_eq!(covered, widths, "每种输入宽度都须且只须出现一次");
             }
         }
     }
@@ -656,6 +710,25 @@ fn region_sym_bits_concretizes_at_boundaries() {
         assert!(!path.value.contains_sym_bits());
     }
 
+    let resets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = Arc::clone(&resets);
+    let reset: Reset<B64> = Arc::new(move |_, _, solver| {
+        count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let symbol = solver.declare_const(smtlib::Ty::Bool, info());
+        let UVal::Init(value) = make(symbol, solver, 16) else { unreachable!() };
+        Ok(value)
+    });
+    let paths = run(
+        vec![
+            Instr::PrimopReset(Loc::Id(reg), reset, primop::Effect::Pure, info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), info()),
+            Instr::End,
+        ],
+        16,
+    );
+    assert_eq!(paths.len(), 2);
+    assert_eq!(resets.load(std::sync::atomic::Ordering::Relaxed), 1, "重试写入时不能再次执行回调");
+
     let [selected_ctor, other_ctor] = [1803, 1804].map(test_name);
     let (paths, _, _) = paths_with_solver_state(
         vec![
@@ -680,7 +753,10 @@ fn region_sym_bits_concretizes_at_boundaries() {
             let UVal::Init(payload) = make(symbol, solver, -1) else { unreachable!() };
             frame.vars_mut().insert(
                 source,
-                UVal::Init(Val::SymbolicCtor(tag, [(selected_ctor, payload), (other_ctor, Val::Unit)].into())),
+                UVal::Init(Val::SymbolicCtor(
+                    tag,
+                    [(selected_ctor, payload), (other_ctor, Val::Unit)].into_iter().collect(),
+                )),
             );
         },
         false,

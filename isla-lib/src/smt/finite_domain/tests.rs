@@ -1101,6 +1101,11 @@ fn scalar_resolver_consumers_share_guarded_length() {
             };
             let actual = call(Val::Symbolic(width)).unwrap();
             let expected = call(Val::I128(9)).unwrap();
+            if let Val::Bits(expected_bits) = expected {
+                assert_eq!(PROJECT_TRANSLATIONS.get(), 0, "{name} 的长度已由本臂唯一确定");
+                s.assert_test_bitvector(&actual, expected_bits);
+                continue;
+            }
             if name == "undefined_bitvector" {
                 assert_eq!(crate::primop_util::length_bits(&actual, s, loc).unwrap(), 9);
             } else if let Val::Symbolic(sym) = actual {

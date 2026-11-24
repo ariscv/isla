@@ -949,7 +949,7 @@ const REGISTER_ASSIGNMENT_VALUE: usize = 0;
 
 fn assign_with_accessor<'ir, B: BV>(
     loc: &Loc<Name>,
-    v: Val<B>,
+    mut v: Val<B>,
     local_state: &mut LocalState<'ir, B>,
     shared_state: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
@@ -958,23 +958,21 @@ fn assign_with_accessor<'ir, B: BV>(
 ) -> Result<(), ExecError> {
     match loc {
         Loc::Id(id) => {
-            region_merge::record_write(
-                local_state,
-                *id,
-                !local_state.vars.contains_key(id) && !local_state.lets.contains_key(id),
-            )?;
+            let register = !local_state.vars.contains_key(id) && !local_state.lets.contains_key(id);
+            if register
+                && (v.contains_sym_bits() || local_state.expression_values.contains_key(&REGISTER_ASSIGNMENT_VALUE))
+            {
+                // 使用同一次求值的长度重试，尤其是直接以原语结果写寄存器时。
+                v = local_state.expression_values.entry(REGISTER_ASSIGNMENT_VALUE).or_insert(v).clone();
+                primop::sym_bits::concretize(&mut v, solver, info)?;
+                local_state.expression_values.remove(&REGISTER_ASSIGNMENT_VALUE);
+            }
+            region_merge::record_write(local_state, *id, register)?;
             if local_state.vars.contains_key(id) {
                 local_state.vars.insert(*id, UVal::Init(v));
             } else if local_state.lets.contains_key(id) {
                 local_state.lets.insert(*id, UVal::Init(v));
             } else {
-                let mut v = v;
-                // 使用同一次求值的长度重试，尤其是直接以原语结果写寄存器时。
-                if v.contains_sym_bits() || local_state.expression_values.contains_key(&REGISTER_ASSIGNMENT_VALUE) {
-                    v = local_state.expression_values.entry(REGISTER_ASSIGNMENT_VALUE).or_insert(v).clone();
-                    primop::sym_bits::concretize(&mut v, solver, info)?;
-                    local_state.expression_values.remove(&REGISTER_ASSIGNMENT_VALUE);
-                }
                 if !shared_state.untraced_registers.contains(id) && local_state.speculative_access.is_none() {
                     solver.add_event(Event::WriteReg(*id, accessor.to_vec(), v.clone()))
                 }
@@ -2881,6 +2879,19 @@ fn run_loop_inner<'ir, 'task, B: BV>(
                         }
                     }
                 }
+                frame.pc += 1;
+            }
+
+            Instr::PrimopUnary(loc, .., info)
+            | Instr::PrimopBinary(loc, .., info)
+            | Instr::PrimopVariadic(loc, .., info)
+            | Instr::PrimopReset(loc, .., info)
+                if frame.local_state.expression_values.contains_key(&REGISTER_ASSIGNMENT_VALUE) =>
+            {
+                // 原语已经完成，包括可能的副作用。只重试写入寄存器。
+                let value = frame.local_state.expression_values[&REGISTER_ASSIGNMENT_VALUE].clone();
+                assign(tid, loc, value, cost::make_mut(&mut frame.local_state), shared_state, solver, *info)?;
+                frame.pending_retry_operand = None;
                 frame.pc += 1;
             }
 
@@ -12197,12 +12208,13 @@ mod tests {
                     ),
                     Instr::End,
                 ];
-                let results = run_all_with_bindings(
+                let results = run_all_observed(
                     instrs,
                     retry_test_limits(enabled),
-                    empty_shared_state(),
+                    &empty_shared_state(),
                     RegisterBindings::new(),
                     HashMap::default(),
+                    verify_constant_bit_result,
                 );
                 let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err().map(ToString::to_string)).collect();
                 eprintln!("位向量转整数后动态切片：合流={enabled}，错误={errors:?}");
@@ -13697,6 +13709,35 @@ fn zcaller(za, zb) {
         regs: RegisterBindings<'ir, B64>,
         lets: Bindings<'ir, B64>,
     ) -> Vec<Result<Run<B64>, ExecError>> {
+        run_all_observed(instrs, limits, shared_state, regs, lets, |result, _| result)
+    }
+
+    // 在完成路径上核对符号数据只有一个值；位宽仍由执行器出口确定。
+    fn verify_constant_bit_result(
+        result: Result<Run<B64>, ExecError>,
+        solver: &mut Solver<B64>,
+    ) -> Result<Run<B64>, ExecError> {
+        match result {
+            Ok(Run::Finished(value @ Val::Symbolic(_))) => {
+                assert!(solver.check_sat(info()).is_sat()?);
+                let Val::Bits(bits) = Model::new(solver).get_val(&value)? else {
+                    panic!("路径结果须为定长位向量");
+                };
+                solver.assert_test_bitvector(&value, bits);
+                Ok(Run::Finished(Val::Bits(bits)))
+            }
+            other => other,
+        }
+    }
+
+    fn run_all_observed<'ir, T>(
+        instrs: Vec<Instr<Name, B64>>,
+        limits: ExecutionLimits,
+        shared_state: &SharedState<'ir, B64>,
+        regs: RegisterBindings<'ir, B64>,
+        lets: Bindings<'ir, B64>,
+        mut observe: impl FnMut(Result<Run<B64>, ExecError>, &mut Solver<B64>) -> T,
+    ) -> Vec<T> {
         let frame = make_frame_with_bindings(instrs, &regs, &lets);
         let task_state = TaskState::new().with_execution_limits(limits);
         let queue = Worker::new_lifo();
@@ -13714,7 +13755,7 @@ fn zcaller(za, zb) {
                 solver.add(def);
             }
             let mut task_frame = unfreeze_frame(&task.frame);
-            results.push(run_loop(
+            let result = run_loop(
                 0,
                 task.id,
                 &mut task.fraction,
@@ -13725,7 +13766,8 @@ fn zcaller(za, zb) {
                 task.state,
                 shared_state,
                 &mut solver,
-            ));
+            );
+            results.push(observe(result, &mut solver));
         }
 
         results
@@ -14278,6 +14320,8 @@ fn zcaller(za, zb) {
                 let value = match reason {
                     SymbolicJump | LimitSampling => cond,
                     Monomorphize | ZeroInstruction => bits,
+                    // 有界长度由原生位向量表示。无结构上界的长度仍须重试。
+                    UnaryRetry => solver.declare_bitvector(128, info()),
                     _ => index,
                 };
                 frame.vars_mut().insert(input, UVal::Init(Val::Symbolic(value)));
@@ -16798,12 +16842,13 @@ fn zmemreadfork(zu) {
                 ),
                 _ => unreachable!(),
             };
-            let results = run_all_with_bindings(
+            let results = run_all_observed(
                 vec![consume, Instr::End],
                 ExecutionLimits::default().with_max_forks_per_path(3),
-                shared,
+                &shared,
                 RegisterBindings::new(),
                 lets,
+                verify_constant_bit_result,
             );
             let mut widths = Vec::new();
             let mut out_of_bounds = 0;
@@ -17297,21 +17342,30 @@ fn zmemreadfork(zu) {
                 Instr::Copy(Loc::Id(bits), Exp::Bits(B64::new(16, 64)), info()),
                 Instr::PrimopUnary(Loc::Id(length), unsigned, Exp::Id(bits), info()),
                 Instr::PrimopUnary(Loc::Id(buffer), zeros, Exp::Id(length), info()),
-                Instr::Copy(Loc::Id(RETURN), Exp::Unit, info()),
+                Instr::Copy(Loc::Id(RETURN), Exp::Id(buffer), info()),
                 Instr::End,
             ];
-            let results = run_all_with_bindings(
+            let results = run_all_observed(
                 instrs,
                 retry_test_limits(enabled),
-                empty_shared_state(),
+                &empty_shared_state(),
                 RegisterBindings::new(),
                 HashMap::default(),
+                verify_constant_bit_result,
             );
             let finished = results.iter().filter(|r| matches!(r, Ok(Run::Finished(_)))).count();
             let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err().map(ToString::to_string)).collect();
             eprintln!("第六轮位向量动态长度：合并={enabled}，完成={finished}，错误={errors:?}");
             assert!(errors.is_empty(), "由位向量转换的合法动态长度路径不应在合并后失败");
-            assert_eq!(finished, 2, "必须完成两个不同长度候选");
+            let mut values: Vec<_> = results
+                .into_iter()
+                .map(|result| match result.unwrap() {
+                    Run::Finished(Val::Bits(bits)) => (bits.len(), bits.lower_u64()),
+                    _ => panic!("动态零向量必须在路径出口收束"),
+                })
+                .collect();
+            values.sort_unstable();
+            assert_eq!(values, [(8, 0), (16, 0)]);
         }
     }
 

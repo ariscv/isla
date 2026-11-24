@@ -5697,6 +5697,46 @@ pub(crate) fn test_query_count() -> usize {
     z3_timeout::test_query_count()
 }
 
+#[cfg(test)]
+impl<B: BV> Solver<'_, B> {
+    /// 在独立求解器中核对活动路径的位宽和数据，包括事务内的守卫。
+    pub(crate) fn assert_test_bitvector(&self, value: &Val<B>, expected: B) {
+        use smtlib::Exp::{Bits, Neq, Or, Var};
+
+        let info = SourceLoc::unknown();
+        let mut config = Config::new();
+        config.solver_options.no_smt = false;
+        let context = Context::new(config);
+        let mut verification = Solver::from_checkpoint(&context, self.checkpoint_snapshot());
+        assert!(verification.check_sat(info).is_sat().unwrap(), "要验证的路径必须可达");
+        let unequal = |actual, expected| Neq(Box::new(actual), Box::new(expected));
+        let width = expected.len();
+        let different = match value {
+            Val::Bits(actual) => {
+                assert_eq!(*actual, expected);
+                return;
+            }
+            Val::Symbolic(data) => {
+                assert_eq!(verification.length(*data), Some(width));
+                unequal(Var(*data), Bits(expected.to_vec()))
+            }
+            Val::SymBits { data, len, cap } => {
+                assert_eq!(verification.length(*data), Some(*cap));
+                assert_eq!(verification.length(*len), Some(128));
+                assert!(width <= *cap);
+                let mut padded = expected.to_vec();
+                padded.resize(*cap as usize, false);
+                Or(
+                    Box::new(unequal(Var(*len), smtlib::bits64(u64::from(width), 128))),
+                    Box::new(unequal(Var(*data), Bits(padded))),
+                )
+            }
+            _ => panic!("预期位向量，实际 {value:?}"),
+        };
+        assert!(verification.check_sat_with(&different, info).is_unsat().unwrap(), "{value:?} 与 {expected:?} 不同");
+    }
+}
+
 // 只在显式内存采样时遍历；不创建 checkpoint、不翻译表达式、不查询 Z3。
 impl<B: BV> Checkpoint<B> {
     pub fn estimated_bytes(&self, seen: &mut HashSet<usize>) -> usize {

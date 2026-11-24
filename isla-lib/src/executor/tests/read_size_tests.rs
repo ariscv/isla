@@ -178,7 +178,7 @@ fn finite_domain_shifted_memory_width_reaches_slice() {
     use super::symbolic_finite_domain_tests::run_length_consumer;
     use Formula::{Bvmul, Bvsub, Extract, Not, Var};
 
-    let (results, queries) = run_length_consumer(true, true, |solver, address, variable| {
+    let (results, queries) = run_length_consumer(true, true, B64::ones, |solver, address, variable| {
         let low = solver.define_bitvector(Extract(2, 0, Box::new(Var(address))), info());
         solver.assert(Not(Box::new(equal(low, 0, 3))));
         let unary = primop::unary_primops();
