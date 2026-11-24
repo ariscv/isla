@@ -288,6 +288,12 @@ pub enum Val<B> {
     String(String),
     /// 布尔守卫选取备选值。不同位宽的备选各自保留原生位宽。
     Guarded(Sym, Box<(Val<B>, Val<B>)>),
+    /// 数据的 SMT 宽度为 cap，长度是 128 位整数，长度以上的位均为零。
+    SymBits {
+        data: Sym,
+        len: Sym,
+        cap: u32,
+    },
     Unit,
     Vector(Vec<Val<B>>),
     List(Vec<Val<B>>),
@@ -314,6 +320,7 @@ impl<B: BV> Val<B> {
         use Val::*;
         match self {
             Symbolic(symbol) => Symbolic(remap.get(*symbol)),
+            SymBits { data, len, cap } => SymBits { data: remap.get(*data), len: remap.get(*len), cap: *cap },
             I64(value) => I64(*value),
             I128(value) => I128(*value),
             Bool(value) => Bool(*value),
@@ -383,6 +390,10 @@ impl<B: BV> Val<B> {
                 values.0.collect_symbolic_variables(vars);
                 values.1.collect_symbolic_variables(vars);
             }
+            SymBits { data, len, .. } => {
+                vars.insert(*data);
+                vars.insert(*len);
+            }
             Symbolic(v) => {
                 vars.insert(*v);
             }
@@ -440,6 +451,7 @@ impl<B: BV> Val<B> {
         let symtab = &shared_state.symtab;
         match self {
             Symbolic(v) => write!(buf, "v{}", v),
+            SymBits { data, len, cap } => write!(buf, "(sym-bits v{} v{} {})", data, len, cap),
             I64(n) => write!(buf, "(_ bv{} 64)", n),
             I128(n) => write!(buf, "(_ bv{} 128)", n),
             Bool(b) => write!(buf, "{}", b),

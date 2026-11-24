@@ -78,6 +78,7 @@ fn isla_main() -> i32 {
         isla_lib::smt::configure_solver_options(isla_lib::smt::SolverOptions {
             incremental_choice_dag: config.path_merge.incremental_choice_dag,
             coi_query_slicing: config.path_merge.coi_query_slicing,
+            sym_bits: options.sym_bits,
             ..Default::default()
         });
     }

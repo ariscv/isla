@@ -2912,6 +2912,7 @@ obligation_dump_dir = "obligations"
                 max_merge_depth: None,
                 symbolic_scalar_resolver: true,
                 width_closed_continuation: false,
+                sym_bits: false,
                 defer_range_proofs: true,
                 defer_ctor_checks: true,
                 prune_constant_branches: true,

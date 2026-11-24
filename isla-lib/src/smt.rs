@@ -926,6 +926,7 @@ pub struct SolverOptions {
     pub incremental_choice_dag: bool,
     pub coi_query_slicing: bool,
     pub finite_domain_ground_eval: bool,
+    pub sym_bits: bool,
     pub bv_rewrite: rewrite::BvRewrite,
 }
 
@@ -941,6 +942,7 @@ impl Default for SolverOptions {
             incremental_choice_dag: false,
             coi_query_slicing: false,
             finite_domain_ground_eval: crate::config::PathMergeConfig::default().finite_domain_ground_eval,
+            sym_bits: false,
             bv_rewrite: Default::default(),
         }
     }
@@ -2381,6 +2383,21 @@ impl<'ctx, B: BV> Model<'ctx, B> {
         let complete_model = self.complete_model;
         self.complete_model = true;
         let result = (|| match var {
+            SymBits { data, len, cap } => {
+                let ModelVal::Exp(Exp::Bits(length)) = self.get_var(*len)? else {
+                    panic!("符号长度必须是 128 位整数");
+                };
+                let length = crate::primop::i128_from_model_bits(&length).expect("长度必须能表示为整数");
+                let length = usize::try_from(length).expect("长度必须非负");
+                let bits = match self.get_var(*data)? {
+                    ModelVal::Exp(Exp::Bits(bits)) => bits,
+                    ModelVal::Exp(Exp::Bits64(bits)) => bits.to_vec(),
+                    _ => panic!("符号长度位向量的承载数据必须是位向量"),
+                };
+                assert_eq!(bits.len(), *cap as usize);
+                assert!(length <= bits.len() && bits[length..].iter().all(|bit| !bit));
+                Ok(Val::from_bits_slice(&bits[..length]))
+            }
             Guarded(guard, values) => {
                 let selected = self.select_guarded(*guard, values)?;
                 self.get_val(selected)
@@ -2897,6 +2914,10 @@ unsafe fn new_z3_solver(ctx: Z3_context, tactic: &CStr, seed: Option<(&CStr, u32
 }
 
 impl<'ctx, B: BV> Solver<'ctx, B> {
+    pub(crate) fn sym_bits_enabled(&self) -> bool {
+        self.ctx.solver_options.sym_bits
+    }
+
     /// 同线程辅助求解可共享AST管理器；各Solver的断言仍相互独立。
     pub fn context(&self) -> &'ctx Context {
         self.ctx

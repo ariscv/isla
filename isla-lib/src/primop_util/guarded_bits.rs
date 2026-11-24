@@ -8,7 +8,7 @@ pub(crate) fn is_bits<B: BV>(value: &Val<B>, solver: &Solver<B>) -> bool {
 
 pub(super) fn is_bits_with<B: BV>(value: &Val<B>, solver: &dyn MergeTerms<B>) -> bool {
     match value {
-        Val::Bits(_) | Val::MixedBits(_) => true,
+        Val::Bits(_) | Val::MixedBits(_) | Val::SymBits { .. } => true,
         Val::Symbolic(sym) => solver.is_sail_bitvector(*sym),
         Val::Guarded(_, values) => is_bits_with(&values.0, solver) && is_bits_with(&values.1, solver),
         _ => false,

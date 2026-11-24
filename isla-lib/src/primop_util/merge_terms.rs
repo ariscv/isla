@@ -4,6 +4,7 @@ use crate::smt::{EnumId, Event};
 
 pub(crate) trait MergeTerms<B: BV> {
     fn sort(&self, symbol: Sym) -> Option<smtlib::Ty>;
+    fn sym_bits_enabled(&self) -> bool;
     fn is_sail_bitvector(&self, symbol: Sym) -> bool;
     fn define(&mut self, exp: Exp<Sym>, bits: bool, info: SourceLoc) -> Sym;
     fn declare(&mut self, ty: smtlib::Ty, bits: bool, info: SourceLoc) -> Sym;
@@ -22,6 +23,11 @@ pub(crate) trait MergeTerms<B: BV> {
             Bool(_) | Not(_) | Or(_, _) | And(_, _) | Eq(_, _) => Some(Ty::Bool),
             Enum(member) => Some(Ty::Enum(member.enum_id)),
             Ite(_, yes, _) => self.expression_sort(yes),
+            Extract(high, low, _) => Some(Ty::BitVec(high - low + 1)),
+            ZeroExtend(extension, inner) => match self.expression_sort(inner)? {
+                Ty::BitVec(width) => Some(Ty::BitVec(width.checked_add(*extension)?)),
+                _ => None,
+            },
             Concat(left, right) => match (self.expression_sort(left)?, self.expression_sort(right)?) {
                 (Ty::BitVec(left), Ty::BitVec(right)) => Some(Ty::BitVec(left + right)),
                 _ => None,
@@ -55,6 +61,10 @@ pub(crate) trait MergeTerms<B: BV> {
 }
 
 impl<B: BV> MergeTerms<B> for Solver<'_, B> {
+    fn sym_bits_enabled(&self) -> bool {
+        self.sym_bits_enabled()
+    }
+
     fn sort(&self, symbol: Sym) -> Option<smtlib::Ty> {
         self.scalar_sort(symbol)
     }

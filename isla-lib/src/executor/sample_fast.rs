@@ -109,7 +109,7 @@ impl Dependencies {
 
 fn simple<B: BV>(value: &Val<B>) -> bool {
     match value {
-        Val::Guarded(..) | Val::SymbolicCtor(..) | Val::Poison => false,
+        Val::Guarded(..) | Val::SymBits { .. } | Val::SymbolicCtor(..) | Val::Poison => false,
         Val::Struct(fields) => fields.values().all(simple),
         Val::Ctor(_, value) => simple(value),
         Val::Vector(values) | Val::List(values) => values.iter().all(simple),

@@ -100,6 +100,7 @@ pub fn smt_sbits<B: BV, V>(bv: B) -> Exp<V> {
 pub fn length_bits<B: BV>(bits: &Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<u32, ExecError> {
     match bits {
         Val::Bits(bits) => Ok(bits.len()),
+        Val::SymBits { len, cap, .. } => crate::primop::sym_bits::concrete_length(*len, *cap, solver, info),
         Val::Symbolic(bits) => match solver.length(*bits) {
             Some(len) => Ok(len),
             None => Err(ExecError::Type(format!("length_bits (solver cannot determine length) {:?}", &bits), info)),
@@ -970,6 +971,16 @@ fn merge_val_inner_mode<B: BV, const CONCRETE: bool>(
     }
     let a_width = merge_bit_width(val_a, solver, info)?;
     let b_width = merge_bit_width(val_b, solver, info)?;
+    let dynamic = crate::primop::sym_bits::is_dynamic(val_a) || crate::primop::sym_bits::is_dynamic(val_b);
+    if solver.sym_bits_enabled()
+        && (dynamic
+            || (CONCRETE
+                && (a_width != b_width || matches!(val_a, Val::Guarded(..)) || matches!(val_b, Val::Guarded(..)))))
+        && guarded_bits::is_bits_with(val_a, solver)
+        && guarded_bits::is_bits_with(val_b, solver)
+    {
+        return crate::primop::sym_bits::merge(cond, val_a, val_b, solver, info);
+    }
     if CONCRETE
         && (a_width != b_width || matches!(val_a, Val::Guarded(..)) || matches!(val_b, Val::Guarded(..)))
         && guarded_bits::is_bits_with(val_a, solver)

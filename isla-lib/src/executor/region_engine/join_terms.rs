@@ -70,6 +70,10 @@ impl<'a, 'ctx, B: BV> Terms<'a, 'ctx, B> {
 }
 
 impl<B: BV> MergeTerms<B> for Terms<'_, '_, B> {
+    fn sym_bits_enabled(&self) -> bool {
+        self.solver.sym_bits_enabled()
+    }
+
     fn sort(&self, symbol: Sym) -> Option<Ty> {
         match self.index(symbol) {
             Some(index) => self.symbols[index].0.clone(),

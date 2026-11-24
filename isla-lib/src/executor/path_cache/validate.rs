@@ -456,6 +456,11 @@ impl Validator<'_> {
                 self.value(&values.0);
                 self.value(&values.1);
             }
+            Val::SymBits { data, len, cap } => {
+                assert!(*cap > 0, "符号长度位向量的容量必须为正");
+                self.constant(*data);
+                self.constant(*len);
+            }
             Val::Symbolic(s) => self.constant(*s),
             Val::MixedBits(parts) => {
                 for p in parts {
