@@ -238,13 +238,30 @@ impl<'ctx> PrefixIndex<'ctx> {
         start: usize,
         publishing: bool,
     ) {
+        self.rewind(
+            segment,
+            start,
+            publishing,
+            events.iter().enumerate().skip(start).rev().map(|(offset, event)| (segment, offset, event)),
+        );
+    }
+
+    pub(in crate::smt) fn rewind<'a, B: 'a>(
+        &mut self,
+        segment: usize,
+        start: usize,
+        publishing: bool,
+        reversed: impl Iterator<Item = (usize, usize, &'a Event<B>)>,
+    ) {
         let first = Position(segment, start);
         self.assertions.truncate(self.assertions.partition_point(|position| *position < first));
         if self.incremental_choices {
             self.choice_assertions.truncate(self.assertions.len());
         }
         self.bool_symbols.truncate(self.bool_symbols.partition_point(|(position, _)| *position < first));
-        for (index, event) in events.iter().enumerate().skip(start).rev() {
+        let mut reversed = reversed.peekable();
+        let has_suffix = reversed.peek().is_some();
+        for (segment, index, event) in reversed {
             if let Some((sym, _)) = binding(event) {
                 if self.incremental_choices {
                     self.choice_binding_revision = self.next_choice_epoch();
@@ -264,7 +281,7 @@ impl<'ctx> PrefixIndex<'ctx> {
                 }
             }
         }
-        if start < events.len() {
+        if has_suffix {
             self.arm_facts.get_mut().truncate_assertions(self.assertions.len());
             let preserve = if self.incremental_choices { self.assertions.len() } else { 0 };
             self.clear_candidate_caches(preserve);

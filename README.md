@@ -827,7 +827,9 @@ witness_eval = true
 
 `partial_commit_prefix` 默认关闭。设为 `true` 并配合相应的原因类别开关，可在任意层保留已认证的子合并，从拒绝指令继续执行。[前缀固化配置](specs/isarch-cli.md#探索路径的限时与求解失败)
 
-在 `[execution_limits.path_merge]` 中，`arms_as_tasks = true` 允许把区域 B 臂和根提交的错误叶认证交给空闲线程，缺省关闭。`[execution_limits.path_merge.parallel]` 的 `min_arm_instructions` 缺省为 32，按区域中的 IR 指令和直接被调函数的指令数估算。设为 0 可取消这一调度门槛。`min_error_leaves` 缺省为 64，设置根错误叶认证开始并行的最小叶数。任务规模过小或没有可用线程时，当前执行线程继续处理。
+在 `[execution_limits.path_merge]` 中，`arms_as_tasks` 缺省为 `false`，设为 `true` 可尝试并行执行区域 B 臂。`[execution_limits.path_merge.parallel]` 的 `min_arm_instructions` 缺省为 32，按区域中的 IR 指令和直接被调函数的指令数估算。设为 0 可取消指令数门槛。`arm_cost_ratio_percent` 缺省为 200。每个函数的区域入口 PC 先串行取样，预计 B 正文 CPU 大于入口与 A 导入开销的 2 倍时才尝试派发。两个门槛均设为 0 可强制尝试并行。任务规模过小或没有可用线程时，当前执行线程继续处理。
+
+`[execution_limits.path_merge.parallel].min_error_leaves` 设置根错误叶并行认证的最小叶数。缺省为 `isize::MAX`（64 位平台为 `9223372036854775807`），实际走串行认证。两轮本机 LOAD（`-T 64`、600 秒）中，P-G 开启后用串行认证，相对关闭 P-G 的 CPU 比值由 1.19–1.20 降至 1.00–1.02，`translateDataAddr@6` 成功根分别增加 1 个和 2 个。开启 `arms_as_tasks` 后，可显式设 `min_error_leaves = 64`，在求解配置支持且有空闲线程时对达到阈值的根并行认证。
 
 纯包装调用后的定长汇合默认关闭。使用 `--width-closed-continuation`，或在 `[execution_limits.path_merge]` 设置 `width_closed_continuation = true`。执行器保留各臂位宽，在变长局部值用完或收束为定长后汇合。指令需要访问寄存器、内存，或生成模型事件时，延续在该指令前结束。
 

@@ -17,7 +17,7 @@ mod consumer_continuation;
 mod delivery;
 mod exception_continuation;
 mod loop_fold;
-mod parallel_arms;
+pub(super) mod parallel_arms;
 mod parallel_errors;
 pub(super) mod prefix_commit;
 
@@ -1403,14 +1403,17 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     };
     ready.extend([target, fallthrough].into_iter().zip(guards).enumerate());
     let live_forks = stats::merge_timing::LiveForks::start();
-    let initial_state = arm_task_entry.as_ref().map(|_| base.local_state.clone());
+    let (cost, remote) =
+        arm_task_entry.filter(|_| catcher.is_none()).map_or((None, None), |entry| (entry.cost, entry.remote));
+    let initial_state = remote.as_ref().map(|_| base.local_state.clone());
     let scheduler = sink.arm_scheduler();
-    let job = arm_task_entry.filter(|_| catcher.is_none()).map(|(slot, checkpoint)| {
+    let job = remote.map(|(slot, checkpoint)| {
         let mut remote_base = base.clone();
         // 切点由本地组织者认证。远端若无法完整到达，交回本地执行并使用原切点规则。
         remote_base.region_execution.as_mut().unwrap().verified_prefix = None;
         remote_base.path_timing = super::path_timing::PathTiming::from_snapshot(base.path_timing.fork_snapshot());
         let job = region_arm::ArmJob {
+            cost: cost.clone(),
             checkpoint,
             options: solver.arm_context_options(),
             base: remote_base,
@@ -1440,6 +1443,7 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                         tid,
                         stop,
                         shared,
+                        cost.as_deref(),
                     )? {
                         parallel_arms::Received::Dead => continue,
                         parallel_arms::Received::Arrived(arm) => {
@@ -1473,7 +1477,12 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 let bound = if side == 0 { &values[..1] } else { &values[1..] };
                 solver.set_operand_bound(*sym, info, bound.to_vec());
             }
-            if solver.with_logical_arm(owner, |solver| {
+            let sample = cost.as_ref().filter(|_| side == 1).map(|_| super::arm_cost::ArmCpu::start());
+            #[cfg(test)]
+            if sample.is_some() {
+                region_arm::observe(state, "serial_body_sample").expect("采样观察点不可失败");
+            }
+            let live = solver.with_logical_arm(owner, |solver| {
                 advance_region_arm(
                     tid,
                     task_id,
@@ -1489,7 +1498,13 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                     tx,
                     info,
                 )
-            })? {
+            })?;
+            if let (Some(cost), Some(sample)) = (&cost, sample) {
+                if arm.region_arrivals.is_empty() && !prefix_commit::is_cut(&arm) {
+                    super::arm_cost::ArmCost::sample(&cost.body, sample.elapsed());
+                }
+            }
+            if live {
                 if arm.region_arrivals.is_empty() {
                     promote_initials(&mut base, &arm, solver);
                     arms[side].push(arm);

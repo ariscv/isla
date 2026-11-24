@@ -86,6 +86,7 @@ impl<B> TaskInterrupt<B> {
 }
 
 pub struct TaskState<B> {
+    pub(super) arm_costs: std::sync::Arc<super::arm_cost::ArmCosts>,
     #[cfg(test)]
     pub(super) arm_test_hook: Option<std::sync::Arc<dyn Fn(&str) -> Result<(), crate::error::ExecError> + Send + Sync>>,
     pub(super) validation: bool,
@@ -132,6 +133,7 @@ impl<B> TaskState<B> {
     pub fn new() -> Self {
         super::merge_record::initialize();
         TaskState {
+            arm_costs: Default::default(),
             #[cfg(test)]
             arm_test_hook: None,
             validation: false,

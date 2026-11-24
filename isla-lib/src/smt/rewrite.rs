@@ -76,15 +76,18 @@ extern "C" {
 }
 
 impl<'ctx> Ast<'ctx> {
-    pub(super) fn rewrite_kind(&self, kind: DeclKind) -> bool {
+    fn rewrite_decl_kind(&self) -> Option<u32> {
         unsafe {
-            Z3_get_ast_kind(self.ctx.z3_ctx, self.z3_ast) == AstKind::App
-                && decl_kind_raw(
-                    self.ctx.z3_ctx,
-                    Z3_get_app_decl(self.ctx.z3_ctx, Z3_to_app(self.ctx.z3_ctx, self.z3_ast)),
-                ) == kind as u32
+            let ctx = self.ctx.z3_ctx;
+            // 这些改写只匹配运算符。Z3_is_app 也接纳数值，随后的声明种类检查会排除它们。
+            Z3_is_app(ctx, self.z3_ast).then(|| decl_kind_raw(ctx, Z3_get_app_decl(ctx, Z3_to_app(ctx, self.z3_ast))))
         }
     }
+
+    pub(super) fn rewrite_kind(&self, kind: DeclKind) -> bool {
+        self.rewrite_decl_kind() == Some(kind as u32)
+    }
+
     fn rewrite_args(&self) -> Vec<Self> {
         unsafe {
             let app = Z3_to_app(self.ctx.z3_ctx, self.z3_ast);
@@ -141,7 +144,8 @@ pub(super) fn apply(ast: Ast<'_>, rules: BvRewrite) -> Ast<'_> {
     if !rules.enabled() {
         return ast;
     }
-    if rules.0 & 1 != 0 && ast.rewrite_kind(DeclKind::EQ) {
+    let kind = ast.rewrite_decl_kind();
+    if rules.0 & 1 != 0 && kind == Some(DeclKind::EQ as u32) {
         let args = ast.rewrite_args();
         let sort = unsafe { Z3_get_sort_kind(ast.ctx.z3_ctx, Z3_get_sort(ast.ctx.z3_ctx, args[0].z3_ast)) };
         // 只分配有限数据相等判断，避免任意位向量 ITE 比较的交叉乘积。
@@ -152,7 +156,7 @@ pub(super) fn apply(ast: Ast<'_>, rules: BvRewrite) -> Ast<'_> {
             return result;
         }
     }
-    if rules.0 & 2 != 0 && ast.rewrite_kind(DeclKind::BNOT) {
+    if rules.0 & 2 != 0 && kind == Some(DeclKind::BNOT as u32) {
         let inner = ast.rewrite_args().remove(0);
         if inner.rewrite_kind(DeclKind::BOR) {
             let terms = inner.rewrite_args();
@@ -174,7 +178,7 @@ pub(super) fn apply(ast: Ast<'_>, rules: BvRewrite) -> Ast<'_> {
             }
         }
     }
-    if rules.0 & 4 != 0 && ast.rewrite_kind(DeclKind::ULEQ) {
+    if rules.0 & 4 != 0 && kind == Some(DeclKind::ULEQ as u32) {
         let args = ast.rewrite_args();
         let value = &args[0];
         let constant = &args[1];

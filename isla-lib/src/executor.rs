@@ -1367,7 +1367,9 @@ impl<'a, 'ir, 'task, B: BV> ForkSink<'ir, 'task, B> for SingleForkSink<'a, 'ir, 
 
 struct MultiForkSink<'scope, 'env, 'ir, 'task, 'collector, B: BV, R> {
     runtime: Arc<MultiRuntime<'ir, 'task, 'collector, B, R>>,
-    arms: Option<region_arm::ArmQueue<'ir, B>>,
+    arms: Option<Arc<region_arm::ArmQueue<'ir, B>>>,
+    state: &'task TaskState<B>,
+    stop: Option<&'task StopConditions>,
     scope: &'scope thread::Scope<'scope, 'env>,
 }
 
@@ -1383,11 +1385,11 @@ where
     }
 
     fn arm_scheduler(&self) -> Option<region_arm::Scheduler<'_, 'ir, B>> {
-        Some(region_arm::Scheduler { threads: self, queue: self.arms.as_ref()? })
+        Some(region_arm::Scheduler { threads: self, queue: self.arms.as_deref()? })
     }
 }
 
-impl<'scope, 'env, 'ir: 'scope, 'task: 'scope, 'collector: 'scope, B: BV, R: Send + Sync> region_arm::ArmThreads
+impl<'scope, 'env, 'ir: 'scope, 'task: 'scope, 'collector: 'scope, B: BV, R: Send + Sync> region_arm::ArmThreads<'ir, B>
     for MultiForkSink<'scope, 'env, 'ir, 'task, 'collector, B, R>
 {
     fn reserve(&self) -> Option<region_arm::ThreadSlot<'_>> {
@@ -1399,7 +1401,29 @@ impl<'scope, 'env, 'ir: 'scope, 'task: 'scope, 'collector: 'scope, B: BV, R: Sen
             })),
         })
     }
+
+    fn enqueue_reserved(
+        &self,
+        work: region_arm::QueuedArm<'ir, B>,
+        slot: &mut region_arm::ThreadSlot<'_>,
+    ) -> Option<region_arm::QueuedArm<'ir, B>> {
+        let workers = self.runtime.workers.as_ref().expect("并行臂必须由执行线程池领取");
+        work.cell.worker_enqueued();
+        workers.push(WorkerJob::Arm(WorkerArm {
+            work,
+            state: self.state,
+            stop: self.stop,
+            queue: Arc::clone(self.arms.as_ref().unwrap()),
+        }));
+        // 队列接管已预留的名额，由执行线程在交付或取消后释放。
+        drop(slot.release.take().expect("执行名额只能移交一次"));
+        None
+    }
 }
+
+mod arm_cost;
+mod arm_workers;
+use arm_workers::{WorkerArm, WorkerJob, WorkerQueue};
 
 struct MultiRuntime<'ir, 'task, 'collector, B: BV, R> {
     limit: usize,
@@ -1409,6 +1433,7 @@ struct MultiRuntime<'ir, 'task, 'collector, B: BV, R> {
     next_tid: AtomicUsize,
     refill_owner: AtomicBool,
     queued_tasks: Mutex<VecDeque<Task<'ir, 'task, B>>>,
+    workers: Option<WorkerQueue<'ir, 'task, B>>,
     finished_mu: Mutex<()>,
     finished_cv: Condvar,
     shared_state: &'collector SharedState<'ir, B>,
@@ -1455,6 +1480,10 @@ impl<'ir, 'task, 'collector, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'
         'task: 'scope,
         'collector: 'scope,
     {
+        if let Some(workers) = &self.workers {
+            workers.push(WorkerJob::Task(task));
+            return;
+        }
         let tid = self.next_tid.fetch_add(1, Ordering::Relaxed);
         let runtime = Arc::clone(self);
         scope.spawn(move || {
@@ -1492,8 +1521,9 @@ impl<'ir, 'task, 'collector, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'
             .execution_limits
             .as_ref()
             .is_some_and(ExecutionLimits::can_schedule_region_arm)
-            .then(region_arm::ArmQueue::new);
-        let fork_sink = MultiForkSink { runtime: Arc::clone(&self), scope, arms };
+            .then(|| Arc::new(region_arm::ArmQueue::new()));
+        let fork_sink =
+            MultiForkSink { runtime: Arc::clone(&self), scope, arms, state: task.state, stop: task.stop_conditions };
         let result = run(
             tid,
             task.id,
@@ -4017,6 +4047,10 @@ pub fn start_multi<'ir, 'collector, B: BV, R>(
     }
 
     thread::scope(|scope| {
+        let use_pool = num_threads > 1
+            && tasks
+                .iter()
+                .any(|task| task.state.execution_limits.as_ref().is_some_and(ExecutionLimits::can_schedule_region_arm));
         let runtime = Arc::new(MultiRuntime {
             limit: num_threads,
             timeout,
@@ -4025,6 +4059,7 @@ pub fn start_multi<'ir, 'collector, B: BV, R>(
             next_tid: AtomicUsize::new(0),
             refill_owner: AtomicBool::new(false),
             queued_tasks: Mutex::new(VecDeque::new()),
+            workers: use_pool.then(|| WorkerQueue::new(num_threads)),
             finished_mu: Mutex::new(()),
             finished_cv: Condvar::new(),
             shared_state,
@@ -4032,6 +4067,14 @@ pub fn start_multi<'ir, 'collector, B: BV, R>(
             collector,
         });
 
+        let mut workers = Vec::new();
+        if use_pool {
+            for _ in 0..num_threads {
+                let runtime = Arc::clone(&runtime);
+                let tid = runtime.next_tid.fetch_add(1, Ordering::Relaxed);
+                workers.push(scope.spawn(move || runtime.worker_loop(scope, tid)));
+            }
+        }
         for task in tasks {
             runtime.submit(scope, task);
         }
@@ -4039,6 +4082,15 @@ pub fn start_multi<'ir, 'collector, B: BV, R>(
         runtime.try_refill_threads(scope);
         runtime.wait_until_finished();
         debug_assert_eq!(runtime.active_threads.load(Ordering::Acquire), 0);
+        if let Some(queue) = &runtime.workers {
+            queue.close();
+            for worker in workers {
+                worker.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            }
+            if let Some(panic) = queue.panic.lock().unwrap().take() {
+                std::panic::resume_unwind(panic);
+            }
+        }
     })
 }
 
