@@ -88,6 +88,30 @@ pub(crate) struct ArmErrorQueries<'ctx, B> {
 }
 
 impl<'ctx, B: BV> Solver<'ctx, B> {
+    /// 只对可增量回放的叶启动私有 Context。慢查询文件编号继续由单线程按序分配。
+    pub(crate) fn arm_error_worker_config(&self) -> Option<impl Fn() -> Config + 'static> {
+        if !self.validates_candidates()
+            || SMT_CONFIG.get().unwrap().tactic != Tactic::Default
+            || dump::dumps_slow_queries()
+        {
+            return None;
+        }
+        let (options, validation) = self.arm_context_options();
+        let timeout = self.ctx.native_timeout;
+        let rlimit = self.ctx.rlimit;
+        Some(move || {
+            let mut config = Config::new();
+            (config.solver_options, config.validation) = (options, validation);
+            if let Some(timeout) = timeout {
+                config.set_param_value("timeout", &timeout.as_millis().to_string());
+            }
+            if let Some(rlimit) = rlimit {
+                config.set_param_value("rlimit", &rlimit.to_string());
+            }
+            config
+        })
+    }
+
     pub(crate) fn arm_error_queries(&self, count: usize) -> Option<ArmErrorQueries<'ctx, B>> {
         let config = SMT_CONFIG.get().unwrap();
         (count > 1 && self.validates_candidates() && config.tactic == Tactic::Default).then(|| ArmErrorQueries {

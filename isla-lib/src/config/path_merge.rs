@@ -86,6 +86,21 @@ impl Default for PathMergeSolverConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PathMergeParallelConfig {
+    /// 区域内的 IR 指令数加直接被调函数的大小，0 关闭门槛。
+    pub min_arm_instructions: usize,
+    /// 根区域至少累积多少错误叶才向空闲线程分发认证。
+    pub min_error_leaves: std::num::NonZeroUsize,
+}
+
+impl Default for PathMergeParallelConfig {
+    fn default() -> Self {
+        Self { min_arm_instructions: 32, min_error_leaves: std::num::NonZeroUsize::new(64).unwrap() }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PathMergeConfig {
@@ -95,8 +110,9 @@ pub struct PathMergeConfig {
     pub ordered_events: Option<bool>,
     /// 省略时沿用入口缺省值。完整符号 DAG 缺省开启。
     pub enabled: Option<bool>,
-    /// 最外层两臂区域可作为任务交付；首版缺省关闭。
+    /// 区域臂和根错误叶认证可使用空闲线程，缺省关闭。
     pub arms_as_tasks: bool,
+    pub parallel: PathMergeParallelConfig,
     /// 区域推演嵌套上限；缺省或-1不限。
     pub max_merge_depth: Option<i64>,
     /// 区域因局部汇合失败可保留的片段上限；缺省或 -1 不限。
@@ -153,6 +169,7 @@ impl Default for PathMergeConfig {
             ordered_events: None,
             enabled: None,
             arms_as_tasks: false,
+            parallel: PathMergeParallelConfig::default(),
             max_merge_depth: None,
             max_fragments: None,
             symbolic_scalar_resolver: false,

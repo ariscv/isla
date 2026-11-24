@@ -787,6 +787,10 @@ pub(super) struct SlowQueryToken {
     resources: QueryResources,
 }
 
+pub(super) fn dumps_slow_queries() -> bool {
+    SLOW_QUERY_DUMP.get().is_some()
+}
+
 impl<'ctx, B: BV> Solver<'ctx, B> {
     pub(super) fn slow_query_begin(&self, solver: Z3_solver) -> Option<SlowQueryToken> {
         let config = SLOW_QUERY_DUMP.get()?;

@@ -126,7 +126,44 @@ pub(crate) fn probe_query_event(event: impl FnOnce() -> serde_json::Value) {
     }
 }
 
+/// 并行错误叶先带回调用记录，由发布者按叶顺序计数和输出。
+#[derive(Clone, Copy)]
+pub(crate) struct ArmErrorSmtCall {
+    operation: SmtOperation,
+    source: SourceLoc,
+    wall: Duration,
+    timed_out: bool,
+}
+
+thread_local! {
+    static ARM_ERROR_CALL: Cell<Option<Option<ArmErrorSmtCall>>> = const { Cell::new(None) };
+}
+
+impl ArmErrorSmtCall {
+    pub(crate) fn capture<T>(check: impl FnOnce() -> T) -> (T, Option<Self>) {
+        assert!(ARM_ERROR_CALL.replace(Some(None)).is_none(), "错误叶只可登记一次调用");
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                ARM_ERROR_CALL.set(None);
+            }
+        }
+        let _reset = Reset;
+        let result = check();
+        (result, ARM_ERROR_CALL.take().unwrap())
+    }
+
+    pub(crate) fn publish(self) {
+        record_path_smt_call(self.operation, self.source, self.wall, self.timed_out);
+    }
+}
+
 fn record_path_smt_call(operation: SmtOperation, source_loc: SourceLoc, wall: Duration, timed_out: bool) {
+    if let Some(previous) = ARM_ERROR_CALL.get() {
+        assert!(previous.is_none(), "单个错误叶只能触发一次增量 SMT 查询");
+        ARM_ERROR_CALL.set(Some(Some(ArmErrorSmtCall { operation, source: source_loc, wall, timed_out })));
+        return;
+    }
     if matches!(operation, SmtOperation::CheckSat | SmtOperation::CheckSatAssuming) {
         THREAD_SMT_CHECKS.with(|checks| checks.set(checks.get() + 1));
         probe_query_event(

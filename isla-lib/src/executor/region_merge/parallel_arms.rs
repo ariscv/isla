@@ -9,21 +9,6 @@ use crate::smt::{ArmSuffixEvent, SymRemap};
 pub(super) use region_arm::ArmCell;
 pub(super) type Entry<'a, B> = (Option<ThreadSlot<'a>>, Checkpoint<B>);
 
-pub(super) struct ScheduledErrors<'a, 'ir, 'task, B: BV> {
-    pub errors: &'a ArmErrorSink<'ir, 'task, B>,
-    pub scheduler: Option<Scheduler<'a, 'ir, B>>,
-}
-
-impl<'ir, 'task, B: BV> ForkSink<'ir, 'task, B> for ScheduledErrors<'_, 'ir, 'task, B> {
-    fn submit(&self, task: Task<'ir, 'task, B>) {
-        self.errors.submit(task);
-    }
-
-    fn arm_scheduler(&self) -> Option<Scheduler<'_, 'ir, B>> {
-        self.scheduler
-    }
-}
-
 /// B 只执行能在私有帧和事务中隔离的指令。按实际路径检查，允许被调函数内的循环和递归。
 pub(super) fn transferable_instruction<B: BV>(frame: &LocalFrame<B>, shared: &SharedState<B>) -> bool {
     let effect_ok = |effect| {
@@ -64,9 +49,11 @@ pub(super) fn entry<'a, 'ir: 'a, 'task, B: BV>(
     frame: &LocalFrame<'ir, B>,
     state: &TaskState<B>,
     region: &Region,
+    shared: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
 ) -> Option<Entry<'a, B>> {
-    if !state.execution_limits.as_ref().is_some_and(ExecutionLimits::can_schedule_region_arm)
+    let limits = state.execution_limits.as_ref()?;
+    if !limits.can_schedule_region_arm()
         || !region_arm::transferable_entry(frame)
         || solver.transaction_invalid()
         || (solver.transaction_depth() != 0
@@ -78,6 +65,20 @@ pub(super) fn entry<'a, 'ir: 'a, 'task, B: BV>(
         return None;
     }
     let scheduler = sink.arm_scheduler()?;
+    let minimum = limits.parallel.min_arm_instructions;
+    let mut estimated = region.nodes.len();
+    if estimated < minimum
+        && !region.nodes.iter().any(|pc| {
+            if let Instr::Call(_, _, name, ..) = &frame.instrs[*pc] {
+                if let Some((_, _, body)) = shared.functions.get(name) {
+                    estimated = estimated.saturating_add(body.len());
+                }
+            }
+            estimated >= minimum
+        })
+    {
+        return None;
+    }
     let slot = scheduler.threads.reserve();
     if slot.is_none() && !scheduler.queue.has_helper() {
         region_arm::observe(state, "no_slot").expect("名额观察点不可失败");

@@ -2338,7 +2338,11 @@ fn run_loop_inner<'ir, 'task, B: BV>(
             return Ok(Run::Suspended);
         }
         *instruction = region_merge::prefix_commit::Instruction::start(frame, solver);
-        let fork_sink: &dyn ForkSink<'ir, 'task, B> = instruction.as_ref().map_or(fork_sink, |saved| &saved.errors);
+        let scheduled_errors = instruction
+            .as_ref()
+            .map(|saved| region_merge::ScheduledErrors { errors: &saved.errors, scheduler: fork_sink.arm_scheduler() });
+        let fork_sink: &dyn ForkSink<'ir, 'task, B> =
+            scheduled_errors.as_ref().map_or(fork_sink, |errors| errors as &dyn ForkSink<'ir, 'task, B>);
         if frame.pc < frame.instrs.len() {
             if stats::merge_diagnostics::enabled() && frame.region_execution.is_some() {
                 stats::merge_diagnostics::record_current_site(frame.function_name, frame.pc, &shared_state.symtab);

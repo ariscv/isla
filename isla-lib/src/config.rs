@@ -1557,7 +1557,10 @@ pub mod region_options;
 pub use region_options::RegionOptions;
 pub mod path_merge;
 pub use path_merge::PathFailureAction as SolverOnUnknown;
-pub use path_merge::{PathFailureAction, PathMergeConfig, PathMergeDiagnostics, PathMergeRegionConfig, SolverConfig};
+pub use path_merge::{
+    PathFailureAction, PathMergeConfig, PathMergeDiagnostics, PathMergeParallelConfig, PathMergeRegionConfig,
+    SolverConfig,
+};
 
 /// 路径合并执行策略；递归是兼容默认值。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]

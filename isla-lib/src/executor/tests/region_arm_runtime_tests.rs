@@ -22,6 +22,8 @@ enum Body {
     Nested,
     NestedAssert,
     ThreeLevels,
+    ThreeLevelsAssert,
+    Large,
     OrderedReads,
     Loop,
     ErrorLeaf,
@@ -35,10 +37,24 @@ fn diamond_case(
     body: Body,
     timeout: Option<u64>,
 ) -> (Vec<Observation>, serde_json::Value) {
+    diamond_case_with_gate(workers, enabled, hook, body, timeout, false)
+}
+
+fn diamond_case_with_gate(
+    workers: usize,
+    enabled: bool,
+    hook: Option<Hook>,
+    body: Body,
+    timeout: Option<u64>,
+    default_gate: bool,
+) -> (Vec<Observation>, serde_json::Value) {
     let mut shared = empty_shared_state();
     shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
     let mut limits = ExecutionLimits::default().with_path_merging(true);
     limits.arms_as_tasks = enabled;
+    if !default_gate {
+        limits.parallel.min_arm_instructions = 0;
+    }
     limits.ordered_events = body == Body::OrderedReads;
     limits.region_loop_analysis = body == Body::Loop;
     limits.region_global_state = body == Body::Loop;
@@ -56,8 +72,25 @@ fn diamond_case(
     let b = if body != Body::Inline {
         let counter = shared.symtab.intern("zscan_index");
         let set = |value| Instr::Copy(Loc::Id(RETURN), value, info());
+        let scratch = test_name(9016);
+        let not_flag = || Exp::Call(Op::Not, vec![Exp::Id(flag)]);
+        let assume = || Instr::PrimopUnary(Loc::Id(scratch), primop::assume::<B64>, not_flag(), info());
+        let assertion = || {
+            Instr::PrimopBinary(
+                Loc::Id(scratch),
+                primop::optimistic_assert::<B64>,
+                not_flag(),
+                Exp::String("nested assertion".into()),
+                info(),
+            )
+        };
         let code = match body {
             Body::Call => vec![set(b_result), Instr::End],
+            Body::Large => {
+                let mut code = vec![set(b_result); 96];
+                code.push(Instr::End);
+                code
+            }
             Body::Nested | Body::ErrorLeaf | Body::ErrorInB => vec![
                 Instr::Jump(Exp::Id(input), 3, info()),
                 if body == Body::ErrorInB {
@@ -74,15 +107,31 @@ fn diamond_case(
                 Instr::End,
             ],
             Body::NestedAssert => vec![
-                Instr::Jump(Exp::Id(input), 4, info()),
-                Instr::PrimopUnary(
-                    Loc::Id(RETURN),
-                    primop::assume::<B64>,
-                    Exp::Call(Op::Not, vec![Exp::Id(flag)]),
-                    info(),
-                ),
+                Instr::Jump(Exp::Id(input), 5, info()),
+                assume(),
+                assertion(),
                 set(Exp::Id(flag)),
-                Instr::Goto(5),
+                Instr::Goto(8),
+                assume(),
+                assertion(),
+                set(b_result),
+                Instr::End,
+            ],
+            Body::ThreeLevelsAssert => vec![
+                Instr::Jump(Exp::Id(input), 12, info()),
+                assume(),
+                Instr::Jump(Exp::Id(third), 7, info()),
+                assume(),
+                assertion(),
+                set(Exp::Id(flag)),
+                Instr::Goto(10),
+                assume(),
+                assertion(),
+                set(Exp::Id(third)),
+                assertion(),
+                Instr::Goto(15),
+                assume(),
+                assertion(),
                 set(b_result),
                 Instr::End,
             ],
@@ -119,8 +168,11 @@ fn diamond_case(
             Body::Inline => unreachable!(),
         };
         let helper = shared.symtab.intern("zlinear_arm");
-        shared.functions.insert(helper, (vec![(flag, &Ty::Bool)], &Ty::Bool, Box::leak(code.into_boxed_slice())));
-        Instr::Call(Loc::Id(RETURN), false, helper, vec![Exp::Id(flag)], info())
+        shared.functions.insert(
+            helper,
+            (vec![(flag, &Ty::Bool), (scratch, &Ty::Unit)], &Ty::Bool, Box::leak(code.into_boxed_slice())),
+        );
+        Instr::Call(Loc::Id(RETURN), false, helper, vec![Exp::Id(flag), Exp::Unit], info())
     } else {
         Instr::Copy(Loc::Id(RETURN), b_result, info())
     };
@@ -131,7 +183,8 @@ fn diamond_case(
         Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::Not, vec![Exp::Id(input)]), info()),
         Instr::End,
     ]);
-    let third_sym = (body == Body::ThreeLevels).then(|| solver.declare_const(smtlib::Ty::Bool, info()));
+    let third_sym = matches!(body, Body::ThreeLevels | Body::ThreeLevelsAssert)
+        .then(|| solver.declare_const(smtlib::Ty::Bool, info()));
     if let Some(choice) = third_sym {
         frame.lets_mut().insert(third, UVal::Init(Val::Symbolic(choice)));
     }
@@ -272,6 +325,7 @@ fn ordered(
             "nested_assert" => Body::NestedAssert,
             "loop" => Body::Loop,
             "three" => Body::ThreeLevels,
+            "three_assert" => Body::ThreeLevelsAssert,
             "ordered_reads" => Body::OrderedReads,
             "error_leaf" => Body::ErrorLeaf,
             "error_in_b" => Body::ErrorInB,
@@ -526,6 +580,7 @@ fn check_deferred_indices(nested: bool, name: &str) {
         frame.lets_mut().insert(refs, UVal::Init(Val::Vector(regs.into_iter().map(Val::Ref).collect())));
         let mut limits = ExecutionLimits::default().with_path_merging(true);
         limits.arms_as_tasks = parallel;
+        limits.parallel.min_arm_instructions = 0;
         let mut state = TaskState::new().with_execution_limits(limits);
         let (tx, rx) = std::sync::mpsc::channel();
         let rx = Mutex::new(rx);
@@ -579,12 +634,12 @@ fn check_deferred_indices(nested: bool, name: &str) {
 }
 
 fn check_nested_b(body: Body, label: &'static str) {
-    let baseline = diamond_case(1, false, None, body, None).0;
-    assert_eq!(baseline.len(), 1);
+    let (baseline, stats) = diamond_case(1, false, None, body, None);
+    assert_eq!(baseline.len(), 1, "{stats}");
     assert!(baseline[0].records.len() >= 2, "基准必须执行内层汇合");
     let mut expected =
         BTreeSet::from([(true, true, false), (true, false, true), (false, true, true), (false, false, false)]);
-    if body == Body::ThreeLevels {
+    if matches!(body, Body::ThreeLevels | Body::ThreeLevelsAssert) {
         expected.insert((false, false, true));
     }
     assert_eq!(baseline[0].results, expected);
@@ -603,7 +658,7 @@ fn check_nested_b(body: Body, label: &'static str) {
     let (observed, log, _) = ordered(4, "worker_claimed", "a_join", label);
     let imports = log.iter().filter(|(point, _)| point == "imported").count();
     let minimum = match body {
-        Body::ThreeLevels => 3,
+        Body::ThreeLevels | Body::ThreeLevelsAssert => 3,
         Body::Nested | Body::NestedAssert => 2,
         _ => 1,
     };
@@ -618,7 +673,27 @@ fn region_arm_nested_two_arms() {
 
 #[test]
 fn region_arm_nested_imports_guarded_assertions() {
+    const CHILD: &str = "ISLA_STAGE4_NESTED_ASSERT";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "executor::tests::region_arm_runtime_tests::region_arm_nested_imports_guarded_assertions",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    crate::config::RegionOptions { defer_exit_check: true, ..Default::default() }.configure();
     check_nested_b(Body::NestedAssert, "nested_assert");
+    check_nested_b(Body::ThreeLevelsAssert, "three_assert");
 }
 
 #[test]
@@ -776,7 +851,7 @@ fn region_arm_nested_worker_panic_wakes_parent() {
 #[ignore = "比较同线程数的真实菱形程序墙钟"]
 fn region_arm_nested_wall_time() {
     for (name, body) in [("two", Body::Nested), ("three", Body::ThreeLevels)] {
-        let baseline = diamond_case(4, false, None, body, None).0;
+        let baseline = diamond_case_with_gate(4, false, None, body, None, true).0;
         assert_eq!(baseline.len(), 1);
         eprintln!(
             "fixture {name} records={} events={} reads={}",
@@ -796,11 +871,202 @@ fn region_arm_nested_wall_time() {
                     Ok(())
                 });
                 let now = Instant::now();
-                let observed = diamond_case(4, parallel, Some(hook), body, None).0;
+                let observed = diamond_case_with_gate(4, parallel, Some(hook), body, None, true).0;
                 let elapsed = now.elapsed().as_micros();
                 assert_eq!(observed, baseline);
                 eprintln!("diamond {name} {round} {parallel} {elapsed} {}", imported.load(Ordering::Relaxed));
             }
         }
     }
+}
+
+#[test]
+fn region_arm_default_gate_skips_small_and_schedules_large() {
+    for (body, expected) in [(Body::Nested, 0), (Body::ThreeLevels, 0), (Body::Large, 1)] {
+        let imports = Arc::new(AtomicUsize::new(0));
+        let count = imports.clone();
+        let observe_claim = wait_for_arm_claim();
+        let hook = Arc::new(move |point: &str| {
+            observe_claim(point);
+            if point == "imported" {
+                count.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(())
+        });
+        let parallel = diamond_case_with_gate(4, true, Some(hook), body, None, true).0;
+        assert_eq!(parallel, diamond_case_with_gate(4, false, None, body, None, true).0);
+        assert_eq!(imports.load(Ordering::Relaxed), expected);
+    }
+}
+
+/// 用同一根的失败点交付，覆盖认证为真及被丢弃的叶，并保留实际发布次序。
+#[test]
+fn region_arm_error_certification_preserves_leaf_order() {
+    const CHILD: &str = "ISLA_STAGE4_CERTIFICATION";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "executor::tests::region_arm_runtime_tests::region_arm_error_certification_preserves_leaf_order",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    crate::smt::configure_tastic(crate::smt::Tactic::Default);
+
+    struct Sink<'ir, 'task> {
+        queue: region_arm::ArmQueue<'ir, B64>,
+        slots: AtomicUsize,
+        leaves: Mutex<Vec<Task<'ir, 'task, B64>>>,
+    }
+    impl region_arm::ArmThreads for Sink<'_, '_> {
+        fn reserve(&self) -> Option<region_arm::ThreadSlot<'_>> {
+            self.slots.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |free| free.checked_sub(1)).ok()?;
+            Some(region_arm::ThreadSlot {
+                tid: 1,
+                release: Some(Box::new(|| {
+                    self.slots.fetch_add(1, Ordering::Relaxed);
+                })),
+            })
+        }
+    }
+    impl<'ir, 'task> ForkSink<'ir, 'task, B64> for Sink<'ir, 'task> {
+        fn submit(&self, task: Task<'ir, 'task, B64>) {
+            self.leaves.lock().unwrap().push(task);
+        }
+
+        fn arm_scheduler(&self) -> Option<region_arm::Scheduler<'_, 'ir, B64>> {
+            Some(region_arm::Scheduler { threads: self, queue: &self.queue })
+        }
+    }
+
+    use crate::config::PathFailureAction;
+    use crate::error::{SmtError, Z3QueryFailure, Z3Timeout};
+
+    let run = |leaves, slots, policy, inject: bool, worker_panic: bool| {
+        let shared = SharedState::new(
+            Symtab::new(),
+            &[],
+            IRTypeInfo::new::<B64>(&[]),
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let mut config = Config::new();
+        config.solver_options.on_unknown = policy;
+        let ctx = Context::new(config);
+        let mut solver = Solver::new(&ctx);
+        let input = solver.declare_const(smtlib::Ty::Bool, info());
+        let mut root = make_frame(vec![Instr::End]);
+        let entry = checkpoint(&mut solver);
+        let mut limits = ExecutionLimits::default().with_path_merging(true);
+        limits.arms_as_tasks = true;
+        let mut state = TaskState::new().with_execution_limits(limits);
+        let workers = Arc::new(Mutex::new(HashSet::new()));
+        let used = workers.clone();
+        state.arm_test_hook = Some(Arc::new(move |point| {
+            if point == "certification_worker" {
+                used.lock().unwrap().insert(std::thread::current().id());
+                assert!(!worker_panic, "认证线程注入 panic");
+            }
+            if inject {
+                let reason = match point {
+                    "certification_check/40" => "timeout",
+                    "certification_check/51" => "canceled",
+                    _ => return Ok(()),
+                };
+                let query = Z3QueryFailure {
+                    reason: reason.into(),
+                    source_loc: info(),
+                    purpose: "arm_error",
+                    wall: Duration::from_millis(5),
+                    limit: (reason == "timeout").then_some(Duration::from_millis(5)),
+                };
+                return Err(ExecError::Smt(SmtError::Z3Timeout(Z3Timeout::Native(query))));
+            }
+            Ok(())
+        }));
+        let errors = (0..leaves)
+            .map(|index| {
+                let mut failed = Solver::from_checkpoint(&ctx, entry.clone());
+                let positive = smtlib::Exp::Var(input);
+                let constraint =
+                    if index % 3 == 1 { smtlib::Exp::Not(Box::new(positive.clone())) } else { positive.clone() };
+                failed.assert(constraint);
+                let mut task = root.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut failed));
+                task.fork_cond = Some((smtlib::Def::Assert(positive), Event::Fork(0, input, index, info())));
+                task.frame.arm_error = Some((ExecError::Type("失败叶".into(), info()), false));
+                task
+            })
+            .collect();
+        let sink =
+            Sink { queue: region_arm::ArmQueue::new(), slots: AtomicUsize::new(slots), leaves: Mutex::new(Vec::new()) };
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            region_merge::publish_arm_errors(&mut root, errors, &solver, &mut Fraction::one(), &sink, &shared);
+        }));
+        assert_eq!(sink.slots.load(Ordering::Relaxed), slots);
+        let observed: Vec<_> = sink
+            .leaves
+            .into_inner()
+            .unwrap()
+            .into_iter()
+            .map(|task| {
+                let Some((_, Event::Fork(id, _, index, _))) = task.fork_cond else { unreachable!() };
+                (id, index, task.frame.arm_error.unwrap().1, task.frame.execution_limit_state.path_signature())
+            })
+            .collect();
+        assert!(observed.iter().all(|(_, _, certified, _)| *certified));
+        let count = workers.lock().unwrap().len();
+        let drops = shared.execution_stats.solver_path_drops_since(0);
+        let panic = outcome.err().map(|panic| {
+            panic
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| panic.downcast_ref::<&str>().map(|text| (*text).to_owned()))
+                .unwrap()
+        });
+        (observed, count, drops.count, drops.first_locations, panic)
+    };
+
+    let serial = run(72, 0, PathFailureAction::Dead, false, false);
+    let parallel = run(72, 3, PathFailureAction::Dead, false, false);
+    assert_eq!(
+        serial.0.iter().map(|(_, index, _, _)| *index).collect::<Vec<_>>(),
+        (0..72).filter(|index| index % 3 != 1).collect::<Vec<_>>()
+    );
+    assert_eq!(parallel.0, serial.0);
+    assert_eq!((serial.1, serial.2, parallel.2), (0, 0, 0));
+    assert_eq!((serial.4, parallel.4), (None, None));
+    assert!(parallel.1 > 0, "大根必须有远端认证线程");
+    assert_eq!(run(12, 3, PathFailureAction::Dead, false, false).1, 0);
+
+    let serial = run(72, 0, PathFailureAction::Dead, true, false);
+    let parallel = run(72, 3, PathFailureAction::Dead, true, false);
+    assert_eq!(parallel.0, serial.0);
+    assert_eq!(parallel.2, 2);
+    assert_eq!(parallel.3, serial.3);
+    assert_eq!(
+        parallel.3.iter().map(|drop| drop.reason_unknown.as_deref()).collect::<Vec<_>>(),
+        [Some("timeout"), Some("canceled")]
+    );
+    assert_eq!((serial.4, parallel.4), (None, None));
+
+    let serial = run(72, 0, PathFailureAction::Panic, true, false);
+    let parallel = run(72, 3, PathFailureAction::Panic, true, false);
+    assert_eq!(parallel.0, serial.0);
+    assert_eq!(parallel.4, serial.4);
+    assert!(parallel.4.unwrap().contains("reason_unknown=Some(\"timeout\")"));
+    let panicked = run(72, 3, PathFailureAction::Dead, false, true);
+    assert!(panicked.4.unwrap().contains("认证线程注入 panic"));
 }

@@ -18,6 +18,7 @@ mod delivery;
 mod exception_continuation;
 mod loop_fold;
 mod parallel_arms;
+mod parallel_errors;
 pub(super) mod prefix_commit;
 
 /// 任一祖先区域拒绝时，随该次推演撤销失败任务的发布。
@@ -50,6 +51,21 @@ impl<'ir, 'task, B: BV> ForkSink<'ir, 'task, B> for ArmErrorSink<'ir, 'task, B> 
 
     fn submit_consumer_error(&self, task: Task<'ir, 'task, B>) {
         self.submit(task);
+    }
+}
+
+pub(super) struct ScheduledErrors<'a, 'ir, 'task, B: BV> {
+    pub errors: &'a ArmErrorSink<'ir, 'task, B>,
+    pub scheduler: Option<region_arm::Scheduler<'a, 'ir, B>>,
+}
+
+impl<'ir, 'task, B: BV> ForkSink<'ir, 'task, B> for ScheduledErrors<'_, 'ir, 'task, B> {
+    fn submit(&self, task: Task<'ir, 'task, B>) {
+        self.errors.submit(task);
+    }
+
+    fn arm_scheduler(&self) -> Option<region_arm::Scheduler<'_, 'ir, B>> {
+        self.scheduler
     }
 }
 
@@ -792,7 +808,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                 let record_start = frame.region_merge_records.len();
                 failure_phase = FailurePhase::ArmExecution;
                 let mut candidate_frame = solver.validates_candidates().then(|| frame.clone());
-                let arm_task_entry = parallel_arms::entry(sink, frame, state, &region, solver);
+                let arm_task_entry = parallel_arms::entry(sink, frame, state, &region, shared, solver);
                 let tx = solver.start_transaction();
                 let defer = solver.defer_region_checks();
                 // 开启义务作用域的这一层认证出口；借用父作用域的层把义务留给其所有者。
@@ -827,7 +843,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
                         fraction,
                         timeout,
                         stop,
-                        &parallel_arms::ScheduledErrors { errors: &pending_errors, scheduler: sink.arm_scheduler() },
+                        &ScheduledErrors { errors: &pending_errors, scheduler: sink.arm_scheduler() },
                         match &mut candidate_frame {
                             Some(candidate) => candidate,
                             None => &mut *frame,
@@ -1086,7 +1102,7 @@ pub(super) fn try_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>
 }
 
 /// 失败叶在根保存点提交后才可交给调度器。继续组继承同一次路径拆分。
-fn publish_arm_errors<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
+pub(super) fn publish_arm_errors<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     frame: &mut LocalFrame<'ir, B>,
     errors: Vec<Task<'ir, 'task, B>>,
     solver: &Solver<B>,
@@ -1094,14 +1110,12 @@ fn publish_arm_errors<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     sink: &S,
     shared: &SharedState<'ir, B>,
 ) {
-    let mut queries = solver.arm_error_queries(errors.len());
-    for mut task in errors {
-        let Some((_, Event::Fork(id, guard, _, location))) = &mut task.fork_cond else {
+    parallel_errors::publish(errors, solver, sink.arm_scheduler(), |mut task, checked| {
+        let Some((_, Event::Fork(id, ..))) = &mut task.fork_cond else {
             unreachable!("失败前沿必须有分叉元数据")
         };
-        let checked = solver.check_arm_error(*guard, &task.checkpoint, *location, queries.as_mut());
         if matches!(checked, Some(SmtResult::Unsat)) {
-            continue;
+            return;
         }
         if let Some(SmtResult::Error(error)) = &checked {
             let error = ExecError::Smt(error.clone());
@@ -1112,7 +1126,7 @@ fn publish_arm_errors<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 &failed,
                 shared,
             ) {
-                continue;
+                return;
             }
         }
         task.frame.arm_error.as_mut().unwrap().1 = matches!(checked, Some(SmtResult::Sat));
@@ -1128,7 +1142,7 @@ fn publish_arm_errors<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         fraction.halve();
         task.fraction = fraction.clone();
         sink.submit(task);
-    }
+    });
 }
 
 /// 组织者共享的区域入口帧、调用范围和预算。
@@ -1357,7 +1371,6 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
         && unrestricted_adaptive(state, mode)
         && catcher.is_none()
         && solver.validates_candidates()
-        && arm_task_entry.is_none()
         && frame.region_execution.as_ref().is_none_or(|parent| parent.remote_cancel.is_none())
     {
         base.region_execution.as_mut().unwrap().verified_prefix = Some(prefix_commit::Cut {
@@ -1383,6 +1396,8 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     let scheduler = sink.arm_scheduler();
     let job = arm_task_entry.filter(|_| catcher.is_none()).map(|(slot, checkpoint)| {
         let mut remote_base = base.clone();
+        // 切点由本地组织者认证。远端若无法完整到达，交回本地执行并使用原切点规则。
+        remote_base.region_execution.as_mut().unwrap().verified_prefix = None;
         remote_base.path_timing = super::path_timing::PathTiming::from_snapshot(base.path_timing.fork_snapshot());
         let job = region_arm::ArmJob {
             checkpoint,
@@ -1401,7 +1416,7 @@ fn execute_region<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     let mut local = |cell: Option<&parallel_arms::ArmCell<'ir, B>>| -> Result<(), ExecError> {
         while let Some((side, (pc, guard))) = ready.pop() {
             live_forks.set(if side == 0 { 1 } else { arms[0].len() });
-            if side == 1 {
+            if side == 1 && !cut {
                 if let Some(cell) = cell {
                     match parallel_arms::receive(
                         cell,
