@@ -908,13 +908,14 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             let mut complete = Vec::with_capacity(published.len() + assumptions.len());
             let stable_len;
             if stable_order {
-                let guards = self.transaction_conditions.len();
+                let guards = self.transaction_condition_scopes.iter().filter(|scope| scope.is_none()).count();
                 assert!(published.len() >= guards, "每个活动guard必须对应一个主solver断言");
-                let buffered = self
-                    .transaction_events
-                    .iter()
-                    .filter(|event| matches!(event, Event::Smt(Def::Assert(_), ..)))
-                    .count();
+                let buffered = self.arm_entry_assumptions.len()
+                    + self
+                        .transaction_events
+                        .iter()
+                        .filter(|event| matches!(event, Event::Smt(Def::Assert(_), ..)))
+                        .count();
                 assert!(assumptions.len() >= buffered, "区域查询不能缺缓冲断言");
                 let parent = published.len() - guards;
                 complete.extend_from_slice(&published[..parent]);

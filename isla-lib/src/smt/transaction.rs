@@ -852,7 +852,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
     }
 
-    /// 查询所有尚未发布的断言。AST 必须存活到 Z3 check 返回，不能只收集裸指针。
+    /// 查询入口后缀、正文缓冲和活动臂条件。AST 必须存活到 Z3 check 返回，不能只收集裸指针。
     pub(super) fn transaction_assertions(&self) -> Vec<Ast<'ctx>> {
         let cost_scope = crate::executor::stats::region_cost::Scope::enter(
             crate::executor::stats::region_cost::Category::ReplayAssert,
@@ -860,13 +860,15 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let _ = &cost_scope;
         let timer = WorkTimer::start(WorkKind::BufferTranslate);
         assert_eq!(self.transaction_conditions.len(), self.transaction_condition_scopes.len(), "条件作用域必须对齐");
+        let buffered = self.transaction_events.iter().filter_map(|event| match event {
+            Event::Smt(Def::Assert(exp), ..) => Some(self.translate_exp(exp)),
+            _ => None,
+        });
         let assertions = self
-            .transaction_events
+            .arm_entry_assumptions
             .iter()
-            .filter_map(|event| match event {
-                Event::Smt(Def::Assert(exp), ..) => Some(self.translate_exp(exp)),
-                _ => None,
-            })
+            .cloned()
+            .chain(buffered)
             .chain(self.transaction_condition_scopes.iter().flatten().cloned())
             .collect();
         drop(timer);
