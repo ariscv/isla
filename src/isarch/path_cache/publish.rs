@@ -59,6 +59,7 @@ impl<'a> Phase<'a> {
 struct DataWriter<'a, 'b> {
     dir: &'a Path,
     formats: &'a [Encoding],
+    pending_sync: &'a mut Vec<File>,
     batch: &'a str,
     timing: &'a mut Timing,
     stages: &'a Stages,
@@ -128,7 +129,12 @@ impl DataWriter<'_, '_> {
                         write!(output.output, "{end}").expect("写入缓存 JSON 尾失败");
                     }
                     output.output.flush().expect("刷新缓存数据失败");
-                    output.output.get_ref().sync_all().expect("同步缓存数据失败");
+                    let file = output.output.get_ref();
+                    if isla_lib::executor::program_control::reason().is_some() {
+                        self.pending_sync.push(file.try_clone().expect("保留待同步的分片句柄失败"));
+                    } else {
+                        file.sync_all().expect("同步缓存数据失败");
+                    }
                     let bytes = output.output.get_ref().metadata().expect("读取缓存文件大小失败").len();
                     output.seconds += started.elapsed().as_secs_f64();
                     bytes
@@ -215,8 +221,16 @@ pub fn save<B: BV>(
         validation.measure(|| validator.segment(&segment));
         segment
     });
-    let mut writer =
-        DataWriter { dir, formats: &options.format, batch: &batch_id, timing, stages, writing: &mut writing };
+    let mut pending_sync = Vec::new();
+    let mut writer = DataWriter {
+        dir,
+        pending_sync: &mut pending_sync,
+        formats: &options.format,
+        batch: &batch_id,
+        timing,
+        stages,
+        writing: &mut writing,
+    };
     let segments = writer.write("segments", entries);
 
     let mut path_signatures = Vec::with_capacity(paths.len());
@@ -270,9 +284,14 @@ pub fn save<B: BV>(
         names,
     };
     writing.measure(|| {
-        let mut output = BufWriter::new(File::create(dir.join("manifest.pending")).expect("创建 manifest 失败"));
+        let pending = dir.join("manifest.pending");
         let mut manifest_value = serde_json::to_value(&manifest).unwrap();
+        if manifest.errors.stop_reason.is_none() {
+            manifest_value["errors"].as_object_mut().unwrap().remove("stop_reason");
+        }
         for key in [
+            "stop_reason",
+            "category_counts",
             "valid",
             "invalid_reasons",
             "solver_timeout_dropped_paths",
@@ -286,13 +305,48 @@ pub fn save<B: BV>(
             }
         }
         manifest_value["certification"] = json!(if manifest.errors.uncertified { "uncertified" } else { "checked" });
-        serde_json::to_writer_pretty(&mut output, &manifest_value).expect("写入 manifest 失败");
-        output.flush().unwrap();
-        output.get_ref().sync_all().unwrap();
-        drop(output);
+        let write_pending = |value: &Value| {
+            let mut output = BufWriter::new(File::create(&pending).expect("创建 manifest 失败"));
+            serde_json::to_writer_pretty(&mut output, value).expect("写入 manifest 失败");
+            output.into_inner().expect("刷新 manifest 失败")
+        };
+        let mark_stop = |value: &mut Value| {
+            if value["stop_reason"].is_null() {
+                if let Some(reason) = isla_lib::executor::program_control::reason() {
+                    // 探索已交付全部终态，停止发生在分片转换或同步阶段。
+                    value["completeness"] = json!("partial");
+                    value["errors"]["status"] = json!("partial");
+                    for (key, field) in [("stop_reason", json!(reason)), ("category_counts", json!({"ProgramStop":0}))]
+                    {
+                        value["errors"][key] = field.clone();
+                        value[key] = field;
+                    }
+                    return true;
+                }
+            }
+            false
+        };
+        mark_stop(&mut manifest_value);
+        let output = write_pending(&manifest_value);
         let directory = File::open(dir).expect("打开缓存目录失败");
-        directory.sync_all().expect("同步待发布缓存目录失败");
-        fs::rename(dir.join("manifest.pending"), dir.join("manifest.json")).expect("发布 manifest 失败");
+        if pending_sync.is_empty() {
+            output.sync_all().unwrap();
+            directory.sync_all().expect("同步待发布缓存目录失败");
+        } else {
+            // 各分片和 manifest.pending 均已 flush。等待全部文件及目录同步后才允许重命名。
+            std::thread::scope(|scope| {
+                for file in pending_sync.iter().chain(std::iter::once(&output)) {
+                    scope.spawn(move || file.sync_all().expect("同步待发布缓存文件失败"));
+                }
+                directory.sync_all().expect("同步待发布缓存目录失败");
+            });
+        }
+        drop(output);
+        // 同步可能持续数秒。发布前最后一次读取停止原因，必要时只重写原 pending 文件。
+        if mark_stop(&mut manifest_value) {
+            write_pending(&manifest_value).sync_all().expect("同步更新停止原因后的 manifest 失败");
+        }
+        fs::rename(pending, dir.join("manifest.json")).expect("发布 manifest 失败");
         directory.sync_all().expect("同步已发布缓存目录失败");
     });
     writing.finish();

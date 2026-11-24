@@ -207,7 +207,7 @@ mod tests {
             report(&options),
             json!({
                 "Indeterminate": false, "Limit": false, "NeedsConcretization": false,
-                "StateIncompatible": false, "Unsupported": false, "SemanticPolicy": false
+                "StateIncompatible": false, "Unsupported": false, "SemanticPolicy": false, "ProgramStop": false
             })
         );
         options.partial_commit_prefix = true;
@@ -224,7 +224,7 @@ mod tests {
             report(&options),
             json!({
                 "Indeterminate": true, "Limit": true, "NeedsConcretization": true,
-                "StateIncompatible": false, "Unsupported": false, "SemanticPolicy": false
+                "StateIncompatible": false, "Unsupported": false, "SemanticPolicy": false, "ProgramStop": false
             })
         );
         options.partial_commit_prefix = true;
@@ -232,7 +232,7 @@ mod tests {
             report(&options),
             json!({
                 "Indeterminate": true, "Limit": true, "NeedsConcretization": true,
-                "StateIncompatible": true, "Unsupported": true, "SemanticPolicy": true
+                "StateIncompatible": true, "Unsupported": true, "SemanticPolicy": true, "ProgramStop": false
             })
         );
     }

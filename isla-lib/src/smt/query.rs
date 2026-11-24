@@ -155,6 +155,9 @@ impl QuerySolver<'_> {
     }
 
     pub(super) fn failure(&self, info: SourceLoc, elapsed: Duration, budget: Option<ResourceBudget>) -> SmtError {
+        if crate::executor::program_control::checks_enabled() && crate::executor::program_control::reason().is_some() {
+            return SmtError::ProgramStopped;
+        }
         let reason = z3_reason_unknown(self.ctx, self.z3_solver);
         // 策略型查询耗尽 rlimit 时也可能只返回 canceled。只有计数触及限额才归到资源耗尽。
         let rlimit_exhausted = matches!(reason.trim(), "canceled" | "sat.canceled")

@@ -1270,6 +1270,7 @@ fn run<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     shared_state: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
 ) -> Result<(Run<B>, LocalFrame<'ir, B>), (ExecError, LocalFrame<'ir, B>)> {
+    let _checks = program_control::CheckScope::enter(task_state.stopped_paths.is_some());
     task_state.force_regions_validated.get_or_init(|| {
         if let Some(limits) = &task_state.execution_limits {
             if let Err(diagnostic) = validate_force_regions(shared_state, limits) {
@@ -1338,6 +1339,11 @@ fn run<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
     match result {
         Ok(run) => Ok((run, frame)),
         Err(err) => {
+            let err = if err.rejection_reason() == Some(SpeculativeRejectReason::ProgramStopped) {
+                ExecError::ProgramStopped
+            } else {
+                err
+            };
             err.assert_normal_execution();
             cost::make_mut(&mut frame.backtrace).push((frame.function_name, frame.pc));
             Err((err, frame))
@@ -1402,6 +1408,9 @@ impl<'scope, 'env, 'ir: 'scope, 'task: 'scope, 'collector: 'scope, B: BV, R: Sen
     for MultiForkSink<'scope, 'env, 'ir, 'task, 'collector, B, R>
 {
     fn reserve(&self) -> Option<region_arm::ThreadSlot<'_>> {
+        if self.state.stopping() {
+            return None;
+        }
         self.runtime.try_reserve_thread().then(|| region_arm::ThreadSlot {
             tid: self.runtime.next_tid.fetch_add(1, Ordering::Relaxed),
             release: Some(Box::new(|| {
@@ -1432,6 +1441,7 @@ impl<'scope, 'env, 'ir: 'scope, 'task: 'scope, 'collector: 'scope, B: BV, R: Sen
 
 mod arm_cost;
 mod arm_workers;
+pub mod program_control;
 use arm_workers::{WorkerArm, WorkerJob, WorkerQueue};
 
 struct MultiRuntime<'ir, 'task, 'collector, B: BV, R> {
@@ -1457,6 +1467,9 @@ impl<'ir, 'task, 'collector, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'
         'task: 'scope,
         'collector: 'scope,
     {
+        if task.discard_on_stop() {
+            return;
+        }
         self.pending_tasks.fetch_add(1, Ordering::AcqRel);
         self.shared_state.execution_stats.task_submitted();
         if self.try_reserve_thread() {
@@ -1516,6 +1529,9 @@ impl<'ir, 'task, 'collector, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'
         'task: 'scope,
         'collector: 'scope,
     {
+        if task.discard_on_stop() {
+            return;
+        }
         let memory_task = stats::memory_stats::enabled().then(|| stats::memory_stats::begin_task(task.id.as_usize()));
         let mut cfg = Config::new();
         cfg.validation = task.state.validation;
@@ -1581,6 +1597,12 @@ impl<'ir, 'task, 'collector, B: BV + Send + Sync, R: Send + Sync> MultiRuntime<'
         let mut to_spawn = Vec::new();
         {
             let mut queued = self.queued_tasks.lock().unwrap();
+            if queued.back().is_some_and(|task| task.state.stopping()) {
+                let before = queued.len();
+                queued.retain(|task| !task.discard_on_stop());
+                self.pending_tasks.fetch_sub(before - queued.len(), Ordering::AcqRel);
+                self.shared_state.execution_stats.task_queue_changed(queued.len());
+            }
             loop {
                 let queued_len = queued.len();
                 if queued_len == 0 {
@@ -2394,6 +2416,9 @@ fn run_loop_inner<'ir, 'task, B: BV>(
         region_engine::prefix_resume::next_instruction(frame, solver);
         if let Some(saved) = instruction.take() {
             saved.commit(frame, solver, fork_sink)?;
+        }
+        if task_state.stopping() {
+            return Err(ExecError::ProgramStopped);
         }
         if !frame.region_arrivals.is_empty() {
             return Ok(Run::Suspended);
@@ -3959,6 +3984,9 @@ fn start_single_with_timeout<'ir, B: BV, R>(
     let queue = Worker::new_lifo();
     queue.push(task);
     while let Some(mut task) = queue.pop() {
+        if task.discard_on_stop() {
+            continue;
+        }
         let memory_task = stats::memory_stats::enabled().then(|| stats::memory_stats::begin_task(task.id.as_usize()));
         let mut cfg = Config::new();
         cfg.validation = task.state.validation;

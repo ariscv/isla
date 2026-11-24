@@ -181,6 +181,12 @@ pub struct CommonOpts<'ir, B> {
 }
 
 pub fn parse<B: BV>(hasher: &mut Sha256, opts: &Options) -> (Matches, Architecture<B>) {
+    let matches = parse_matches(opts);
+    let arch = architecture(hasher, &matches);
+    (matches, arch)
+}
+
+pub fn parse_matches(opts: &Options) -> Matches {
     let args: Vec<String> = std::env::args().collect();
 
     let matches = match opts.parse(&args[1..]) {
@@ -222,18 +228,15 @@ pub fn parse<B: BV>(hasher: &mut Sha256, opts: &Options) -> (Matches, Architectu
         (if matches.opt_present("verbose") { log::VERBOSE } else { 0u32 }) | log::flags_from_debug_opts(&debug_opts);
     log::set_flags(logging_flags);
 
-    let arch = {
-        let file = matches.opt_str("arch").unwrap();
-        match load_ir(hasher, &file) {
-            Ok(contents) => contents,
-            Err(f) => {
-                eprintln!("Error when loading architecture: {}", f);
-                exit(1)
-            }
-        }
-    };
+    matches
+}
 
-    (matches, arch)
+pub fn architecture<B: BV>(hasher: &mut Sha256, matches: &Matches) -> Architecture<B> {
+    let file = matches.opt_str("arch").unwrap();
+    load_ir(hasher, &file).unwrap_or_else(|error| {
+        eprintln!("Error when loading architecture: {error}");
+        exit(1)
+    })
 }
 
 pub fn reset_from_string<B: BV>(arg: String, symtab: &Symtab, type_info: &IRTypeInfo) -> (Loc<Name>, Reset<B>) {
