@@ -139,6 +139,8 @@ fn candidate_fixture<T>(stage3: bool, direct: bool, check: impl FnOnce(&mut Solv
     configure_tastic(Tactic::Qfaufbv);
     let mut config = Config::new();
     config.solver_options.finite_domain_ground_eval = direct;
+    // 这里对照直接求值与整式 Z3 代入；稀疏代入有独立回归测试。
+    config.solver_options.branch_candidate_sparse_rewrite = false;
     config.solver_options.incremental_choice_dag = stage3;
     config.solver_options.coi_query_slicing = stage3;
     let ctx = Context::new(config);
@@ -295,7 +297,18 @@ fn ground_call_site_timings() {
                         roots
                             .iter()
                             .filter(|&&r| {
-                                prefix.index.rewrites.for_assertion(false).narrow(&replacements, &asts.get(r)).1
+                                prefix
+                                    .index
+                                    .rewrites
+                                    .for_assertion(false)
+                                    .narrow(
+                                        &replacements,
+                                        &asts.get(r),
+                                        &mut rewrites::InputDependencies::new(
+                                            replacements.iter().map(|&(from, _)| from).enumerate(),
+                                        ),
+                                    )
+                                    .1
                                     == Some(true)
                             })
                             .count()

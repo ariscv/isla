@@ -266,6 +266,7 @@ fn sort_name(sort: &smtlib::Ty) -> String {
 fn shape<B: BV>(value: &Val<B>, solver: &dyn crate::primop_util::merge_terms::MergeTerms<B>) -> Value {
     let kind = match value {
         Val::Guarded(..) => "Guarded",
+        Val::SymBits { .. } => "SymBits",
         Val::Symbolic(_) => "Symbolic",
         Val::I64(_) => "I64",
         Val::I128(_) => "I128",

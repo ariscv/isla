@@ -256,6 +256,7 @@ impl<B: BV> Val<B> {
                 values.0.to_str_internal(shared_state, 0, false),
                 values.1.to_str_internal(shared_state, 0, false)
             ),
+            Val::SymBits { data, len, cap } => format!("{indent_str}SymBits(v{data}, v{len}, {cap})"),
             Val::Symbolic(sym) => format!("{}Sym({})", indent_str, sym),
             Val::I64(n) => format!("{}{}i64", indent_str, n),
             Val::I128(n) => format!("{}{}i128", indent_str, n),
@@ -451,6 +452,7 @@ impl<B: BV> Val<B> {
         use Val::*;
         match self {
             Guarded(_, _) => "Guarded".to_string(),
+            SymBits { .. } => "SymBits".to_string(),
             Symbolic(_) => "Symbolic".to_string(),
             I64(_) => "I64".to_string(),
             I128(_) => "I128".to_string(),

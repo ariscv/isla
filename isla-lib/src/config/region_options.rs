@@ -55,6 +55,7 @@ pub struct RegionOptions {
     pub prefix_compact: bool,
     pub loop_fold_shapes: bool,
     pub width_closed_continuation: bool,
+    pub sym_bits: bool,
     /// 可选布尔证明资源统计；默认关闭。
     pub bool_proof_profile: bool,
     /// 区域步数和查询进度诊断；默认关闭。
@@ -125,6 +126,7 @@ impl RegionOptions {
             prefix_compact: merge.prefix_compact,
             loop_fold_shapes: merge.loop_fold_shapes,
             width_closed_continuation: merge.width_closed_continuation,
+            sym_bits: merge.sym_bits,
             bool_proof_rlimit: limits.solver.bool_proof_rlimit,
             witness_shadow: diagnostics.witness_shadow,
             witness_local_shadow: diagnostics.witness_local_shadow,
@@ -198,6 +200,14 @@ impl RegionOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sym_bits_defaults_off_and_accepts_toml() {
+        assert!(!RegionOptions::default().sym_bits);
+        let toml: toml::Value = "[execution_limits.path_merge]\nsym_bits=true".parse().unwrap();
+        let limits = super::super::get_execution_limits_config(&toml).unwrap().unwrap();
+        assert!(RegionOptions::from_config(&limits).sym_bits);
+    }
+
     #[test]
     fn partial_commit_categories_report_effective_switches() {
         use serde_json::json;

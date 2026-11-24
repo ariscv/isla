@@ -118,6 +118,10 @@ where
             renumber_val(&mut values.0, f);
             renumber_val(&mut values.1, f);
         }
+        SymBits { data, len, .. } => {
+            *data = Sym { id: f(data.id) };
+            *len = Sym { id: f(len.id) };
+        }
         Symbolic(v) => *v = Sym { id: f(v.id) },
         MixedBits(segments) => segments.iter_mut().for_each(|segment| match segment {
             BitsSegment::Symbolic(v) => *v = Sym { id: f(v.id) },
@@ -249,6 +253,10 @@ fn uses_in_value<B>(uses: &mut HashMap<Sym, u32>, val: &Val<B>) {
             uses.insert(*guard, uses.get(guard).unwrap_or(&0) + 1);
             uses_in_value(uses, &values.0);
             uses_in_value(uses, &values.1);
+        }
+        SymBits { data, len, .. } => {
+            *uses.entry(*data).or_default() += 1;
+            *uses.entry(*len).or_default() += 1;
         }
         Symbolic(v) => {
             uses.insert(*v, uses.get(v).unwrap_or(&0) + 1);

@@ -739,6 +739,24 @@ fn eval_exp_with_accessor<'state, 'ir, B: BV>(
             };
             for value in &mut args {
                 resolve(value, &local_state.concrete_choices, solver, info)?;
+                if solver.sym_bits_enabled()
+                    && !matches!(
+                        op,
+                        Op::Eq
+                            | Op::Neq
+                            | Op::Bvnot
+                            | Op::Bvor
+                            | Op::Bvxor
+                            | Op::Bvand
+                            | Op::Bvadd
+                            | Op::Bvsub
+                            | Op::Concat
+                            | Op::Slice(_)
+                            | Op::ZeroExtend(_)
+                    )
+                {
+                    primop::sym_bits::concretize(value, solver, info)?;
+                }
             }
             let result = match op {
                 Op::Lt => primop::op_lt(args[0].clone(), args[1].clone(), solver, info),
@@ -945,6 +963,10 @@ fn assign_with_accessor<'ir, B: BV>(
             } else if local_state.lets.contains_key(id) {
                 local_state.lets.insert(*id, UVal::Init(v));
             } else {
+                let mut v = v;
+                if solver.sym_bits_enabled() {
+                    primop::sym_bits::concretize(&mut v, solver, info)?;
+                }
                 if !shared_state.untraced_registers.contains(id) && local_state.speculative_access.is_none() {
                     solver.add_event(Event::WriteReg(*id, accessor.to_vec(), v.clone()))
                 }
@@ -2278,7 +2300,11 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 solver,
             )
         } else {
-            let Some(operands) = frame.local_state.expression_retry_operands.clone() else {
+            let width_boundary =
+                matches!(&error, ExecError::SymbolicNatural { operation: primop::sym_bits::LENGTH_BOUNDARY, .. });
+            let operands =
+                if width_boundary { Some(Vec::new()) } else { frame.local_state.expression_retry_operands.clone() };
+            let Some(operands) = operands else {
                 if let Some(saved) = instruction.take() {
                     saved.commit(frame, solver, fork_sink)?;
                 }
@@ -2294,7 +2320,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             symbolic_length::retry_symbolic_length(
                 error,
                 &operands,
-                Some((tid, timeout)),
+                (!width_boundary).then_some((tid, timeout)),
                 task_id,
                 task_fraction,
                 stop_conditions,
@@ -2854,6 +2880,9 @@ fn run_loop_inner<'ir, 'task, B: BV>(
                 } else {
                     symbolic_length::eval_operands([arg], frame, shared_state, solver, *info)?
                 };
+                if solver.sym_bits_enabled() && !primop::sym_bits::supports_unary(*f) {
+                    primop::sym_bits::concretize(&mut args[0], solver, *info)?;
+                }
                 assert_eq!(args.len(), 1, "一元算子必须有一个操作数");
                 let arg = args.pop().unwrap();
                 let value = match merge_record::evaluate_primop(
@@ -2942,6 +2971,11 @@ fn run_loop_inner<'ir, 'task, B: BV>(
                         )?;
                     }
                 }
+                if solver.sym_bits_enabled() && !primop::sym_bits::supports_binary(*f) {
+                    for value in &mut args {
+                        primop::sym_bits::concretize(value, solver, *info)?;
+                    }
+                }
                 assert_eq!(args.len(), 2, "二元算子必须有两个操作数");
                 let arg2 = args.pop().unwrap();
                 let arg1 = args.pop().unwrap();
@@ -3013,7 +3047,12 @@ fn run_loop_inner<'ir, 'task, B: BV>(
             }
 
             Instr::PrimopVariadic(loc, f, args, info) => {
-                let args = symbolic_length::eval_operands(args, frame, shared_state, solver, *info)?;
+                let mut args = symbolic_length::eval_operands(args, frame, shared_state, solver, *info)?;
+                if solver.sym_bits_enabled() && !primop::sym_bits::supports_variadic(*f) {
+                    for value in &mut args {
+                        primop::sym_bits::concretize(value, solver, *info)?;
+                    }
+                }
                 let value = match merge_record::evaluate_primop(
                     frame,
                     solver,
@@ -3103,7 +3142,14 @@ fn run_loop_inner<'ir, 'task, B: BV>(
                                 | INSTR_ANNOUNCE
                                 | INTERRUPT_PENDING
                         ) {
-                            Some(symbolic_length::eval_operands(args, frame, shared_state, solver, *info)?)
+                            let mut operands =
+                                symbolic_length::eval_operands(args, frame, shared_state, solver, *info)?;
+                            if solver.sym_bits_enabled() {
+                                for value in &mut operands {
+                                    primop::sym_bits::concretize(value, solver, *info)?;
+                                }
+                            }
+                            Some(operands)
                         } else {
                             None
                         };
@@ -3287,6 +3333,9 @@ fn run_loop_inner<'ir, 'task, B: BV>(
                         if frame.function_assumptions.contains_key(f) {
                             for arg in &mut args {
                                 concrete_values::resolve(arg, &frame.local_state.concrete_choices, solver, *info)?;
+                                if solver.sym_bits_enabled() {
+                                    primop::sym_bits::concretize(arg, solver, *info)?;
+                                }
                             }
                         }
                         if frame.local_state.should_probe(shared_state, f) {
@@ -3395,7 +3444,15 @@ fn run_loop_inner<'ir, 'task, B: BV>(
 
                         // Set up a closure to restore our state when
                         // the function we call returns
-                        frame.stack_call = Some(Arc::new(move |ret, frame, shared_state, solver| {
+                        frame.stack_call = Some(Arc::new(move |mut ret, frame, shared_state, solver| {
+                            if solver.sym_bits_enabled()
+                                && (shared_state.registers.contains_key(&loc.id()) || matches!(loc, Loc::Addr(_)))
+                            {
+                                primop::sym_bits::concretize(&mut ret, solver, *info)?;
+                            }
+                            if shared_state.trace_functions.contains(&frame.function_name) {
+                                solver.trace_return(frame.function_name)
+                            }
                             pop_call_stack(frame);
                             if stats::region_progress::enabled() || stats::call_census::enabled() {
                                 cost::make_mut(&mut frame.local_state).call_instance = caller_instance;
@@ -3454,6 +3511,9 @@ fn run_loop_inner<'ir, 'task, B: BV>(
                             solver,
                             SourceLoc::unknown(),
                         )?;
+                        if solver.sym_bits_enabled() {
+                            primop::sym_bits::concretize(&mut value, solver, SourceLoc::unknown())?;
+                        }
                     }
                     stats::call_census::returned(frame.local_state.call_instance);
                     stats::region_progress::loop_return(frame, &shared_state.symtab);
@@ -3468,7 +3528,7 @@ fn run_loop_inner<'ir, 'task, B: BV>(
                         probe::args_info(tid, std::slice::from_ref(&value), shared_state, solver)
                     }
 
-                    if shared_state.trace_functions.contains(&frame.function_name) {
+                    if frame.stack_call.is_none() && shared_state.trace_functions.contains(&frame.function_name) {
                         solver.trace_return(frame.function_name)
                     }
 
@@ -3499,6 +3559,18 @@ fn run_loop_inner<'ir, 'task, B: BV>(
                 )?
                 .into_owned();
                 concrete_values::resolve(&mut val, &frame.local_state.concrete_choices, solver, *info)?;
+                if solver.sym_bits_enabled() && primop::sym_bits::is_dynamic(&val) {
+                    primop::sym_bits::concretize(&mut val, solver, *info)?;
+                    assign(
+                        tid,
+                        &Loc::Id(*id),
+                        val.clone(),
+                        cost::make_mut(&mut frame.local_state),
+                        shared_state,
+                        solver,
+                        *info,
+                    )?;
+                }
                 let val = match &val {
                     Val::MixedBits(_) => {
                         let normalized = replace_mixed_bits(val.clone(), solver, *info)?;
@@ -3729,7 +3801,7 @@ fn run_loop_inner<'ir, 'task, B: BV>(
                     );
                 }
 
-                if shared_state.trace_functions.contains(&frame.function_name) {
+                if frame.stack_call.is_none() && shared_state.trace_functions.contains(&frame.function_name) {
                     solver.trace_return(frame.function_name)
                 }
 

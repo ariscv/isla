@@ -87,7 +87,7 @@ fn materialized<B: BV>(value: &Val<B>, model: &mut Model<B>, shared: &SharedStat
                 values.iter().map(|value| materialized(value, model, shared)).collect::<Result<Vec<_>, _>>()?;
             Ok(if matches!(value, Val::Vector(_)) { json!({"vector":values}) } else { json!({"list":values}) })
         }
-        Val::SymbolicCtor(..) => materialized(&model.get_val(value)?, model, shared),
+        Val::SymbolicCtor(..) | Val::SymBits { .. } => materialized(&model.get_val(value)?, model, shared),
         Val::Guarded(guard, values) => {
             let selected = model.select_guarded(*guard, values)?;
             materialized(selected, model, shared)
@@ -223,6 +223,22 @@ fn equal<B: BV>(
         }
         let info = SourceLoc::unknown();
         let bits = bits.as_str().unwrap();
+        if let Val::SymBits { data, len, cap } = left {
+            if bits.len() > *cap as usize {
+                return Ok(Exp::Bool(false));
+            }
+            let width = bits.len();
+            let mut expected = if bits.is_empty() {
+                Vec::new()
+            } else {
+                crate::bitvector::bit_vector_from_str(&format!("#b{bits}")).expect("样本位串无效")
+            };
+            expected.resize(*cap as usize, false);
+            return Ok(Exp::And(
+                Box::new(Exp::Eq(Box::new(Exp::Var(*len)), Box::new(crate::primop_util::smt_i128(width as i128)))),
+                Box::new(Exp::Eq(Box::new(Exp::Var(*data)), Box::new(Exp::Bits(expected)))),
+            ));
+        }
         if crate::primop_util::merge_bit_width(left, solver, info)?.map(|width| width as usize) != Some(bits.len()) {
             return Ok(Exp::Bool(false));
         }
