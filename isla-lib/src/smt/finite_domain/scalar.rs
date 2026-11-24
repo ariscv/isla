@@ -357,7 +357,8 @@ impl<B: BV> Solver<'_, B> {
         };
         let width = self.length(sym).expect("具体化输入必须是位向量");
         let mut pass_bound = enabled() || self.operand_bound(sym, site).is_some();
-        let domain = self.resolve_scalar(sym, site);
+        let persist = consumer && matches!(&bounds, Some(OperandBounds::RequireWithin(_)));
+        let domain = self.resolve_scalar_in_scope(sym, site, persist);
         let bounded = matches!(domain, FiniteDomain::Bounded(_));
         let mut restricted = false;
         let mut requires_checked_replay = false;
@@ -527,6 +528,10 @@ impl<B: BV> Solver<'_, B> {
     }
 
     pub(crate) fn resolve_scalar(&self, sym: Sym, site: SourceLoc) -> FiniteDomain {
+        self.resolve_scalar_in_scope(sym, site, false)
+    }
+
+    pub(crate) fn resolve_scalar_in_scope(&self, sym: Sym, site: SourceLoc, persist: bool) -> FiniteDomain {
         if !enabled() {
             return self.operand_bound(sym, site).unwrap_or_else(|| self.finite_domain(sym));
         }
@@ -568,6 +573,29 @@ impl<B: BV> Solver<'_, B> {
                 }
                 FiniteDomain::Unknown => FiniteDomain::Bounded(values),
             },
+            _ if persist && self.region_queries_deferred() => {
+                let key = (sym, self.has_stashed_model(), self.region_queries_deferred());
+                let current = prefix.index.domains.borrow().get(&key).cloned();
+                if let Some(domain) = current {
+                    domain
+                } else if let Some(values) = prefix.scalar_upper(self, sym) {
+                    FiniteDomain::Bounded(values)
+                } else {
+                    let domain = self.finite_domain(sym);
+                    if matches!(domain, FiniteDomain::Bounded(_)) {
+                        if let Some(count) = self
+                            .savepoints
+                            .last()
+                            .and_then(|savepoint| prefix.scalar_proof_prefix(sym, savepoint.events_len))
+                        {
+                            if let Some(values) = self.scalar_definition_upper(&prefix, sym, count) {
+                                prefix.remember_scalar_upper(sym, count, values);
+                            }
+                        }
+                    }
+                    domain
+                }
+            }
             _ => self.finite_domain(sym),
         };
         match domain {

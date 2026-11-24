@@ -227,3 +227,75 @@ fn finite_domain_bool_visits_each_shared_comparison_subject_once() {
     assert!(counts[1] < 12 && AST_SIMPLIFY_CALLS.get() < 12);
     assert_eq!(solver.finite_domain_bool(&not(p.clone())), reference.reference_branch_bool(&not(p)));
 }
+
+#[test]
+fn narrow_slice_branch_exclusions_respect_prefix_and_grain() {
+    use Exp::*;
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let info = SourceLoc::unknown();
+    for grain in [0, 10] {
+        let mut solver = Solver::<B64>::new(&ctx);
+        let config = solver.declare_bitvector(8, info);
+        let field = || Box::new(Extract(4, 3, Box::new(Var(config))));
+        let excluded = not(Eq(field(), Box::new(Bits(vec![false, true]))));
+        let grain_allows = Bvslt(Box::new(bits64(grain, 64)), Box::new(bits64(1, 64)));
+        solver.assert(Or(Box::new(grain_allows), Box::new(excluded)));
+        let entry = checkpoint(&mut solver);
+        let mut solver = Solver::from_checkpoint(&ctx, entry);
+        let field_alias = solver.define_bitvector(*field(), info);
+        let na4 = Eq(Box::new(bits64(2, 2)), Box::new(Var(field_alias)));
+        let tor = Eq(Box::new(Var(field_alias)), Box::new(bits64(1, 2)));
+        assert_eq!(solver.finite_domain_bool(&na4), (grain == 10).then_some(false));
+        assert_eq!(solver.finite_domain_bool(&not(na4.clone())), (grain == 10).then_some(true));
+        assert_eq!(solver.finite_domain_bool(&tor), None);
+        assert_eq!(solver.check_sat_with(&na4, info), if grain == 10 { Unsat } else { Sat });
+        assert_eq!(solver.check_sat_with(&tor, info), Sat);
+    }
+}
+
+#[test]
+fn narrow_slice_branch_exclusions_do_not_escape_guarded_commit() {
+    use Exp::*;
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let info = SourceLoc::unknown();
+    let mut solver = Solver::<B64>::new(&ctx);
+    let config = solver.declare_bitvector(8, info);
+    let field = solver.define_bitvector(Extract(4, 3, Box::new(Var(config))), info);
+    let na4 = Eq(Box::new(Var(field)), Box::new(bits64(2, 2)));
+    let guard = solver.declare_const(Ty::Bool, info);
+    solver.start_transaction_with_guard(Some(Var(guard)));
+    solver.assert(not(Eq(Box::new(Extract(4, 3, Box::new(Var(config)))), Box::new(bits64(2, 2)))));
+    solver.commit_transaction();
+    assert_eq!(solver.finite_domain_bool(&na4), None);
+    assert_eq!(solver.check_sat_with(&na4, info), Sat);
+}
+
+#[test]
+fn arm_error_guard_detects_short_circuit_conflict() {
+    use Exp::*;
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let info = SourceLoc::unknown();
+    let mut solver = Solver::<B64>::new(&ctx);
+    let pte = solver.declare_bitvector(8, info);
+    let bit = |offset| Extract(offset, offset, Box::new(Var(pte)));
+    let writable = solver.define_const(Eq(Box::new(bit(2)), Box::new(bits64(1, 1))), info);
+    let unreadable = solver.define_const(Eq(Box::new(bit(1)), Box::new(bits64(0, 1))), info);
+    let reserved =
+        solver.define_const(Ite(Box::new(Var(writable)), Box::new(Var(unreadable)), Box::new(Bool(false))), info);
+    let readable = solver.define_const(Eq(Box::new(Bits(vec![true])), Box::new(bit(1))), info);
+    let writable = solver.define_const(Eq(Box::new(Bits(vec![true])), Box::new(bit(2))), info);
+    let implication =
+        solver.define_const(Ite(Box::new(Var(writable)), Box::new(Var(readable)), Box::new(Bool(true))), info);
+    let failure = not(Var(implication));
+    assert!(!solver.arm_error_guard_is_dead(&failure));
+    let tx = solver.start_transaction();
+    solver.with_transaction_condition(&not(Var(reserved)), |solver| {
+        assert!(solver.arm_error_guard_is_dead(&failure));
+        assert!(!solver.arm_error_guard_is_dead(&Var(implication)));
+    });
+    solver.rollback_transaction(tx);
+    assert!(!solver.arm_error_guard_is_dead(&failure));
+}

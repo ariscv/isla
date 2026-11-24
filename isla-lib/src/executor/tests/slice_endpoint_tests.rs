@@ -9,7 +9,7 @@ fn equal(sym: Sym, value: u64, width: u32) -> Formula<Sym> {
 }
 
 #[test]
-fn region_slice_endpoints_keep_eight_guards_and_join() {
+fn region_slice_endpoints_keep_eight_inputs_in_one_path() {
     use smtlib::Exp::{Bool, Bvadd, Bvmul, Bvsub, Ite, Not, Or, Var, ZeroExtend};
 
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
@@ -122,7 +122,7 @@ fn region_slice_endpoints_keep_eight_guards_and_join() {
                 }
             }
             assert_eq!(coverage, [1; 8], "每个输入必须由恰好一个路径守卫覆盖");
-            assert_eq!(paths, if strategy.is_some() { 1 } else { 8 }, "{strategy:?}, no_smt={no_smt}");
+            assert_eq!(paths, 1, "{strategy:?}, no_smt={no_smt}");
             if no_smt {
                 assert_eq!(queries, 0);
             }
@@ -136,7 +136,7 @@ fn finite_domain_width_proved_safe_by_its_definition() {
     use smtlib::Exp::{Bvule, Ite, Var};
 
     for no_smt in [true, false] {
-        let (results, queries) = run_length_consumer(no_smt, true, |solver, unrelated, variable| {
+        let (results, queries) = run_length_consumer(no_smt, true, B64::zeros, |solver, unrelated, variable| {
             let mode = solver.declare_const(smtlib::Ty::Bool, info());
             solver.assert(Bvule(Box::new(Var(unrelated)), Box::new(smtlib::bits64(100, 64))));
             let width = solver.define_const(
@@ -145,9 +145,10 @@ fn finite_domain_width_proved_safe_by_its_definition() {
             );
             (width, Instr::PrimopUnary(Loc::Id(RETURN), primop::unary_primops()["zeros"], Exp::Id(variable), info()))
         });
-        let mut widths: Vec<_> = results.into_iter().map(|result| result.unwrap().0).collect();
-        widths.sort_unstable();
-        assert_eq!(widths, [2, 3]);
+        let mut actual = results.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
+        actual.sort_unstable();
+        let inputs = (0..=9).collect::<Vec<_>>();
+        assert_eq!(actual, [(2, inputs.clone()), (3, inputs)]);
         if no_smt {
             assert_eq!(queries, 0);
         }

@@ -27,6 +27,8 @@ python3 test/path-merge/run_scenarios.py --bitvector both \
 python3 -m unittest discover -s test/path-merge
 ```
 
+`A23-symbolic-level-mask` 在三种合并模式下均要求一条完成路径，并逐一检查四种输入层级的掩码结果。`A24-symbolic-bitwidth-abstract` 将同一个掩码传给抽象原语，每种合并模式均要求按可行位宽生成四条完成路径。
+
 ## 新增场景
 
 用 `A1-concrete-diff-bits.sail` 的 [完整样例](scenarios/A1-concrete-diff-bits.sail) 起步。编号由 A–I 组字母、组内正整数编号和短英文名组成。源码通常 5–20 行，使用 Sail 标准库和 property 的共用配置。

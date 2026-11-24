@@ -1101,6 +1101,11 @@ fn scalar_resolver_consumers_share_guarded_length() {
             };
             let actual = call(Val::Symbolic(width)).unwrap();
             let expected = call(Val::I128(9)).unwrap();
+            if let Val::Bits(expected_bits) = expected {
+                assert_eq!(PROJECT_TRANSLATIONS.get(), 0, "{name} 的长度已由本臂唯一确定");
+                s.assert_test_bitvector(&actual, expected_bits);
+                continue;
+            }
             if name == "undefined_bitvector" {
                 assert_eq!(crate::primop_util::length_bits(&actual, s, loc).unwrap(), 9);
             } else if let Val::Symbolic(sym) = actual {
@@ -1312,6 +1317,113 @@ fn scalar_resolver_only_records_new_predicates() {
         assert_eq!(super::scalar::PREDICATE_VISITS.get(), 4, "每个子臂各新增一条断言和一个守卫");
         s.rollback_transaction(p);
     });
+}
+
+#[test]
+fn scalar_resolver_two_round_range_reference() {
+    two_round_range_scope(false);
+}
+
+#[test]
+fn scalar_resolver_two_round_range_persist() {
+    two_round_range_scope(true);
+}
+
+fn two_round_range_scope(persist: bool) {
+    use super::arithmetic::COMBINED_VALUES_CALLS;
+    use crate::smt::test_query_count;
+    use Exp::*;
+    let name =
+        if persist { "scalar_resolver_two_round_range_persist" } else { "scalar_resolver_two_round_range_reference" };
+    if !resolver_test(name) {
+        return;
+    }
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let site = SourceLoc::unknown();
+    let wide = solver.declare_const(Ty::Bool, site);
+    let extra = solver.declare_bitvector(8, site);
+    solver.assert(Bvult(Box::new(Var(extra)), Box::new(bits64(7, 8))));
+    let choose = |guard, yes, no| Ite(Box::new(Var(guard)), Box::new(yes), Box::new(no));
+    let mut exponent = bits64(0, 8);
+    for n in 1..=3 {
+        let guard = solver.declare_const(Ty::Bool, site);
+        exponent = choose(guard, bits64(n, 8), exponent);
+    }
+    exponent = choose(wide, bits64(4, 8), exponent);
+    let len = solver.define_const(Bvshl(Box::new(bits64(1, 8)), Box::new(exponent)), site);
+    let ram1 = solver.declare_const(Ty::Bool, site);
+    let ram2 = solver.declare_const(Ty::Bool, site);
+    let ram3 = solver.declare_const(Ty::Bool, site);
+    let values = |domain| {
+        let (FiniteDomain::Known(mut values) | FiniteDomain::Bounded(mut values)) = domain else {
+            panic!("读长应有有限域");
+        };
+        values.sort_by_key(|v| match v {
+            Bits64(bits) => bits.lower_u64(),
+            _ => unreachable!(),
+        });
+        values
+    };
+    let expected: Vec<_> = [1, 2, 4, 8].map(|v| bits64(v, 8)).into();
+    let mut wider = expected.clone();
+    wider.push(bits64(16, 8));
+
+    let root = solver.start_transaction();
+    solver.with_deferred_region_queries(|s| {
+        let consume = |s: &Solver<'_, B64>| {
+            let combined = COMBINED_VALUES_CALLS.get();
+            let native = test_query_count();
+            let domain = if persist { s.resolve_scalar_in_scope(len, site, true) } else { s.resolve_scalar(len, site) };
+            let domain = values(domain);
+            (domain, COMBINED_VALUES_CALLS.get() - combined, test_query_count() - native)
+        };
+
+        s.start_transaction_with_guard(Some(Var(ram1)));
+        // 第一轮的局部前提排除 16 字节。父前缀仍允许该值。
+        s.assert(not(Var(wide)));
+        let first = consume(s);
+        assert_eq!(first.0, expected);
+        assert!(s.defer_scalar_range(len, &(1..=8), Some(&expected), site));
+        assert_eq!(
+            PathConditions::new(s).unwrap().bounds(&Var(len)).map(|v| values(FiniteDomain::Bounded(v))),
+            Some(expected.clone())
+        );
+        assert_eq!(s.check_deferred_assertions(site), Some(SmtResult::Unsat));
+        s.commit_transaction();
+        assert_eq!(PathConditions::new(s).unwrap().bounds(&Var(len)), None);
+
+        let second_round = s.start_transaction_with_guard(Some(Var(ram2)));
+        let second = consume(s);
+        eprintln!("首轮（联合枚举，原生查询）= {:?}，次轮 = {:?}", (first.1, first.2), (second.1, second.2));
+        assert_eq!(second.0, wider);
+        s.rollback_transaction(second_round);
+        assert_eq!(consume(s).0, wider);
+        assert_eq!((first.1, first.2, second.1, second.2), (1, 0, usize::from(!persist), 0));
+
+        let local = s.start_transaction();
+        s.assert(not(equal(len, 16)));
+        assert_eq!(consume(s).0, expected);
+        s.rollback_transaction(local);
+        assert_eq!(consume(s).0, wider);
+
+        s.start_transaction_with_guard(Some(Var(ram3)));
+        s.assert(not(equal(len, 16)));
+        assert_eq!(consume(s).0, expected);
+        s.commit_transaction();
+        let sibling = s.start_transaction_with_guard(Some(not(Var(ram3))));
+        assert_eq!(consume(s).0, wider);
+        s.rollback_transaction(sibling);
+    });
+
+    let second_only =
+        |length| And(Box::new(not(Var(ram1))), Box::new(And(Box::new(Var(ram2)), Box::new(equal(len, length)))));
+    for length in [1, 2, 4, 8, 16] {
+        assert!(solver.check_sat_with(&second_only(length), site).is_sat().unwrap(), "第 2 轮读长 {length} 字节");
+    }
+    assert!(solver.check_sat_with(&And(Box::new(Var(ram1)), Box::new(equal(len, 16))), site).is_unsat().unwrap());
+    solver.rollback_transaction(root);
 }
 
 #[test]

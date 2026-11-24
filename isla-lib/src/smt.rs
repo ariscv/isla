@@ -2152,6 +2152,8 @@ pub struct Solver<'ctx, B> {
     declaration_undo: Vec<DeclarationUndo<'ctx>>,
     // 批量错误叶认证独占的翻译器。每条断言在当时的符号绑定下冻结。
     replay_assertions: Option<Vec<Ast<'ctx>>>,
+    // B 入口的可变断言后缀，在查询时与正文缓冲一起送入 Z3。
+    arm_entry_assumptions: Vec<Ast<'ctx>>,
     replaying_arm_entry: bool,
     arm_body_enums: Option<Vec<Name>>,
     transaction_events: Vec<Event<B>>,
@@ -2408,6 +2410,21 @@ impl<'ctx, B: BV> Model<'ctx, B> {
         let complete_model = self.complete_model;
         self.complete_model = true;
         let result = (|| match var {
+            SymBits { data, len, cap } => {
+                let ModelVal::Exp(Exp::Bits(length)) = self.get_var(*len)? else {
+                    panic!("符号长度必须是 128 位整数");
+                };
+                let length = crate::primop::i128_from_model_bits(&length).expect("长度必须能表示为整数");
+                let length = usize::try_from(length).expect("长度必须非负");
+                let bits = match self.get_var(*data)? {
+                    ModelVal::Exp(Exp::Bits(bits)) => bits,
+                    ModelVal::Exp(Exp::Bits64(bits)) => bits.to_vec(),
+                    _ => panic!("符号长度位向量的承载数据必须是位向量"),
+                };
+                assert_eq!(bits.len(), *cap as usize);
+                assert!(length <= bits.len() && bits[length..].iter().all(|bit| !bit));
+                Ok(Val::from_bits_slice(&bits[..length]))
+            }
             Guarded(guard, values) => {
                 let selected = self.select_guarded(*guard, values)?;
                 self.get_val(selected)
@@ -2977,6 +2994,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 savepoints: Vec::new(),
                 declaration_undo: Vec::new(),
                 replay_assertions: None,
+                arm_entry_assumptions: Vec::new(),
                 replaying_arm_entry: false,
                 arm_body_enums: None,
                 transaction_events: Vec::new(),
@@ -3303,7 +3321,10 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let _ = &cost_scope;
         crate::executor::stats::region_cost::count(crate::executor::stats::region_cost::Category::ReplayAssert, 1, 0);
         let mut ast = self.translate_exp(exp);
-        ast.simplify();
+        // B 臂的入口只需恢复等价的断言。原生求解器在消费这些 AST 时处理它们。
+        if !self.replaying_arm_entry || self.replay_assertions.is_none() {
+            ast.simplify();
+        }
         if let Some(assertions) = &mut self.replay_assertions {
             assertions.push(ast);
         } else {
@@ -3330,8 +3351,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 self.knowledge.constrain();
                 self.asserts_since_check += 1;
                 self.clear_stashed_model();
-                let vars = exp.variables();
                 if cfg!(feature = "smtperf") {
+                    let vars = exp.variables();
                     for v1 in vars.iter() {
                         for v2 in vars.iter() {
                             if v1 != v2 {
@@ -4663,6 +4684,47 @@ mod tests {
     use super::Exp::*;
     use super::*;
 
+    #[cfg(not(feature = "smtperf"))]
+    #[test]
+    fn arm_replay_appends_assertions_without_repeated_simplification_or_push() {
+        configure_tastic(Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let info = SourceLoc::unknown();
+        let mut parent = Solver::<B64>::new(&ctx);
+        let input = parent.declare_const(Ty::Bool, info);
+        let selector = parent.declare_const(Ty::Bool, info);
+        parent.assert(Or(Box::new(Var(input)), Box::new(Var(selector))));
+        let prefix = parent.arm_entry_checkpoint();
+        let branch = |side: bool| {
+            let mut parent = Solver::from_checkpoint(&ctx, prefix.clone());
+            parent.assert_eq(Var(selector), Bool(side));
+            parent.arm_entry_checkpoint()
+        };
+        let left = branch(true);
+        let right = branch(false);
+        let mut replay = ArmReplay::new(&ctx);
+        let scopes = |solver: &Solver<B64>| unsafe { Z3_solver_get_num_scopes(ctx.z3_ctx, solver.z3_solver) };
+        let before = AST_SIMPLIFY_CALLS.get();
+        let (solver, _) = replay.restore(prefix);
+        let prefix_scopes = scopes(solver);
+        assert_eq!(prefix_scopes, 0, "可变的断言后缀应留在查询假设中");
+        let initial_simplifications = AST_SIMPLIFY_CALLS.get() - before;
+        replay.finish();
+        let before = AST_SIMPLIFY_CALLS.get();
+        let (solver, _) = replay.restore(left);
+        let append_scopes = scopes(solver);
+        let append_simplifications = AST_SIMPLIFY_CALLS.get() - before;
+        assert_eq!(solver.check_sat_with(&Not(Box::new(Var(input))), info), Sat);
+        replay.finish();
+        let (solver, _) = replay.restore(right);
+        assert_eq!(solver.check_sat_with(&Not(Box::new(Var(input))), info), Unsat);
+        assert_eq!(solver.check_sat_with(&Var(input), info), Sat);
+        replay.finish();
+
+        assert_eq!(append_scopes, prefix_scopes, "短后缀应追加到当前原生作用域");
+        assert_eq!(initial_simplifications + append_simplifications, 0, "入口只构造断言，交由求解器处理");
+    }
+
     #[test]
     fn arm_replay_rewinds_sibling_assertions_rebindings_and_enums() {
         configure_tastic(Tactic::Qfaufbv);
@@ -5673,6 +5735,46 @@ impl<B> Trace<B> {
 #[cfg(test)]
 pub(crate) fn test_query_count() -> usize {
     z3_timeout::test_query_count()
+}
+
+#[cfg(test)]
+impl<B: BV> Solver<'_, B> {
+    /// 在独立求解器中核对活动路径的位宽和数据，包括事务内的守卫。
+    pub(crate) fn assert_test_bitvector(&self, value: &Val<B>, expected: B) {
+        use smtlib::Exp::{Bits, Neq, Or, Var};
+
+        let info = SourceLoc::unknown();
+        let mut config = Config::new();
+        config.solver_options.no_smt = false;
+        let context = Context::new(config);
+        let mut verification = Solver::from_checkpoint(&context, self.checkpoint_snapshot());
+        assert!(verification.check_sat(info).is_sat().unwrap(), "要验证的路径必须可达");
+        let unequal = |actual, expected| Neq(Box::new(actual), Box::new(expected));
+        let width = expected.len();
+        let different = match value {
+            Val::Bits(actual) => {
+                assert_eq!(*actual, expected);
+                return;
+            }
+            Val::Symbolic(data) => {
+                assert_eq!(verification.length(*data), Some(width));
+                unequal(Var(*data), Bits(expected.to_vec()))
+            }
+            Val::SymBits { data, len, cap } => {
+                assert_eq!(verification.length(*data), Some(*cap));
+                assert_eq!(verification.length(*len), Some(128));
+                assert!(width <= *cap);
+                let mut padded = expected.to_vec();
+                padded.resize(*cap as usize, false);
+                Or(
+                    Box::new(unequal(Var(*len), smtlib::bits64(u64::from(width), 128))),
+                    Box::new(unequal(Var(*data), Bits(padded))),
+                )
+            }
+            _ => panic!("预期位向量，实际 {value:?}"),
+        };
+        assert!(verification.check_sat_with(&different, info).is_unsat().unwrap(), "{value:?} 与 {expected:?} 不同");
+    }
 }
 
 // 只在显式内存采样时遍历；不创建 checkpoint、不翻译表达式、不查询 Z3。

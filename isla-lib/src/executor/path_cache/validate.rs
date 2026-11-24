@@ -1,17 +1,79 @@
 //! 结构检查只核对快照的可重建性，不复核当前 IR 语义。
 use super::{event::*, expr::*, value::*, *};
-use crate::{bitvector::BV, ir::Name};
+use crate::{
+    bitvector::BV,
+    ir::Name,
+    smt::{smtlib, Sym},
+};
 use std::{
     collections::{HashMap, HashSet},
     ops::Range,
 };
 
-struct Validator<'a> {
+#[derive(Clone, Copy)]
+enum EventLimit {
+    Prefix(usize),
+    Tail(usize),
+    Complete,
+}
+
+struct LegacySorts<'a, B> {
+    segments: &'a [LinkedSegment<B>],
+    position: Option<(u64, EventLimit)>,
+}
+
+impl<B> LegacySorts<'_, B> {
+    /// 只有原型缓存含内部值时才推导排序，按当前事件可见的父链和共享前缀重放声明。
+    fn check(&self, data: u32, len: u32, cap: u32) {
+        let (current, limit) = self.position.expect("缓存 SymBits 缺少声明");
+        let chain = std::iter::successors(Some(current), |&id| self.segments[id as usize].parent).collect::<Vec<_>>();
+        let mut constants = HashMap::new();
+        let mut functions = HashMap::new();
+        for id in chain.into_iter().rev() {
+            let segment = &self.segments[id as usize];
+            let prefix = match &segment.head_prefix {
+                None => &[],
+                Some(HeadPrefix::Define(events)) => events.as_slice(),
+                Some(HeadPrefix::Reference(owner)) => match &self.segments[*owner as usize].head_prefix {
+                    Some(HeadPrefix::Define(events)) => events.as_slice(),
+                    _ => panic!("缓存共享前缀不存在"),
+                },
+            };
+            let (prefix, tail) = match if id == current { limit } else { EventLimit::Complete } {
+                EventLimit::Prefix(count) => (&prefix[..count], &[][..]),
+                EventLimit::Tail(count) => (prefix, &segment.events[..count]),
+                EventLimit::Complete => (prefix, segment.events.as_slice()),
+            };
+            for event in prefix.iter().chain(tail) {
+                match event {
+                    Event::Smt(Def::DeclareConst(symbol, ty), _, _) => {
+                        constants.insert(Sym::from_u32(*symbol), ty.clone().into());
+                    }
+                    Event::Smt(Def::DeclareFun(symbol, args, result), _, _) => {
+                        let args = args.iter().cloned().map(Into::into).collect();
+                        functions.insert(Sym::from_u32(*symbol), (args, result.clone().into()));
+                    }
+                    Event::Smt(Def::DefineConst(symbol, exp), _, _) => {
+                        let exp: smtlib::Exp<Sym> = exp.clone().into();
+                        let ty = exp.infer(&constants, &functions).expect("缓存无法推导 SMT 常量排序");
+                        constants.insert(Sym::from_u32(*symbol), ty);
+                    }
+                    _ => (),
+                }
+            }
+        }
+        assert_eq!(constants.get(&Sym::from_u32(data)), Some(&smtlib::Ty::BitVec(cap)), "SymBits 数据位宽必须等于容量");
+        assert_eq!(constants.get(&Sym::from_u32(len)), Some(&smtlib::Ty::BitVec(128)), "SymBits 长度必须为 128 位");
+    }
+}
+
+struct Validator<'a, B> {
     names: &'a NameEnvironment,
     constants: HashSet<u32>,
     functions: HashSet<u32>,
     max_used: Option<u32>,
     declarations: Vec<Declaration>,
+    legacy_sorts: Option<LegacySorts<'a, B>>,
 }
 
 #[derive(Clone, Copy)]
@@ -19,7 +81,7 @@ enum Declaration {
     Constant(u32),
     Function(u32),
 }
-impl Validator<'_> {
+impl<B: BV> Validator<'_, B> {
     fn used(&mut self, symbol: u32) {
         self.max_used = Some(self.max_used.map_or(symbol, |m| m.max(symbol)));
     }
@@ -449,13 +511,24 @@ impl Validator<'_> {
         }
     }
 
-    fn value<B: BV>(&mut self, value: &Val<B>) {
+    fn reject_sym_bits(&mut self, data: u32, len: u32, cap: u32) -> ! {
+        assert!(cap > 0, "符号长度位向量的容量必须为正");
+        self.constant(data);
+        self.constant(len);
+        if let Some(sorts) = &self.legacy_sorts {
+            sorts.check(data, len, cap);
+        }
+        panic!("版本 7 路径缓存不能包含 SymBits");
+    }
+
+    fn value(&mut self, value: &Val<B>) {
         match value {
             Val::Guarded(guard, values) => {
                 self.constant(*guard);
                 self.value(&values.0);
                 self.value(&values.1);
             }
+            Val::SymBits { data, len, cap } => self.reject_sym_bits(*data, *len, *cap),
             Val::Symbolic(s) => self.constant(*s),
             Val::MixedBits(parts) => {
                 for p in parts {
@@ -497,7 +570,7 @@ impl Validator<'_> {
             Val::I64(_) | Val::I128(_) | Val::Bool(_) | Val::String(_) | Val::Unit | Val::Poison => (),
         }
     }
-    fn event<B: BV>(&mut self, event: &Event<B>) {
+    fn event(&mut self, event: &Event<B>) {
         match event {
             Event::Smt(def, attrs, _) => {
                 assert_eq!(attrs.bits & !3, 0, "缓存定义属性包含未知位");
@@ -600,7 +673,7 @@ struct SegmentState {
 
 /// 段事件只检查一次。切换父链时只更新声明集合，复用共有祖先及共享前缀的校验状态。
 pub struct PathValidator<'a, B> {
-    state: Validator<'a>,
+    state: Validator<'a, B>,
     segments: Vec<SegmentState>,
     scopes: Vec<Scope>,
     active: Vec<usize>,
@@ -619,6 +692,7 @@ impl<'a, B: BV> PathValidator<'a, B> {
                 functions: HashSet::new(),
                 max_used: None,
                 declarations: Vec::new(),
+                legacy_sorts: None,
             },
             segments: Vec::new(),
             scopes: Vec::new(),
@@ -627,6 +701,32 @@ impl<'a, B: BV> PathValidator<'a, B> {
             signatures: HashSet::new(),
             pre_state,
             pma,
+        }
+    }
+
+    pub fn validate_read(
+        names: &'a NameEnvironment,
+        pre_state: &'a [(Name, Val<B>)],
+        pma: &'a [(String, u32)],
+        segments: &'a [LinkedSegment<B>],
+        paths: &[CachedPath<B>],
+    ) {
+        let mut validator = Self::new(names, pre_state, pma);
+        validator.state.legacy_sorts = Some(LegacySorts { segments, position: None });
+        for segment in segments {
+            validator.segment(segment);
+        }
+        for path in paths {
+            validator.path(path);
+        }
+        // 空缓存可以保留符号前态，此时没有任何路径为原型值提供声明作用域。
+        if paths.is_empty() {
+            for (_, value) in pre_state {
+                if let Some((data, len, cap)) = value.legacy_sym_bits() {
+                    validator.select_scope(None);
+                    validator.state.reject_sym_bits(data, len, cap);
+                }
+            }
         }
     }
 
@@ -660,10 +760,14 @@ impl<'a, B: BV> PathValidator<'a, B> {
         self.state.max_used = self.active.last().and_then(|id| self.scopes[*id].max_used);
     }
 
-    fn add_scope(&mut self, parent: Option<usize>, events: &[Event<B>]) -> usize {
+    fn add_scope(&mut self, parent: Option<usize>, segment: u64, prefix: bool, events: &[Event<B>]) -> usize {
         self.select_scope(parent);
         let start = self.state.declarations.len();
-        for event in events {
+        for (index, event) in events.iter().enumerate() {
+            if let Some(sorts) = &mut self.state.legacy_sorts {
+                let limit = if prefix { EventLimit::Prefix(index) } else { EventLimit::Tail(index) };
+                sorts.position = Some((segment, limit));
+            }
             self.state.event(event);
         }
         let id = self.scopes.len();
@@ -688,7 +792,7 @@ impl<'a, B: BV> PathValidator<'a, B> {
         let parent_scope = parent.map(|parent| parent.scope);
         let (scope, prefix_len, definition) = match &segment.head_prefix {
             Some(HeadPrefix::Define(events)) => {
-                let scope = self.add_scope(parent_scope, events);
+                let scope = self.add_scope(parent_scope, segment.id, true, events);
                 (Some(scope), events.len() as u64, Some((scope, events.len() as u64)))
             }
             Some(HeadPrefix::Reference(id)) => {
@@ -701,7 +805,7 @@ impl<'a, B: BV> PathValidator<'a, B> {
             None => (parent_scope, 0, None),
         };
         assert_eq!(segment.event_count, prefix_len + segment.events.len() as u64, "缓存段事件数不一致");
-        let scope = self.add_scope(scope, &segment.events);
+        let scope = self.add_scope(scope, segment.id, false, &segment.events);
         self.segments.push(SegmentState { scope, depth: depth + 1, parent: segment.parent, prefix: definition });
     }
 
@@ -717,6 +821,9 @@ impl<'a, B: BV> PathValidator<'a, B> {
         assert_eq!(path.checkpoint.num, leaf.map_or(0, |leaf| leaf.depth), "缓存检查点段数不一致");
         self.select_scope(leaf.map(|leaf| leaf.scope));
         let validator = &mut self.state;
+        if let Some(sorts) = &mut validator.legacy_sorts {
+            sorts.position = path.checkpoint.leaf.map(|id| (id, EventLimit::Complete));
+        }
         for value in path.path.pre.values().chain(path.path.post.values()).chain(std::iter::once(&path.path.result)) {
             validator.value(value);
         }
@@ -786,6 +893,62 @@ impl<'a, B: BV> PathValidator<'a, B> {
 mod tests {
     use super::*;
     use crate::{bitvector::b64::B64, source_loc::SourceLoc};
+
+    #[test]
+    fn legacy_symbolic_length_checks_sorts_defined_in_trace() {
+        let names = NameEnvironment { symbols: vec!["f".into()], mangled_names: vec![], enums: vec![], files: vec![] };
+        let smt = |def| Event::<B64>::Smt(def, DefAttrs { bits: 0 }, SourceLoc::unknown());
+        let abstract_event = |cap| Event::Abstract {
+            name: Name::from_u32(0),
+            primitive: true,
+            args: vec![Val::List(vec![Val::SymBits { data: 3, len: 4, cap }])],
+            return_value: Val::Unit,
+        };
+        for (cap, len_width, message) in [
+            (9, 128, "数据位宽必须等于容量"),
+            (8, 127, "长度必须为 128 位"),
+            (8, 128, "版本 7 路径缓存不能包含 SymBits"),
+        ] {
+            let tail = vec![
+                smt(Def::DefineConst(3, Exp::App(1, vec![Exp::Bool(true)]))),
+                smt(Def::DefineConst(4, Exp::ZeroExtend(len_width - 64, Box::new(Exp::Var(2))))),
+                abstract_event(cap),
+            ];
+            let segments = [
+                LinkedSegment {
+                    id: 0,
+                    parent: None,
+                    checkpoints: 0,
+                    event_count: 1,
+                    head_prefix: None,
+                    events: vec![smt(Def::DeclareFun(1, vec![Ty::Bool], Ty::BitVec(8)))],
+                },
+                LinkedSegment {
+                    id: 1,
+                    parent: Some(0),
+                    checkpoints: 1,
+                    event_count: 2,
+                    head_prefix: Some(HeadPrefix::Define(vec![smt(Def::DeclareConst(2, Ty::BitVec(64)))])),
+                    events: vec![smt(Def::DeclareConst(3, Ty::BitVec(16)))],
+                },
+                LinkedSegment {
+                    id: 2,
+                    parent: Some(0),
+                    checkpoints: 1,
+                    event_count: 4,
+                    head_prefix: Some(HeadPrefix::Reference(1)),
+                    events: tail,
+                },
+            ];
+            let error = std::panic::catch_unwind(|| {
+                PathValidator::validate_read(&names, &[], &[], &segments, &[]);
+            })
+            .unwrap_err();
+            let text =
+                error.downcast_ref::<String>().map(String::as_str).or_else(|| error.downcast_ref::<&str>().copied());
+            assert!(text.is_some_and(|text| text.contains(message)), "{text:?}");
+        }
+    }
 
     #[test]
     fn shared_prefix_scope_keeps_declarations_out_of_siblings() {

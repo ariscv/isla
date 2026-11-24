@@ -11,7 +11,7 @@ fn lengths(
     enabled: bool,
     assertions: impl FnOnce(&mut Solver<B64>, Sym),
 ) -> (Vec<Result<(u32, Vec<u64>), ExecError>>, usize) {
-    run_length_consumer(no_smt, enabled, |solver, symbol, variable| {
+    run_length_consumer(no_smt, enabled, B64::zeros, |solver, symbol, variable| {
         assertions(solver, symbol);
         (symbol, Instr::PrimopUnary(Loc::Id(RETURN), primop::unary_primops()["zeros"], Exp::Id(variable), info()))
     })
@@ -20,6 +20,7 @@ fn lengths(
 pub(super) fn run_length_consumer(
     no_smt: bool,
     enabled: bool,
+    expected_bits: impl Fn(u32) -> B64,
     consumer: impl FnOnce(&mut Solver<B64>, Sym, Name) -> (Sym, Instr<Name, B64>),
 ) -> (Vec<Result<(u32, Vec<u64>), ExecError>>, usize) {
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
@@ -61,15 +62,30 @@ pub(super) fn run_length_consumer(
         );
         queries += crate::smt::test_query_count() - start;
         match result {
-            Ok(Run::Finished(Val::Bits(value))) => {
+            Ok(Run::Finished(value)) => {
                 let mut solver = Solver::from_checkpoint(&verification, checkpoint(&mut solver));
+                let width = match value {
+                    Val::Bits(bits) => {
+                        assert_eq!(bits, expected_bits(bits.len()));
+                        bits.len()
+                    }
+                    Val::Symbolic(data) => {
+                        let width = solver.length(data).expect("路径出口须有定长位向量");
+                        let different =
+                            Formula::Neq(Box::new(Formula::Var(data)), Box::new(Formula::Bits64(expected_bits(width))));
+                        assert!(solver.check_sat_with(&different, info()).is_unsat().unwrap());
+                        width
+                    }
+                    _ => panic!("路径出口须有定长位向量，实际 {value:?}"),
+                };
                 let values = (0..=9)
                     .filter(|value| solver.check_sat_with(&equal(symbol, *value), info()).is_sat().unwrap())
                     .collect();
-                results.push(Ok((value.len(), values)));
+                results.push(Ok((width, values)));
             }
             Ok(Run::Dead) => (),
-            Ok(_) => panic!("意外的终态"),
+            Ok(Run::Exit) => panic!("长度消费者意外退出"),
+            Ok(Run::Suspended) => panic!("长度消费者意外挂起"),
             Err(error) => results.push(Err(error)),
         }
     }
@@ -368,13 +384,13 @@ fn symbolic_finite_domain_concretizes_scaled_length_and_range() {
         solver.define_const(Formula::Bvsub(Box::new(Formula::Var(length)), Box::new(smtlib::bits64(1, 128))), info());
     let start = crate::smt::test_query_count();
     let zeros = primop::unary_primops::<B64>()["zeros"];
-    assert_eq!(zeros(Val::Symbolic(length), &mut solver, info()).unwrap(), Val::Bits(B64::zeros(64)));
-    assert_eq!(
+    let zero_value = zeros(Val::Symbolic(length), &mut solver, info()).unwrap();
+    let slice =
         primop::subrange_internal(Val::Bits(B64::ones(64)), Val::Symbolic(high), Val::I128(0), &mut solver, info())
-            .unwrap(),
-        Val::Bits(B64::ones(64))
-    );
+            .unwrap();
     assert_eq!(crate::smt::test_query_count() - start, 0);
+    solver.assert_test_bitvector(&zero_value, B64::zeros(64));
+    solver.assert_test_bitvector(&slice, B64::ones(64));
     for tx in txs.into_iter().rev() {
         solver.rollback_transaction(tx);
     }
@@ -382,6 +398,7 @@ fn symbolic_finite_domain_concretizes_scaled_length_and_range() {
 
 #[test]
 fn symbolic_finite_domain_zero_extend_with_bounded_width() {
+    let one = |width| B64::new(1, width);
     for (no_smt, constrain_other, input_width, expected) in [
         (true, false, 1, Some(vec![(32, vec![4]), (64, vec![8])])),
         (false, false, 1, Some(vec![(32, vec![4]), (64, vec![8])])),
@@ -389,7 +406,7 @@ fn symbolic_finite_domain_zero_extend_with_bounded_width() {
         (false, true, 1, Some(vec![(32, vec![4])])),
         (true, true, 40, None),
     ] {
-        let (results, queries) = run_length_consumer(no_smt, true, |solver, bytes, variable| {
+        let (results, queries) = run_length_consumer(no_smt, true, one, |solver, bytes, variable| {
             let address = solver.declare_bitvector(64, info());
             let is_device = equal(address, 4096);
             // 设备臂的短路条件确保访问宽度是 4 或 8 字节。
@@ -450,8 +467,8 @@ fn symbolic_finite_domain_zero_extend_with_bounded_width() {
 
 #[test]
 fn symbolic_finite_domain_subrange_with_guarded_high_bound() {
-    for (no_smt, source_width) in [(true, 64), (false, 64), (true, 48)] {
-        let (results, queries) = run_length_consumer(no_smt, true, |solver, mode, high| {
+    for (no_smt, source_width) in [(true, 64), (false, 64), (true, 48), (false, 48)] {
+        let (results, queries) = run_length_consumer(no_smt, true, B64::ones, |solver, mode, high| {
             let is_short = equal(mode, 1);
             solver.assert(Formula::Or(Box::new(is_short.clone()), Box::new(equal(mode, 2))));
             let other = solver.declare_bitvector(64, info());
@@ -483,7 +500,24 @@ fn symbolic_finite_domain_subrange_with_guarded_high_bound() {
             actual.sort();
             assert_eq!(actual, [(39, vec![1]), (57, vec![2])]);
         } else {
-            assert!(results.iter().all(|result| !matches!(result, Ok((57, _)))));
+            let mut successful = Vec::new();
+            let mut errors = Vec::new();
+            for result in results {
+                match result {
+                    Ok(path) => successful.push(path),
+                    Err(error) => errors.push(error),
+                }
+            }
+            assert_eq!(successful, [(39, vec![1])]);
+            if no_smt {
+                assert!(errors.is_empty(), "无 SMT 只发布满足安全约束的候选，实际 {errors:?}");
+            } else {
+                assert!(
+                    matches!(errors.as_slice(), [ExecError::Type(message, _)]
+                    if message == "subrange 的长度或范围无效"),
+                    "{errors:?}"
+                );
+            }
         }
         if no_smt {
             assert_eq!(queries, 0);
@@ -493,7 +527,8 @@ fn symbolic_finite_domain_subrange_with_guarded_high_bound() {
 
 #[test]
 fn symbolic_finite_domain_projects_through_integer_conversions() {
-    let (results, queries) = run_length_consumer(true, true, |solver, bytes, variable| {
+    let one = |width| B64::new(1, width);
+    let (results, queries) = run_length_consumer(true, true, one, |solver, bytes, variable| {
         let wide = solver.define_const(Formula::SignExtend(64, Box::new(Formula::Var(bytes))), info());
         let four_or_eight = [4, 8]
             .into_iter()

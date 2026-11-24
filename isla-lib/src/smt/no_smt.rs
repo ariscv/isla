@@ -99,6 +99,13 @@ impl<B: BV> Solver<'_, B> {
         true
     }
 
+    pub(crate) fn structural_int_bounds(&self, exp: &Exp<Sym>) -> Option<(i128, i128)> {
+        let mut value = self.translate_exp(exp);
+        value.simplify();
+        let range = unsafe { bitvector_range(self.ctx, value.z3_ast)? };
+        Some((range.min, range.max))
+    }
+
     /// 判定层统一选择立即验证或登记义务；常量 false 仍由调用方的死臂路径处理。
     pub(crate) fn defer_symbolic_assertion(&mut self, condition: Exp<Sym>, info: SourceLoc) -> bool {
         if !self.no_smt() && !self.deferred_region_queries {
@@ -384,10 +391,7 @@ unsafe fn bitvector_range(ctx: &Context, root: Z3_ast) -> Option<BitvectorRange>
             k if [DeclKind::BAND, DeclKind::CONCAT, DeclKind::BADD, DeclKind::BSUB].map(|d| d as u32).contains(&k) => {
                 0..arity
             }
-            _ if negated.is_some() => {
-                let index = negated.unwrap();
-                index..index + 1
-            }
+            k if k == DeclKind::BMUL as u32 || k == DeclKind::BSHL as u32 => 0..arity,
             _ => {
                 bounds.insert(ast, Some(full));
                 continue;
@@ -402,7 +406,7 @@ unsafe fn bitvector_range(ctx: &Context, root: Z3_ast) -> Option<BitvectorRange>
         let operand = |index| bounds[&arg(index)];
         let range = (|| {
             if negated.is_some() || kind == DeclKind::BNEG as u32 {
-                let value = operand(args.start)?;
+                let value = operand(negated.unwrap_or(args.start))?;
                 let (min, max) = (value.max.checked_neg()?, value.min.checked_neg()?);
                 return (min >= full.min && max <= full.max).then(|| with_signed((min, max)));
             }
@@ -454,6 +458,29 @@ unsafe fn bitvector_range(ctx: &Context, root: Z3_ast) -> Option<BitvectorRange>
                             .filter(|&(min, max)| min >= full.min && max <= full.max)
                             .map_or(unsigned, |(min, max)| unsigned.intersect_signed(min, max, mask)),
                     )
+                }
+                k if k == DeclKind::BMUL as u32 => {
+                    let (min, max) = args.map(operand).try_fold((1i128, 1i128), |(min, max), value| {
+                        let value = value?;
+                        let endpoints = [
+                            min.checked_mul(value.min)?,
+                            min.checked_mul(value.max)?,
+                            max.checked_mul(value.min)?,
+                            max.checked_mul(value.max)?,
+                        ];
+                        Some((*endpoints.iter().min().unwrap(), *endpoints.iter().max().unwrap()))
+                    })?;
+                    (min >= full.min && max <= full.max).then(|| with_signed((min, max)))
+                }
+                k if k == DeclKind::BSHL as u32 => {
+                    let shift = numeral(ctx, arg(1))?;
+                    if shift >= u128::from(width) {
+                        return Some(with_signed((0, 0)));
+                    }
+                    let factor = 1i128.checked_shl(shift as u32).filter(|&value| value > 0)?;
+                    let value = operand(0)?;
+                    let (min, max) = (value.min.checked_mul(factor)?, value.max.checked_mul(factor)?);
+                    (min >= full.min && max <= full.max).then(|| with_signed((min, max)))
                 }
                 k if k == DeclKind::BSUB as u32 => {
                     let (a, b) = (operand(0)?, operand(1)?);

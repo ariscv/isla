@@ -252,6 +252,15 @@ mod tests {
     }
 
     #[test]
+    fn removed_scalar_domain_persist_switch_rejects_toml_and_cli() {
+        let error = toml::from_str::<ExecutionLimitsConfig>("[path_merge]\nscalar_domain_persist=false").unwrap_err();
+        assert!(error.to_string().contains("unknown field `scalar_domain_persist`"));
+        let mut limits = ExecutionLimitsConfig::default();
+        let error = cli(&mut limits, &["--scalar-domain-persist=false"]).unwrap_err();
+        assert!(error.contains("scalar-domain-persist"));
+    }
+
+    #[test]
     fn width_closed_continuation_defaults_off_and_accepts_overrides() {
         let mut limits = ExecutionLimitsConfig::default();
         assert!(!RegionOptions::from_config(&limits).width_closed_continuation);

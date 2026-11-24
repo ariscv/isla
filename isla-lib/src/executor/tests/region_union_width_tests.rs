@@ -127,11 +127,25 @@ fn region_union_width_struct_vector_and_normalization() {
     let result = merge(outer, &nested, &wrap(short.clone()), &mut solver, info()).unwrap();
     let Val::Struct(fields) = result else { panic!("应保留结构体") };
     let Val::Vector(values) = &fields[&field] else { panic!("应保留向量") };
-    let Val::Guarded(guard, alternatives) = &values[0] else { panic!("应只保留两个不同位宽的备选") };
-    assert_eq!(alternatives.as_ref(), &(short, long));
+    assert_eq!(values.len(), 1);
+    let Val::SymBits { data, len, cap: 8 } = &values[0] else { panic!("应保留两种位宽的符号值") };
     use smtlib::Exp::*;
-    let expected = Or(Box::new(Not(Box::new(Var(outer)))), Box::new(Var(inner)));
-    assert!(solver.check_sat_with(&Neq(Box::new(Var(*guard)), Box::new(expected)), info()).is_unsat().unwrap());
+    let takes_long = And(Box::new(Var(outer)), Box::new(Not(Box::new(Var(inner)))));
+    let expected_len = Ite(
+        Box::new(takes_long.clone()),
+        Box::new(crate::primop_util::smt_i128(8)),
+        Box::new(crate::primop_util::smt_i128(0)),
+    );
+    let expected_data = Ite(
+        Box::new(takes_long),
+        Box::new(Concat(Box::new(smtlib::bits64(3, 4)), Box::new(Var(symbol)))),
+        Box::new(smtlib::bits64(0, 8)),
+    );
+    let different = Or(
+        Box::new(Neq(Box::new(Var(*len)), Box::new(expected_len))),
+        Box::new(Neq(Box::new(Var(*data)), Box::new(expected_data))),
+    );
+    assert!(solver.check_sat_with(&different, info()).is_unsat().unwrap());
 
     let tag = test_name(1851);
     let poisoned = Val::Ctor(tag, Box::new(Val::Poison));
@@ -171,17 +185,29 @@ fn region_union_width_preserves_out_of_bounds_error() {
             &shared,
             &outcomes,
             &|_, _, result, _, mut solver, outcomes| {
+                use smtlib::Exp::*;
                 let selected = match result {
-                    Ok((Run::Finished(Val::Bits(bits)), _)) if bits == B64::new(3, 6) => true,
-                    Err((ExecError::Type(message, _), _)) if message == "vector_subrange out of bounds" => false,
-                    _ => panic!("意外的切片出口"),
+                    Ok((Run::Finished(value), _)) => {
+                        assert!(!value.contains_sym_bits(), "切片出口应给出定长结果");
+                        assert_eq!(crate::primop_util::length_bits(&value, &mut solver, info()).unwrap(), 6);
+                        let different = Neq(
+                            Box::new(crate::primop_util::smt_value(&value, info()).unwrap()),
+                            Box::new(smtlib::bits64(3, 6)),
+                        );
+                        assert!(solver.check_sat_with(&different, info()).is_unsat().unwrap());
+                        true
+                    }
+                    Err((ExecError::Type(message, _), _))
+                        if message == "vector_subrange out of bounds" || message == "subrange 的长度或范围无效" =>
+                    {
+                        false
+                    }
+                    Err((error, _)) => panic!("意外的切片错误 {error:?}"),
+                    Ok(_) => panic!("切片没有正常完成"),
                 };
-                assert!(solver.check_sat_with(&smtlib::Exp::Bool(true), info()).is_sat().unwrap());
+                assert!(solver.check_sat_with(&Bool(true), info()).is_sat().unwrap());
                 assert!(solver
-                    .check_sat_with(
-                        &smtlib::Exp::Neq(Box::new(smtlib::Exp::Var(pick)), Box::new(smtlib::Exp::Bool(selected))),
-                        info(),
-                    )
+                    .check_sat_with(&Neq(Box::new(Var(pick)), Box::new(Bool(selected))), info())
                     .is_unsat()
                     .unwrap());
                 outcomes.lock().unwrap().push(selected);

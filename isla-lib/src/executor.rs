@@ -149,11 +149,13 @@ fn read_register<'a, 'ir, B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Option<&'a Val<B>>, ExecError> {
-    if access.is_some_and(|log| !log.ordered_events) {
-        regs.get_latest(id, shared, solver, info)
+    let value = if access.is_some_and(|log| !log.ordered_events) {
+        regs.get_latest(id, shared, solver, info)?
     } else {
-        regs.get(id, shared, solver, info)
-    }
+        regs.get(id, shared, solver, info)?
+    };
+    debug_assert!(!value.is_some_and(Val::contains_sym_bits), "寄存器读取前必须已收束位宽");
+    Ok(value)
 }
 
 fn get_id_and_initialize<'state, 'ir, B: BV>(
@@ -498,7 +500,7 @@ fn read_register_from_vector<'ir, B: BV>(
 
 fn write_register_from_vector<'ir, B: BV>(
     n: Val<B>,
-    value: Val<B>,
+    mut value: Val<B>,
     regs_vector: Val<B>,
     local_state: &mut LocalState<'ir, B>,
     shared_state: &SharedState<'ir, B>,
@@ -606,6 +608,8 @@ fn write_register_from_vector<'ir, B: BV>(
             return Err(ExecError::Type("write_register_from_vector index type must be a bitvector".to_string(), info))
         }
     };
+
+    primop::sym_bits::concretize(&mut value, solver, info)?;
 
     match index {
         ConcreteIndex(i) => {
@@ -739,6 +743,22 @@ fn eval_exp_with_accessor<'state, 'ir, B: BV>(
             };
             for value in &mut args {
                 resolve(value, &local_state.concrete_choices, solver, info)?;
+                if !matches!(
+                    op,
+                    Op::Eq
+                        | Op::Neq
+                        | Op::Bvnot
+                        | Op::Bvor
+                        | Op::Bvxor
+                        | Op::Bvand
+                        | Op::Bvadd
+                        | Op::Bvsub
+                        | Op::Concat
+                        | Op::Slice(_)
+                        | Op::ZeroExtend(_)
+                ) {
+                    primop::sym_bits::concretize(value, solver, info)?;
+                }
             }
             let result = match op {
                 Op::Lt => primop::op_lt(args[0].clone(), args[1].clone(), solver, info),
@@ -924,9 +944,12 @@ fn eval_exp<'state, 'ir, B: BV>(
     Ok(Cow::Owned(value))
 }
 
+// 表达式缓存的其余键来自非空指针。
+const REGISTER_ASSIGNMENT_VALUE: usize = 0;
+
 fn assign_with_accessor<'ir, B: BV>(
     loc: &Loc<Name>,
-    v: Val<B>,
+    mut v: Val<B>,
     local_state: &mut LocalState<'ir, B>,
     shared_state: &SharedState<'ir, B>,
     solver: &mut Solver<B>,
@@ -935,11 +958,16 @@ fn assign_with_accessor<'ir, B: BV>(
 ) -> Result<(), ExecError> {
     match loc {
         Loc::Id(id) => {
-            region_merge::record_write(
-                local_state,
-                *id,
-                !local_state.vars.contains_key(id) && !local_state.lets.contains_key(id),
-            )?;
+            let register = !local_state.vars.contains_key(id) && !local_state.lets.contains_key(id);
+            if register
+                && (v.contains_sym_bits() || local_state.expression_values.contains_key(&REGISTER_ASSIGNMENT_VALUE))
+            {
+                // 使用同一次求值的长度重试，尤其是直接以原语结果写寄存器时。
+                v = local_state.expression_values.entry(REGISTER_ASSIGNMENT_VALUE).or_insert(v).clone();
+                primop::sym_bits::concretize(&mut v, solver, info)?;
+                local_state.expression_values.remove(&REGISTER_ASSIGNMENT_VALUE);
+            }
+            region_merge::record_write(local_state, *id, register)?;
             if local_state.vars.contains_key(id) {
                 local_state.vars.insert(*id, UVal::Init(v));
             } else if local_state.lets.contains_key(id) {
@@ -1091,6 +1119,7 @@ pub fn interrupt_pending<'ir, B: BV>(
             log_from!(tid, log::VERBOSE, "Injecting pending interrupt");
             for (loc, reset) in &interrupt.reset {
                 let value = reset(&frame.memory, shared_state.typedefs(), solver)?;
+                assert!(!value.contains_sym_bits(), "中断配置必须提供定长位向量");
                 let mut accessor = Vec::new();
                 assign_with_accessor(
                     loc,
@@ -1123,6 +1152,7 @@ pub fn reset_registers<'ir, B: BV>(
     for (loc, reset) in &shared_state.reset_registers {
         if !task_state.reset_registers.contains_key(loc) {
             let value = reset(&frame.memory, shared_state.typedefs(), solver)?;
+            assert!(!value.contains_sym_bits(), "寄存器重置必须提供定长位向量");
             let mut accessor = Vec::new();
             assign_with_accessor(
                 loc,
@@ -1143,6 +1173,7 @@ pub fn reset_registers<'ir, B: BV>(
     }
     for (loc, reset) in &task_state.reset_registers {
         let value = reset(&frame.memory, shared_state.typedefs(), solver)?;
+        assert!(!value.contains_sym_bits(), "寄存器重置必须提供定长位向量");
         let mut accessor = Vec::new();
         assign_with_accessor(
             loc,
@@ -1727,6 +1758,9 @@ fn run_special_primop<'ir, B: BV>(
         frame.pc += 1
     } else if (f == ABSTRACT_CALL || f == ABSTRACT_PRIMOP) && !args.is_empty() {
         let mut args = symbolic_length::eval_operands(args, frame, shared_state, solver, info)?;
+        for arg in &mut args {
+            primop::sym_bits::concretize(arg, solver, info)?;
+        }
         let abstracted_fn = match args.pop().unwrap() {
             Val::Ref(f) => f,
             _ => panic!("Invalid abstract call (no function name provided)"),
@@ -1736,7 +1770,8 @@ fn run_special_primop<'ir, B: BV>(
         } else {
             &shared_state.externs[&abstracted_fn].1
         };
-        let return_value = symbolic(return_ty, shared_state, solver, info)?;
+        let mut return_value = symbolic(return_ty, shared_state, solver, info)?;
+        primop::sym_bits::concretize(&mut return_value, solver, info)?;
         solver.add_event(Event::Abstract {
             name: abstracted_fn,
             primitive: f == ABSTRACT_PRIMOP,
@@ -2278,7 +2313,12 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
                 solver,
             )
         } else {
-            let Some(operands) = frame.local_state.expression_retry_operands.clone() else {
+            let width_boundary =
+                matches!(&error, ExecError::SymbolicNatural { operation: primop::sym_bits::LENGTH_BOUNDARY, .. });
+            let operands = frame.local_state.expression_retry_operands.clone();
+            let boundary = width_boundary || operands.is_none() && matches!(&error, ExecError::RetryCondition(..));
+            let operands = if boundary { Some(Vec::new()) } else { operands };
+            let Some(operands) = operands else {
                 if let Some(saved) = instruction.take() {
                     saved.commit(frame, solver, fork_sink)?;
                 }
@@ -2294,7 +2334,7 @@ fn run_loop<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized>(
             symbolic_length::retry_symbolic_length(
                 error,
                 &operands,
-                Some((tid, timeout)),
+                (!boundary).then_some((tid, timeout)),
                 task_id,
                 task_fraction,
                 stop_conditions,
@@ -2842,6 +2882,19 @@ fn run_loop_inner<'ir, 'task, B: BV>(
                 frame.pc += 1;
             }
 
+            Instr::PrimopUnary(loc, .., info)
+            | Instr::PrimopBinary(loc, .., info)
+            | Instr::PrimopVariadic(loc, .., info)
+            | Instr::PrimopReset(loc, .., info)
+                if frame.local_state.expression_values.contains_key(&REGISTER_ASSIGNMENT_VALUE) =>
+            {
+                // 原语已经完成，包括可能的副作用。只重试写入寄存器。
+                let value = frame.local_state.expression_values[&REGISTER_ASSIGNMENT_VALUE].clone();
+                assign(tid, loc, value, cost::make_mut(&mut frame.local_state), shared_state, solver, *info)?;
+                frame.pending_retry_operand = None;
+                frame.pc += 1;
+            }
+
             Instr::PrimopUnary(loc, f, arg, info) => {
                 if frame.speculation_mode == SpeculationMode::On
                     && frame.region_execution.is_none()
@@ -2854,6 +2907,9 @@ fn run_loop_inner<'ir, 'task, B: BV>(
                 } else {
                     symbolic_length::eval_operands([arg], frame, shared_state, solver, *info)?
                 };
+                if !primop::sym_bits::supports_unary(*f) {
+                    primop::sym_bits::concretize(&mut args[0], solver, *info)?;
+                }
                 assert_eq!(args.len(), 1, "一元算子必须有一个操作数");
                 let arg = args.pop().unwrap();
                 let value = match merge_record::evaluate_primop(
@@ -2942,6 +2998,11 @@ fn run_loop_inner<'ir, 'task, B: BV>(
                         )?;
                     }
                 }
+                if !primop::sym_bits::supports_binary(*f) {
+                    for value in &mut args {
+                        primop::sym_bits::concretize(value, solver, *info)?;
+                    }
+                }
                 assert_eq!(args.len(), 2, "二元算子必须有两个操作数");
                 let arg2 = args.pop().unwrap();
                 let arg1 = args.pop().unwrap();
@@ -3013,7 +3074,12 @@ fn run_loop_inner<'ir, 'task, B: BV>(
             }
 
             Instr::PrimopVariadic(loc, f, args, info) => {
-                let args = symbolic_length::eval_operands(args, frame, shared_state, solver, *info)?;
+                let mut args = symbolic_length::eval_operands(args, frame, shared_state, solver, *info)?;
+                if !primop::sym_bits::supports_variadic(*f) {
+                    for value in &mut args {
+                        primop::sym_bits::concretize(value, solver, *info)?;
+                    }
+                }
                 let value = match merge_record::evaluate_primop(
                     frame,
                     solver,
@@ -3103,7 +3169,12 @@ fn run_loop_inner<'ir, 'task, B: BV>(
                                 | INSTR_ANNOUNCE
                                 | INTERRUPT_PENDING
                         ) {
-                            Some(symbolic_length::eval_operands(args, frame, shared_state, solver, *info)?)
+                            let mut operands =
+                                symbolic_length::eval_operands(args, frame, shared_state, solver, *info)?;
+                            for value in &mut operands {
+                                primop::sym_bits::concretize(value, solver, *info)?;
+                            }
+                            Some(operands)
                         } else {
                             None
                         };
@@ -3284,9 +3355,14 @@ fn run_loop_inner<'ir, 'task, B: BV>(
                             })
                             .collect::<Result<Vec<Val<B>>, _>>()?;
 
-                        if frame.function_assumptions.contains_key(f) {
+                        let stop_action = stop_conditions
+                            .and_then(|conditions| conditions.should_stop(*f, frame.function_name, &frame.backtrace));
+                        if matches!(stop_action, Some(StopAction::Abstract))
+                            || frame.function_assumptions.contains_key(f)
+                        {
                             for arg in &mut args {
                                 concrete_values::resolve(arg, &frame.local_state.concrete_choices, solver, *info)?;
+                                primop::sym_bits::concretize(arg, solver, *info)?;
                             }
                         }
                         if frame.local_state.should_probe(shared_state, f) {
@@ -3298,23 +3374,21 @@ fn run_loop_inner<'ir, 'task, B: BV>(
                             solver.trace_call(*f)
                         }
 
-                        if let Some(s) = stop_conditions {
-                            match s.should_stop(*f, frame.function_name, &frame.backtrace) {
-                                Some(StopAction::Kill) => {
-                                    let symbol = zencode::decode(shared_state.symtab.to_str(*f));
-                                    return Err(ExecError::Stopped(symbol));
-                                }
-                                Some(StopAction::Abstract) => {
-                                    solver.add_event(Event::Abstract {
-                                        name: *f,
-                                        args,
-                                        primitive: false,
-                                        return_value: Val::Poison,
-                                    });
-                                    return Ok(Run::Finished(Val::Poison));
-                                }
-                                None => (),
+                        match stop_action {
+                            Some(StopAction::Kill) => {
+                                let symbol = zencode::decode(shared_state.symtab.to_str(*f));
+                                return Err(ExecError::Stopped(symbol));
                             }
+                            Some(StopAction::Abstract) => {
+                                solver.add_event(Event::Abstract {
+                                    name: *f,
+                                    args,
+                                    primitive: false,
+                                    return_value: Val::Poison,
+                                });
+                                return Ok(Run::Finished(Val::Poison));
+                            }
+                            None => (),
                         }
 
                         if let Some(assumptions) = frame.function_assumptions.get(f) {
@@ -3344,6 +3418,8 @@ fn run_loop_inner<'ir, 'task, B: BV>(
                                     }
                                 }
                                 if all_args_match {
+                                    let mut result = result.clone();
+                                    primop::sym_bits::concretize(&mut result, solver, *info)?;
                                     assign(
                                         tid,
                                         loc,
@@ -3353,11 +3429,7 @@ fn run_loop_inner<'ir, 'task, B: BV>(
                                         solver,
                                         *info,
                                     )?;
-                                    solver.add_event(Event::UseFunAssumption {
-                                        name: *f,
-                                        args,
-                                        return_value: result.clone(),
-                                    });
+                                    solver.add_event(Event::UseFunAssumption { name: *f, args, return_value: result });
                                     frame.pc += 1;
                                     continue 'main_loop;
                                 }
@@ -3395,7 +3467,13 @@ fn run_loop_inner<'ir, 'task, B: BV>(
 
                         // Set up a closure to restore our state when
                         // the function we call returns
-                        frame.stack_call = Some(Arc::new(move |ret, frame, shared_state, solver| {
+                        frame.stack_call = Some(Arc::new(move |mut ret, frame, shared_state, solver| {
+                            if shared_state.registers.contains_key(&loc.id()) || matches!(loc, Loc::Addr(_)) {
+                                primop::sym_bits::concretize(&mut ret, solver, *info)?;
+                            }
+                            if shared_state.trace_functions.contains(&frame.function_name) {
+                                solver.trace_return(frame.function_name)
+                            }
                             pop_call_stack(frame);
                             if stats::region_progress::enabled() || stats::call_census::enabled() {
                                 cost::make_mut(&mut frame.local_state).call_instance = caller_instance;
@@ -3454,6 +3532,7 @@ fn run_loop_inner<'ir, 'task, B: BV>(
                             solver,
                             SourceLoc::unknown(),
                         )?;
+                        primop::sym_bits::concretize(&mut value, solver, SourceLoc::unknown())?;
                     }
                     stats::call_census::returned(frame.local_state.call_instance);
                     stats::region_progress::loop_return(frame, &shared_state.symtab);
@@ -3468,7 +3547,7 @@ fn run_loop_inner<'ir, 'task, B: BV>(
                         probe::args_info(tid, std::slice::from_ref(&value), shared_state, solver)
                     }
 
-                    if shared_state.trace_functions.contains(&frame.function_name) {
+                    if frame.stack_call.is_none() && shared_state.trace_functions.contains(&frame.function_name) {
                         solver.trace_return(frame.function_name)
                     }
 
@@ -3499,6 +3578,18 @@ fn run_loop_inner<'ir, 'task, B: BV>(
                 )?
                 .into_owned();
                 concrete_values::resolve(&mut val, &frame.local_state.concrete_choices, solver, *info)?;
+                if val.contains_sym_bits() {
+                    primop::sym_bits::concretize(&mut val, solver, *info)?;
+                    assign(
+                        tid,
+                        &Loc::Id(*id),
+                        val.clone(),
+                        cost::make_mut(&mut frame.local_state),
+                        shared_state,
+                        solver,
+                        *info,
+                    )?;
+                }
                 let val = match &val {
                     Val::MixedBits(_) => {
                         let normalized = replace_mixed_bits(val.clone(), solver, *info)?;
@@ -3729,7 +3820,7 @@ fn run_loop_inner<'ir, 'task, B: BV>(
                     );
                 }
 
-                if shared_state.trace_functions.contains(&frame.function_name) {
+                if frame.stack_call.is_none() && shared_state.trace_functions.contains(&frame.function_name) {
                     solver.trace_return(frame.function_name)
                 }
 
@@ -12117,12 +12208,13 @@ mod tests {
                     ),
                     Instr::End,
                 ];
-                let results = run_all_with_bindings(
+                let results = run_all_observed(
                     instrs,
                     retry_test_limits(enabled),
-                    empty_shared_state(),
+                    &empty_shared_state(),
                     RegisterBindings::new(),
                     HashMap::default(),
+                    verify_constant_bit_result,
                 );
                 let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err().map(ToString::to_string)).collect();
                 eprintln!("位向量转整数后动态切片：合流={enabled}，错误={errors:?}");
@@ -13617,6 +13709,35 @@ fn zcaller(za, zb) {
         regs: RegisterBindings<'ir, B64>,
         lets: Bindings<'ir, B64>,
     ) -> Vec<Result<Run<B64>, ExecError>> {
+        run_all_observed(instrs, limits, shared_state, regs, lets, |result, _| result)
+    }
+
+    // 在完成路径上核对符号数据只有一个值；位宽仍由执行器出口确定。
+    fn verify_constant_bit_result(
+        result: Result<Run<B64>, ExecError>,
+        solver: &mut Solver<B64>,
+    ) -> Result<Run<B64>, ExecError> {
+        match result {
+            Ok(Run::Finished(value @ Val::Symbolic(_))) => {
+                assert!(solver.check_sat(info()).is_sat()?);
+                let Val::Bits(bits) = Model::new(solver).get_val(&value)? else {
+                    panic!("路径结果须为定长位向量");
+                };
+                solver.assert_test_bitvector(&value, bits);
+                Ok(Run::Finished(Val::Bits(bits)))
+            }
+            other => other,
+        }
+    }
+
+    fn run_all_observed<'ir, T>(
+        instrs: Vec<Instr<Name, B64>>,
+        limits: ExecutionLimits,
+        shared_state: &SharedState<'ir, B64>,
+        regs: RegisterBindings<'ir, B64>,
+        lets: Bindings<'ir, B64>,
+        mut observe: impl FnMut(Result<Run<B64>, ExecError>, &mut Solver<B64>) -> T,
+    ) -> Vec<T> {
         let frame = make_frame_with_bindings(instrs, &regs, &lets);
         let task_state = TaskState::new().with_execution_limits(limits);
         let queue = Worker::new_lifo();
@@ -13634,7 +13755,7 @@ fn zcaller(za, zb) {
                 solver.add(def);
             }
             let mut task_frame = unfreeze_frame(&task.frame);
-            results.push(run_loop(
+            let result = run_loop(
                 0,
                 task.id,
                 &mut task.fraction,
@@ -13645,7 +13766,8 @@ fn zcaller(za, zb) {
                 task.state,
                 shared_state,
                 &mut solver,
-            ));
+            );
+            results.push(observe(result, &mut solver));
         }
 
         results
@@ -14198,6 +14320,8 @@ fn zcaller(za, zb) {
                 let value = match reason {
                     SymbolicJump | LimitSampling => cond,
                     Monomorphize | ZeroInstruction => bits,
+                    // 有界长度由原生位向量表示。无结构上界的长度仍须重试。
+                    UnaryRetry => solver.declare_bitvector(128, info()),
                     _ => index,
                 };
                 frame.vars_mut().insert(input, UVal::Init(Val::Symbolic(value)));
@@ -16718,12 +16842,13 @@ fn zmemreadfork(zu) {
                 ),
                 _ => unreachable!(),
             };
-            let results = run_all_with_bindings(
+            let results = run_all_observed(
                 vec![consume, Instr::End],
                 ExecutionLimits::default().with_max_forks_per_path(3),
-                shared,
+                &shared,
                 RegisterBindings::new(),
                 lets,
+                verify_constant_bit_result,
             );
             let mut widths = Vec::new();
             let mut out_of_bounds = 0;
@@ -17217,21 +17342,30 @@ fn zmemreadfork(zu) {
                 Instr::Copy(Loc::Id(bits), Exp::Bits(B64::new(16, 64)), info()),
                 Instr::PrimopUnary(Loc::Id(length), unsigned, Exp::Id(bits), info()),
                 Instr::PrimopUnary(Loc::Id(buffer), zeros, Exp::Id(length), info()),
-                Instr::Copy(Loc::Id(RETURN), Exp::Unit, info()),
+                Instr::Copy(Loc::Id(RETURN), Exp::Id(buffer), info()),
                 Instr::End,
             ];
-            let results = run_all_with_bindings(
+            let results = run_all_observed(
                 instrs,
                 retry_test_limits(enabled),
-                empty_shared_state(),
+                &empty_shared_state(),
                 RegisterBindings::new(),
                 HashMap::default(),
+                verify_constant_bit_result,
             );
             let finished = results.iter().filter(|r| matches!(r, Ok(Run::Finished(_)))).count();
             let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err().map(ToString::to_string)).collect();
             eprintln!("第六轮位向量动态长度：合并={enabled}，完成={finished}，错误={errors:?}");
             assert!(errors.is_empty(), "由位向量转换的合法动态长度路径不应在合并后失败");
-            assert_eq!(finished, 2, "必须完成两个不同长度候选");
+            let mut values: Vec<_> = results
+                .into_iter()
+                .map(|result| match result.unwrap() {
+                    Run::Finished(Val::Bits(bits)) => (bits.len(), bits.lower_u64()),
+                    _ => panic!("动态零向量必须在路径出口收束"),
+                })
+                .collect();
+            values.sort_unstable();
+            assert_eq!(values, [(8, 0), (16, 0)]);
         }
     }
 

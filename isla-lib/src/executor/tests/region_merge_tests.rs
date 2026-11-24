@@ -6302,6 +6302,7 @@ fn arm_error_leaf_modes() {
     for mode in [
         "normal",
         "immediate_live",
+        "pmp_live",
         "deferred_dead",
         "deferred_live",
         "nosmt",
@@ -6411,12 +6412,20 @@ fn arm_error_leaf_fixture(mode: &str) {
     config.solver_options.no_smt = ["nosmt", "flat", "structural_dead", "rollback"].contains(&mode);
     let ctx = Context::new(config);
     let mut solver = Solver::<B64>::new(&ctx);
-    let condition = if mode == "structural_dead" {
+    let pmpcfg = (mode == "pmp_live").then(|| solver.declare_bitvector(8, info()));
+    let condition = if let Some(pmpcfg) = pmpcfg {
+        use smtlib::Exp::{Eq, Extract, Not, Var};
+        let matches_mode =
+            |value| Eq(Box::new(Extract(4, 3, Box::new(Var(pmpcfg)))), Box::new(smtlib::bits64(value, 2)));
+        // 排除 TOR，保留在 G >= 1 时触发模型断言的 NA4 具体值。
+        solver.assert(Not(Box::new(matches_mode(1))));
+        solver.define_const(matches_mode(2), info())
+    } else if mode == "structural_dead" {
         solver.define_const(smtlib::Exp::Bool(false), info())
     } else {
         solver.declare_const(smtlib::Ty::Bool, info())
     };
-    if !["immediate_live", "deferred_live", "nosmt", "flat"].contains(&mode) {
+    if !["immediate_live", "pmp_live", "deferred_live", "nosmt", "flat"].contains(&mode) {
         solver.assert(smtlib::Exp::Not(Box::new(smtlib::Exp::Var(condition))));
     }
     let read = |address| {
@@ -6433,7 +6442,11 @@ fn arm_error_leaf_fixture(mode: &str) {
         Instr::Copy(Loc::Id(RETURN), Exp::Bool(false), info()),
         Instr::Goto(7),
         read(0x1008),
-        Instr::PrimopUnary(Loc::Id(RETURN), primop::not_bool::<B64>, Exp::I128(1), info()),
+        if pmpcfg.is_some() {
+            Instr::Exit(ExitCause::AssertionFailure, info())
+        } else {
+            Instr::PrimopUnary(Loc::Id(RETURN), primop::not_bool::<B64>, Exp::I128(1), info())
+        },
         Instr::Goto(7),
         Instr::End,
     ]);
@@ -6473,14 +6486,18 @@ fn arm_error_leaf_fixture(mode: &str) {
         info(),
     )
     .unwrap();
-    if ["immediate_live", "deferred_live", "nosmt", "flat"].contains(&mode) {
+    if ["immediate_live", "pmp_live", "deferred_live", "nosmt", "flat"].contains(&mode) {
         assert!(matches!(result, region_merge::RegionResult::Merged));
         let leaf = queue.pop().expect("可达失败必须保留为独立错误叶");
 
         assert!(matches!(leaf.fork_cond, Some((_, Event::Fork(_, _, 0, _)))), "失败前沿须走真实分叉提交接口");
         let error_frame = unfreeze_frame(&leaf.frame);
-        assert!(matches!(error_frame.arm_error(), Some(ExecError::Type(..))));
-        assert_eq!(error_frame.arm_error_certified(), matches!(mode, "immediate_live" | "deferred_live"));
+        if pmpcfg.is_some() {
+            assert!(matches!(error_frame.arm_error(), Some(ExecError::AssertionFailure(..))));
+        } else {
+            assert!(matches!(error_frame.arm_error(), Some(ExecError::Type(..))));
+        }
+        assert_eq!(error_frame.arm_error_certified(), matches!(mode, "immediate_live" | "pmp_live" | "deferred_live"));
         assert_ne!(error_frame.path_signature(), frame.path_signature(), "失败与正常前沿签名不可相同");
         let checked_context = Context::new(Config::new());
         let mut replay = Solver::from_checkpoint(&checked_context, leaf.checkpoint);
@@ -6499,6 +6516,10 @@ fn arm_error_leaf_fixture(mode: &str) {
         assert_eq!(addresses(&replay), [0x1008]);
         // 独立快照不应被正常域的 !condition 排除。
         assert!(replay.check_sat(info()).is_sat().unwrap());
+        if let Some(pmpcfg) = pmpcfg {
+            let na4_config = smtlib::Exp::Eq(Box::new(smtlib::Exp::Var(pmpcfg)), Box::new(smtlib::bits64(0x10, 8)));
+            assert!(replay.check_sat_with(&na4_config, info()).is_sat().unwrap());
+        }
         assert!(replay
             .check_sat_with(&smtlib::Exp::Not(Box::new(smtlib::Exp::Var(condition))), info())
             .is_unsat()
@@ -6522,6 +6543,12 @@ fn arm_error_leaf_normal_child() {
 #[ignore]
 fn arm_error_leaf_immediate_live_child() {
     arm_error_leaf_fixture("immediate_live")
+}
+
+#[test]
+#[ignore]
+fn arm_error_leaf_pmp_live_child() {
+    arm_error_leaf_fixture("pmp_live")
 }
 
 #[test]

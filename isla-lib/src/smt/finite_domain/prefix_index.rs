@@ -10,6 +10,87 @@ struct Position(usize, usize);
 
 type GuardBounds = HashMap<Sym, Option<Arc<Vec<Exp<Sym>>>>>;
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct Slice {
+    source: Sym,
+    high: u32,
+    low: u32,
+}
+
+// 允许别名与嵌套切片。复杂定义以所属符号为起点，保留绑定身份。
+pub(super) fn narrow_slice<'a>(exp: &'a Exp<Sym>, definition: impl Fn(Sym) -> Option<&'a Exp<Sym>>) -> Option<Slice> {
+    let Exp::Extract(high, low, source) = exp else { return None };
+    let (mut high, mut low) = (*high, *low);
+    if high.checked_sub(low)? >= 4 {
+        return None;
+    }
+    let mut source = &**source;
+    for _ in 0..16 {
+        match source {
+            Exp::Var(sym) => match definition(*sym) {
+                Some(alias @ (Exp::Var(_) | Exp::Extract(..))) => source = alias,
+                _ => return Some(Slice { source: *sym, high, low }),
+            },
+            Exp::Extract(parent_high, parent_low, parent) if high <= parent_high.checked_sub(*parent_low)? => {
+                high += parent_low;
+                low += parent_low;
+                source = parent;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+pub(super) fn slice_comparison<'a>(
+    mut exp: &'a Exp<Sym>,
+    resolve: impl Fn(&'a Exp<Sym>) -> &'a Exp<Sym>,
+    definition: impl Fn(Sym) -> Option<&'a Exp<Sym>>,
+) -> Option<(Slice, B64, bool)> {
+    let mut equal = true;
+    let (lhs, rhs) = loop {
+        match resolve(exp) {
+            Exp::Not(inner) => {
+                equal = !equal;
+                exp = inner;
+            }
+            Exp::Eq(lhs, rhs) => break (lhs, rhs),
+            Exp::Neq(lhs, rhs) => {
+                equal = !equal;
+                break (lhs, rhs);
+            }
+            _ => return None,
+        }
+    };
+    [(lhs, rhs), (rhs, lhs)].into_iter().find_map(|(field, value)| {
+        let slice = narrow_slice(resolve(field), &definition)?;
+        let Exp::Bits64(value) = constant(resolve(value))? else { return None };
+        (value.len() == slice.high - slice.low + 1).then_some((slice, value, equal))
+    })
+}
+
+fn slice_exclusion(exp: &Exp<Sym>) -> Option<(Slice, B64)> {
+    let excluded = |exp| match slice_comparison(exp, |exp| exp, |_| None) {
+        Some((slice, value, false)) => Some((slice, value)),
+        _ => None,
+    };
+    if let Exp::Or(lhs, rhs) = exp {
+        // 前态的常量配置条件仍保留在原公式里。仅在另一侧恒假时登记排除。
+        [(lhs, rhs), (rhs, lhs)].into_iter().find_map(|(candidate, condition)| {
+            let fact = excluded(candidate)?;
+            (ground::eval_assertion(condition, |_| None, |_| None) == Some(false)).then_some(fact)
+        })
+    } else {
+        excluded(exp)
+    }
+}
+
+struct ScalarUpperBound {
+    definition: Position,
+    proof_assertions: usize,
+    candidates: Vec<Exp<Sym>>,
+}
+
 pub(in crate::smt) struct PrefixIndex<'ctx> {
     choice_epoch: u64,
     choice_assertions: Vec<u64>,
@@ -20,10 +101,12 @@ pub(in crate::smt) struct PrefixIndex<'ctx> {
     pub(super) arm_facts: RefCell<ArmFacts>,
     pub(super) layouts: HashMap<Sym, ScalarLayout>,
     symbols: ahash::AHashMap<Sym, Position>,
+    symbol_upper_bounds: RefCell<HashMap<Sym, ScalarUpperBound>>,
     rebindings: usize,
     bounds: RefCell<HashMap<Sym, (usize, Bound)>>,
     guard_bounds: RefCell<Vec<GuardBounds>>,
     assertions: Vec<Position>,
+    slice_exclusions: HashMap<Slice, Vec<(Position, B64)>>,
     bool_symbols: Vec<(Position, Sym)>,
     pub(super) projection: RefCell<ProjectionCache>,
     pub(super) rewrites: rewrites::ScopedRewriteCache<'ctx>,
@@ -174,10 +257,12 @@ impl<'ctx> PrefixIndex<'ctx> {
             arm_facts: Default::default(),
             layouts: Default::default(),
             symbols: Default::default(),
+            symbol_upper_bounds: Default::default(),
             rebindings: 0,
             bounds: Default::default(),
             guard_bounds: RefCell::default(),
             assertions: Vec::new(),
+            slice_exclusions: Default::default(),
             bool_symbols: Vec::new(),
             projection: RefCell::default(),
             asts: ProjectionAsts::new(ctx),
@@ -223,7 +308,13 @@ impl<'ctx> PrefixIndex<'ctx> {
                 self.domains.get_mut().clear();
                 self.bool_symbols.push((position, sym));
             }
-        } else if matches!(event, Event::Smt(Def::Assert(_), ..)) {
+        } else if let Event::Smt(Def::Assert(exp), ..) = event {
+            // 缓冲断言可能在提交时套上臂守卫。只登记已发布的公式。
+            if segment != BUFFERED {
+                if let Some((slice, value)) = slice_exclusion(exp) {
+                    self.slice_exclusions.entry(slice).or_default().push((position, value));
+                }
+            }
             self.domains.get_mut().clear();
             self.assertions.push(position);
             if self.incremental_choices {
@@ -260,6 +351,12 @@ impl<'ctx> PrefixIndex<'ctx> {
     ) {
         let first = Position(segment, start);
         self.assertions.truncate(self.assertions.partition_point(|position| *position < first));
+        if segment != BUFFERED {
+            self.slice_exclusions.retain(|_, facts| {
+                facts.truncate(facts.partition_point(|(position, _)| *position < first));
+                !facts.is_empty()
+            });
+        }
         if self.incremental_choices {
             self.choice_assertions.truncate(self.assertions.len());
         }
@@ -287,6 +384,10 @@ impl<'ctx> PrefixIndex<'ctx> {
             }
         }
         if has_suffix {
+            let retained = self.assertions.len();
+            self.symbol_upper_bounds
+                .get_mut()
+                .retain(|_, bound| bound.definition < first && bound.proof_assertions <= retained);
             self.arm_facts.get_mut().truncate_assertions(self.assertions.len());
             self.clear_candidate_caches(self.assertions.len());
         }
@@ -297,6 +398,7 @@ impl<'ctx> PrefixIndex<'ctx> {
             self.choice_binding_revision = self.next_choice_epoch();
         }
         self.joined_choices.clear();
+        self.symbol_upper_bounds.get_mut().clear();
         *self.arm_facts.get_mut() = ArmFacts::default();
         self.guard_bounds.get_mut().clear();
         if self.incremental_choices {
@@ -315,6 +417,7 @@ impl<'ctx> PrefixIndex<'ctx> {
             let epoch = self.next_choice_epoch();
             self.choice_assertions[retained..].fill(epoch);
         }
+        self.symbol_upper_bounds.get_mut().retain(|_, bound| bound.proof_assertions <= retained);
         self.arm_facts.get_mut().truncate_assertions(retained);
         self.truncate_guards(guard_depth);
         self.clear_candidate_caches(retained);
@@ -450,6 +553,18 @@ impl<'ctx> PrefixIndex<'ctx> {
                 })
                 .sum::<usize>()
             + map_bytes::<Sym, Position>(self.symbols.capacity())
+            + map_bytes::<Sym, ScalarUpperBound>(self.symbol_upper_bounds.borrow().capacity())
+            + self
+                .symbol_upper_bounds
+                .borrow()
+                .values()
+                .map(|bound| {
+                    bound.candidates.capacity() * size_of::<Exp<Sym>>()
+                        + bound.candidates.iter().map(exp_heap_bytes).sum::<usize>()
+                })
+                .sum::<usize>()
+            + map_bytes::<Slice, Vec<(Position, B64)>>(self.slice_exclusions.capacity())
+            + self.slice_exclusions.values().map(|facts| facts.capacity() * size_of::<(Position, B64)>()).sum::<usize>()
             + self.assertions.capacity() * size_of::<Position>()
             + self.bool_symbols.capacity() * size_of::<(Position, Sym)>()
             + self.branch.borrow().as_ref().map_or(0, |branch| {
@@ -523,6 +638,14 @@ impl<'a, B: BV> PathConditions<'a, B> {
         self.index.assertions.iter().rev().map(|position| self.assertion(*position)).chain(self.guards)
     }
 
+    pub(super) fn excluded_slice_comparison(&self, exp: &Exp<Sym>) -> Option<bool> {
+        if self.index.slice_exclusions.is_empty() {
+            return None;
+        }
+        let (slice, compared, equal) = slice_comparison(exp, |exp| resolve(exp, self), |sym| self.definition(sym))?;
+        self.index.slice_exclusions.get(&slice)?.iter().any(|&(_, value)| value == compared).then_some(!equal)
+    }
+
     // 原顺序是最新断言在前、活动臂守卫在后。追加后用新后缀作交集的左操作数，
     // 保留第一个给出有限集合的断言所规定的候选顺序。守卫与普通断言分别索引。
     pub(super) fn assertion_bound(&self, input: &Exp<Sym>, subject: &Exp<Sym>) -> Bound {
@@ -586,6 +709,39 @@ impl<'a, B: BV> PathConditions<'a, B> {
             };
             cache.guards.push(key);
         }
+    }
+
+    pub(super) fn scalar_proof_prefix(&self, sym: Sym, savepoint: usize) -> Option<usize> {
+        let position = *self.index.symbols.get(&sym)?;
+        (position < Position(BUFFERED, savepoint)).then(|| self.index.assertions.partition_point(|p| *p < position))
+    }
+
+    pub(super) fn remember_scalar_upper(&self, sym: Sym, count: usize, values: Vec<Exp<Sym>>) {
+        let mut bounds = self.index.symbol_upper_bounds.borrow_mut();
+        // 只限制缓存开销。容量满时仍按原入口完整推导。
+        if bounds.len() < 64 {
+            bounds.insert(
+                sym,
+                ScalarUpperBound { definition: self.index.symbols[&sym], proof_assertions: count, candidates: values },
+            );
+        }
+    }
+
+    pub(super) fn scalar_upper(&self, solver: &Solver<'_, B>, sym: Sym) -> Option<Vec<Exp<Sym>>> {
+        let bounds = self.index.symbol_upper_bounds.borrow();
+        let upper = bounds.get(&sym)?;
+        let anchor = solver.translate_exp(&Exp::Var(sym));
+        Some(
+            upper
+                .candidates
+                .iter()
+                .filter(|value| {
+                    let candidate = solver.translate_exp(value);
+                    !self.excludes_branch_candidate(solver, &anchor, &candidate)
+                })
+                .cloned()
+                .collect(),
+        )
     }
 
     pub(super) fn excludes_branch_candidate(&self, solver: &Solver<'_, B>, anchor: &Ast, value: &Ast) -> bool {

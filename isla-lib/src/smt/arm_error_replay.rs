@@ -18,6 +18,7 @@ pub(super) struct ArmErrorReplay<'ctx, B> {
 impl<'ctx, B: BV> ArmErrorReplay<'ctx, B> {
     pub(super) fn new(ctx: &'ctx Context) -> Self {
         let mut verifier = Solver::new(ctx);
+        verifier.replaying_arm_entry = true;
         verifier.replay_assertions = Some(Vec::new());
         Self { verifier, steps: Vec::new(), replay_next_var: 0 }
     }
@@ -79,7 +80,7 @@ mod tests {
         let guard = parent.declare_const(Ty::Bool, loc);
         let fun = parent.fresh();
         parent.add(DeclareFun(fun, vec![Ty::Bool], Ty::Bool));
-        parent.assert(Bool(true));
+        parent.assert(Or(Box::new(Var(guard)), Box::new(Bool(false))));
         parent.assert(Var(guard));
         parent.assert(Var(guard));
         let entry = checkpoint(&mut parent);
@@ -104,9 +105,24 @@ mod tests {
 
         let mut replay = ArmErrorReplay::new(&ctx);
         for (point, live) in [(&left, false), (&right, true), (&right, true), (&entry, true), (&left, false)] {
+            AST_SIMPLIFY_CALLS.set(0);
             let cached = replay.restore(point);
+            let restored = cached.translate_exp(&Var(guard));
+            assert_eq!(AST_SIMPLIFY_CALLS.get(), 0, "错误叶重放应保留原始公式");
             let mut old = Solver::from_checkpoint(&ctx, point.clone());
-            assert_eq!(cached.translate_exp(&Var(guard)).z3_ast, old.translate_exp(&Var(guard)).z3_ast);
+            assert!(cached.replaying_arm_entry);
+            let equivalent = |actual: Z3_ast, expected: Z3_ast| unsafe {
+                Z3_inc_ref(ctx.z3_ctx, expected);
+                let expected = Ast { ctx: &ctx, z3_ast: expected };
+                Z3_inc_ref(ctx.z3_ctx, actual);
+                let actual = Ast { ctx: &ctx, z3_ast: actual };
+                let difference = actual.mk_eq(&expected).mk_not();
+                assert_eq!(
+                    Z3_solver_check_assumptions(ctx.z3_ctx, cached.z3_solver, 1, &difference.z3_ast),
+                    Z3_L_FALSE
+                );
+            };
+            equivalent(restored.z3_ast, old.translate_exp(&Var(guard)).z3_ast);
             assert_eq!(cached.func_decls[&fun].z3_func_decl, old.func_decls[&fun].z3_func_decl);
             assert_eq!(cached.is_sail_bitvector(tagged), old.is_sail_bitvector(tagged));
             assert_eq!(cached.enums.enums.len(), old.enums.enums.len());
@@ -115,11 +131,11 @@ mod tests {
             unsafe {
                 let assertions = Z3_solver_get_assertions(ctx.z3_ctx, old.z3_solver);
                 Z3_ast_vector_inc_ref(ctx.z3_ctx, assertions);
-                let expected: Vec<_> = (0..Z3_ast_vector_size(ctx.z3_ctx, assertions))
-                    .map(|i| Z3_ast_vector_get(ctx.z3_ctx, assertions, i))
-                    .collect();
-                let actual: Vec<_> = cached.replay_assertions.as_ref().unwrap().iter().map(|a| a.z3_ast).collect();
-                assert_eq!(actual, expected);
+                let actual = cached.replay_assertions.as_ref().unwrap();
+                assert_eq!(actual.len(), Z3_ast_vector_size(ctx.z3_ctx, assertions) as usize);
+                for (index, term) in actual.iter().enumerate() {
+                    equivalent(term.z3_ast, Z3_ast_vector_get(ctx.z3_ctx, assertions, index as u32));
+                }
                 Z3_ast_vector_dec_ref(ctx.z3_ctx, assertions);
             }
             assert_eq!(old.check_sat_with(&Var(guard), loc), if live { Sat } else { Unsat });

@@ -8,7 +8,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         mut accept: impl FnMut(Ast<'ctx>, bool) -> bool,
     ) -> Option<()> {
         let mut state = ChoiceGraph::default();
-        let mut graph = Graph { solver: self, prefix, state: &mut state, incremental: false };
+        let mut graph =
+            Graph { solver: self, prefix, state: &mut state, incremental: false, scalar_proof_assertions: None };
         let root = graph.build(exp)?;
         if graph.state.inputs.is_empty() {
             return None;

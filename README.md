@@ -29,6 +29,8 @@ Isla has also been used for test generation, generating simplified
 semantics (summaries) for concrete opcodes, and there are many other
 possible use cases.
 
+符号执行可在同一条路径中保留符号位宽，发布执行迹和路径缓存时按可行位宽收束。[运行值数据模型](specs/data-model.md)
+
 ## Build
 
 Get Rust and its dependencies, probably the easiest is with [rustup](https://rustup.rs/).
@@ -824,6 +826,8 @@ witness_eval = true
 对可由候选赋值求出布尔常量的断言，默认使用 Isla 直接求值。无法判定时沿用 Z3 化简。可在 `[execution_limits.path_merge]` 设置 `finite_domain_ground_eval = false` 关闭直接求值。
 
 在 `[execution_limits.path_merge]` 中，符号标量统一具体化（`symbolic_scalar_resolver`）、扩展循环逐轮折叠（`loop_fold_shapes`）和历史释放（`prefix_compact`）默认开启。各项可在 TOML 中独立设为 `false`，也可通过对应 CLI 参数关闭。符号标量统一具体化允许延后区域把读长范围交给出口证明。[循环配置](specs/isarch-cli.md#分段合并候选与诊断配置) · [标量具体化配置](specs/isarch-cli.md#区域合并具体值)
+
+延后区域复用在共同前缀得到的标量候选上界。 [标量具体化配置](specs/isarch-cli.md#区域合并具体值)
 
 `partial_commit_prefix` 默认关闭。设为 `true` 并配合相应的原因类别开关，可在任意层保留已认证的子合并，从拒绝指令继续执行。[前缀固化配置](specs/isarch-cli.md#探索路径的限时与求解失败)
 

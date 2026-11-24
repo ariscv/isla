@@ -2527,6 +2527,14 @@ r0 = "0x0000000000000000"
     }
 
     #[test]
+    fn path_merge_rejects_removed_sym_bits_option() {
+        for value in ["true", "false"] {
+            let error = merge_config(&format!("[execution_limits.path_merge]\nsym_bits = {value}")).unwrap_err();
+            assert!(error.contains("unknown field `sym_bits`"), "{error}");
+        }
+    }
+
+    #[test]
     fn arm_error_batch_size_accepts_only_positive_integers() {
         let table = "[execution_limits.path_merge.solver]";
         for size in [1, 8, 16] {

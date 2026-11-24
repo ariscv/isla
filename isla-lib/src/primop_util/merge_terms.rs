@@ -22,6 +22,11 @@ pub(crate) trait MergeTerms<B: BV> {
             Bool(_) | Not(_) | Or(_, _) | And(_, _) | Eq(_, _) => Some(Ty::Bool),
             Enum(member) => Some(Ty::Enum(member.enum_id)),
             Ite(_, yes, _) => self.expression_sort(yes),
+            Extract(high, low, _) => Some(Ty::BitVec(high - low + 1)),
+            ZeroExtend(extension, inner) => match self.expression_sort(inner)? {
+                Ty::BitVec(width) => Some(Ty::BitVec(width.checked_add(*extension)?)),
+                _ => None,
+            },
             Concat(left, right) => match (self.expression_sort(left)?, self.expression_sort(right)?) {
                 (Ty::BitVec(left), Ty::BitVec(right)) => Some(Ty::BitVec(left + right)),
                 _ => None,

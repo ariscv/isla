@@ -61,6 +61,7 @@ use crate::source_loc::SourceLoc;
 pub mod float;
 pub mod memory;
 mod stable_pack;
+pub(crate) mod sym_bits;
 mod vector_bits;
 
 #[cfg(test)]
@@ -178,7 +179,11 @@ fn try_concretize_bool_exp<B: BV>(exp: Exp<Sym>, solver: &mut Solver<B>, info: S
     Ok(Val::Symbolic(value))
 }
 
-fn concretize_proven_i128<B: BV>(value: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+pub(crate) fn concretize_proven_i128<B: BV>(
+    value: Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
     match value {
         Val::Symbolic(sym) => match proven_symbolic_i128(sym, solver, info) {
             Ok(Some(value)) => Ok(Val::I128(value)),
@@ -1099,6 +1104,7 @@ fn sub_nat<B: BV>(x: Val<B>, y: Val<B>, solver: &mut Solver<B>, info: SourceLoc)
 
 pub(crate) fn length<B: BV>(x: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
     match x {
+        Val::SymBits { len, .. } => Ok(Val::Symbolic(len)),
         Val::Guarded(guard, values) => {
             let yes = guarded_comparison_arm(guard, length(values.0, solver, info), info)?;
             let no = guarded_comparison_arm(guard, length(values.1, solver, info), info)?;
@@ -1126,11 +1132,20 @@ pub(crate) fn eq_bits<B: BV>(
     if matches!(x, Val::Guarded(..)) || matches!(y, Val::Guarded(..)) {
         return compare_guarded(x, y, solver, info, eq_bits);
     }
-    let x_len = length_bits(&x, solver, info)?;
-    let y_len = length_bits(&y, solver, info)?;
-    if x_len != y_len {
-        return Err(ExecError::Type(format!("eq_bits operands have different lengths: {} and {}", x_len, y_len), info));
+    equal_bits(x, y, "eq_bits", solver, info)
+}
+
+fn equal_bits<B: BV>(
+    x: Val<B>,
+    y: Val<B>,
+    operation: &str,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
+    if sym_bits::is_dynamic(&x) || sym_bits::is_dynamic(&y) {
+        return sym_bits::compare(&x, &y, Some(operation), solver, info);
     }
+    check_fixed_bit_widths(&x, &y, operation, solver, info)?;
     let x = replace_mixed_bits(x, solver, info)?;
     let y = replace_mixed_bits(y, solver, info)?;
     if let (Val::Bits(x), Val::Bits(y)) = (&x, &y) {
@@ -1145,11 +1160,59 @@ pub(crate) fn neq_bits<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
-    not_bool(eq_bits(x, y, solver, info)?, solver, info)
+    if matches!(x, Val::Guarded(..)) || matches!(y, Val::Guarded(..)) {
+        return compare_guarded(x, y, solver, info, neq_bits);
+    }
+    not_bool(equal_bits(x, y, "neq_bits", solver, info)?, solver, info)
 }
-unary_primop_copy!(not_bits, "not_bits".to_string(), Val::Bits, Val::Bits, B::not, Exp::Bvnot, define_bitvector);
+unary_primop_copy!(not_fixed_bits, "not_bits".to_string(), Val::Bits, Val::Bits, B::not, Exp::Bvnot, define_bitvector);
+pub fn not_bits<B: BV>(value: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    if sym_bits::is_dynamic(&value) {
+        sym_bits::bit_not(&value, solver, info)
+    } else {
+        not_fixed_bits(value, solver, info)
+    }
+}
+
+fn check_fixed_bit_widths<B: BV>(
+    left: &Val<B>,
+    right: &Val<B>,
+    operation: &str,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<(), ExecError> {
+    if length_bits(left, solver, info)? != length_bits(right, solver, info)? {
+        return Err(sym_bits::length_or_range_error(operation, info));
+    }
+    Ok(())
+}
+
+macro_rules! sym_bit_binop {
+    ($name:ident, $fixed:ident, $op:ident, $modular:expr) => {
+        pub fn $name<B: BV>(
+            x: Val<B>,
+            y: Val<B>,
+            solver: &mut Solver<B>,
+            info: SourceLoc,
+        ) -> Result<Val<B>, ExecError> {
+            if sym_bits::is_dynamic(&x) || sym_bits::is_dynamic(&y) {
+                sym_bits::bit_binary(&x, &y, Exp::$op, $modular, stringify!($name), solver, info)
+            } else {
+                check_fixed_bit_widths(&x, &y, stringify!($name), solver, info)?;
+                $fixed(x, y, solver, info)
+            }
+        }
+    };
+}
+
+sym_bit_binop!(xor_bits, xor_fixed_bits, Bvxor, false);
+sym_bit_binop!(or_bits, or_fixed_bits, Bvor, false);
+sym_bit_binop!(and_bits, and_fixed_bits, Bvand, false);
+sym_bit_binop!(add_bits, add_fixed_bits, Bvadd, true);
+sym_bit_binop!(sub_bits, sub_fixed_bits, Bvsub, true);
+
 binary_primop_copy!(
-    xor_bits,
+    xor_fixed_bits,
     "xor_bits".to_string(),
     Val::Bits,
     Val::Bits,
@@ -1159,7 +1222,7 @@ binary_primop_copy!(
     define_bitvector
 );
 binary_primop_copy!(
-    or_bits,
+    or_fixed_bits,
     "or_bits".to_string(),
     Val::Bits,
     Val::Bits,
@@ -1169,7 +1232,7 @@ binary_primop_copy!(
     define_bitvector
 );
 binary_primop_copy!(
-    and_bits,
+    and_fixed_bits,
     "and_bits".to_string(),
     Val::Bits,
     Val::Bits,
@@ -1179,7 +1242,7 @@ binary_primop_copy!(
     define_bitvector
 );
 binary_primop_copy!(
-    add_bits,
+    add_fixed_bits,
     "add_bits".to_string(),
     Val::Bits,
     Val::Bits,
@@ -1189,7 +1252,7 @@ binary_primop_copy!(
     define_bitvector
 );
 binary_primop_copy!(
-    sub_bits,
+    sub_fixed_bits,
     "sub_bits".to_string(),
     Val::Bits,
     Val::Bits,
@@ -1200,6 +1263,9 @@ binary_primop_copy!(
 );
 
 fn add_bits_int<B: BV>(bits: Val<B>, n: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    if sym_bits::is_dynamic(&bits) {
+        return sym_bits::add_int(&bits, &n, Exp::Bvadd, solver, info);
+    }
     let bits = replace_mixed_bits(bits, solver, info)?;
     if length_bits(&bits, solver, info)? == 0 {
         return Ok(bits);
@@ -1256,6 +1322,9 @@ fn add_bits_int<B: BV>(bits: Val<B>, n: Val<B>, solver: &mut Solver<B>, info: So
 }
 
 fn sub_bits_int<B: BV>(bits: Val<B>, n: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    if sym_bits::is_dynamic(&bits) {
+        return sym_bits::add_int(&bits, &n, Exp::Bvsub, solver, info);
+    }
     let bits = replace_mixed_bits(bits, solver, info)?;
     if length_bits(&bits, solver, info)? == 0 {
         return Ok(bits);
@@ -1367,9 +1436,18 @@ pub(crate) fn proven_symbolic_i128<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Option<i128>, ExecError> {
+    proven_symbolic_i128_in_scope(sym, solver, info, false)
+}
+
+fn proven_symbolic_i128_in_scope<B: BV>(
+    sym: Sym,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+    persist: bool,
+) -> Result<Option<i128>, ExecError> {
     let Some(width) = solver.length(sym) else { return Ok(None) };
     use crate::smt::FiniteDomain;
-    let domain = solver.resolve_scalar(sym, info);
+    let domain = solver.resolve_scalar_in_scope(sym, info, persist);
     match &domain {
         FiniteDomain::Known(values) | FiniteDomain::Bounded(values) if values.len() == 1 => {
             if matches!(&domain, FiniteDomain::Bounded(_)) && !solver.region_queries_deferred() {
@@ -1437,6 +1515,9 @@ pub(crate) fn proven_symbolic_i128<B: BV>(
 }
 
 fn zeros<B: BV>(len: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    if let Some(value) = sym_bits::fill(&len, false, solver, info)? {
+        return Ok(value);
+    }
     let len = concretize_proven_i128(len, solver, info)?;
     panic_if_negative_concretized_nat("zeros", &len);
     match len {
@@ -1453,6 +1534,9 @@ fn zeros<B: BV>(len: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<
 }
 
 fn ones<B: BV>(len: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    if let Some(value) = sym_bits::fill(&len, true, solver, info)? {
+        return Ok(value);
+    }
     let len = concretize_proven_i128(len, solver, info)?;
     panic_if_negative_concretized_nat("ones", &len);
     match len {
@@ -1471,13 +1555,18 @@ fn ones<B: BV>(len: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<V
 /// The zero_extend and sign_extend functions are essentially the
 /// same, so use a macro to define both.
 macro_rules! extension {
-    ($id: ident, $name: expr, $smt_extension: path, $concrete_extension: path) => {
+    ($id: ident, $name: expr, $smt_extension: path, $concrete_extension: path, $signed:expr) => {
         pub fn $id<B: BV>(
             bits: Val<B>,
             len: Val<B>,
             solver: &mut Solver<B>,
             info: SourceLoc,
         ) -> Result<Val<B>, ExecError> {
+            if let Some(value) = sym_bits::extend(&bits, &len, $signed, solver, info)? {
+                return Ok(value);
+            }
+            let mut bits = bits;
+            sym_bits::concretize(&mut bits, solver, info)?;
             let len = concretize_proven_i128(len, solver, info)?;
             panic_if_negative_concretized_nat("extension", &len);
             let len = match len {
@@ -1513,8 +1602,8 @@ macro_rules! extension {
     };
 }
 
-extension!(zero_extend, "zero_extend".to_string(), Exp::ZeroExtend, B::zero_extend);
-extension!(sign_extend, "sign_extend".to_string(), Exp::SignExtend, B::sign_extend);
+extension!(zero_extend, "zero_extend".to_string(), Exp::ZeroExtend, B::zero_extend, false);
+extension!(sign_extend, "sign_extend".to_string(), Exp::SignExtend, B::sign_extend, true);
 
 pub(crate) fn op_zero_extend<B: BV>(
     bits: Val<B>,
@@ -1522,6 +1611,9 @@ pub(crate) fn op_zero_extend<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if sym_bits::is_dynamic(&bits) {
+        return zero_extend(bits, Val::I128(i128::from(len)), solver, info);
+    }
     let bits = replace_mixed_bits(bits, solver, info)?;
     match bits {
         Val::Bits(bits) => {
@@ -1703,6 +1795,9 @@ pub(crate) fn op_slice<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if let Some(value) = sym_bits::slice(&bits, &from, &Val::I128(i128::from(length)), solver, info)? {
+        return Ok(value);
+    }
     let bits_length = length_bits(&bits, solver, info)?;
     if length == 0 {
         return Ok(Val::Bits(B::zeros(0)));
@@ -1761,6 +1856,9 @@ fn slice_internal<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if let Some(value) = sym_bits::slice(&bits, &from, &length, solver, info)? {
+        return Ok(value);
+    }
     let length = concretize_proven_i128(length, solver, info)?;
     panic_if_negative_concretized_nat("slice_internal", &length);
     match length {
@@ -1793,6 +1891,9 @@ pub fn subrange_internal<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if let Some(value) = sym_bits::subrange(&bits, &high, &low, solver, info)? {
+        return Ok(value);
+    }
     // 同一有限域输入派生的两个端点可能各自只有保守的 Bounded 集合；分别用模型法
     // 具体化会在延后区域制造强制查询。保留相关性，随后由 high - low + 1 联合推导长度。
     let preserve_correlated_bounded_endpoints = solver.region_queries_deferred()
@@ -1947,6 +2048,9 @@ fn sail_truncate_lsb<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if let Some(value) = sym_bits::truncate_lsb(&bits, &len, solver, info)? {
+        return Ok(value);
+    }
     let len = concretize_proven_i128(len, solver, info)?;
     panic_if_negative_concretized_nat("sail_truncateLSB", &len);
     if let Val::I128(n) = &len {
@@ -1984,6 +2088,9 @@ fn sail_truncate_lsb<B: BV>(
 }
 
 fn sail_unsigned<B: BV>(bits: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    if sym_bits::is_dynamic(&bits) {
+        return sym_bits::to_int(&bits, false, solver, info);
+    }
     let bits = replace_mixed_bits(bits, solver, info)?;
     check_integer_conversion(sail_unsigned::<B>, &bits, solver, info)?;
     match bits {
@@ -2014,6 +2121,9 @@ fn sail_unsigned<B: BV>(bits: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -
 }
 
 fn sail_signed<B: BV>(bits: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    if sym_bits::is_dynamic(&bits) {
+        return sym_bits::to_int(&bits, true, solver, info);
+    }
     let bits = replace_mixed_bits(bits, solver, info)?;
     check_integer_conversion(sail_signed::<B>, &bits, solver, info)?;
     match bits {
@@ -2080,6 +2190,9 @@ fn smt_shift(
 }
 
 fn shiftr<B: BV>(bits: Val<B>, shift: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    if sym_bits::is_dynamic(&bits) || sym_bits::is_dynamic(&shift) {
+        return sym_bits::shift(&bits, &shift, sym_bits::Shift::Right, false, solver, info);
+    }
     let bits = replace_mixed_bits(bits, solver, info)?;
     if matches!(&shift, Val::Bits(amount) if amount.len() == 0) {
         return Ok(bits);
@@ -2145,6 +2258,9 @@ fn arith_shiftr<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if sym_bits::is_dynamic(&bits) || sym_bits::is_dynamic(&shift) {
+        return sym_bits::shift(&bits, &shift, sym_bits::Shift::ArithmeticRight, false, solver, info);
+    }
     let bits = replace_mixed_bits(bits, solver, info)?;
     match (bits, shift) {
         (bits @ (Val::Bits(_) | Val::Symbolic(_)), Val::Symbolic(y)) => {
@@ -2242,6 +2358,9 @@ fn arith_shiftr<B: BV>(
 }
 
 fn shiftl<B: BV>(bits: Val<B>, shift: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    if sym_bits::is_dynamic(&bits) || sym_bits::is_dynamic(&shift) {
+        return sym_bits::shift(&bits, &shift, sym_bits::Shift::Left, false, solver, info);
+    }
     let bits = replace_mixed_bits(bits, solver, info)?;
     if matches!(&shift, Val::Bits(amount) if amount.len() == 0) {
         return Ok(bits);
@@ -2307,6 +2426,9 @@ pub fn shift_bits_right<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if sym_bits::is_dynamic(&bits) || sym_bits::is_dynamic(&shift) {
+        return sym_bits::shift(&bits, &shift, sym_bits::Shift::Right, true, solver, info);
+    }
     // We could support (MixedBits, Bits) explicitly, if necessary
     let bits = replace_mixed_bits(bits, solver, info)?;
     let bits_len = length_bits(&bits, solver, info)?;
@@ -2350,6 +2472,9 @@ pub fn shift_bits_left<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if sym_bits::is_dynamic(&bits) || sym_bits::is_dynamic(&shift) {
+        return sym_bits::shift(&bits, &shift, sym_bits::Shift::Left, true, solver, info);
+    }
     // We could support (MixedBits, Bits) explicitly, if necessary
     let bits = replace_mixed_bits(bits, solver, info)?;
     let bits_len = length_bits(&bits, solver, info)?;
@@ -2393,6 +2518,9 @@ pub(crate) fn append<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if sym_bits::is_dynamic(&lhs) || sym_bits::is_dynamic(&rhs) {
+        return sym_bits::concat(&lhs, &rhs, solver, info);
+    }
     match (lhs, rhs) {
         (Val::Symbolic(x), Val::Symbolic(y)) => {
             solver.define_bitvector(Exp::Concat(Box::new(Exp::Var(x)), Box::new(Exp::Var(y))), info).into()
@@ -3257,6 +3385,15 @@ pub fn eq_anything<B: BV>(
     if matches!(lhs, Val::Guarded(..)) || matches!(rhs, Val::Guarded(..)) {
         return compare_guarded(lhs, rhs, solver, info, eq_anything);
     }
+    if (sym_bits::is_dynamic(&lhs) || sym_bits::is_dynamic(&rhs))
+        && guarded_bits::is_bits(&lhs, solver)
+        && guarded_bits::is_bits(&rhs, solver)
+    {
+        return sym_bits::compare(&lhs, &rhs, None, solver, info);
+    }
+    let (mut lhs, mut rhs) = (lhs, rhs);
+    sym_bits::concretize(&mut lhs, solver, info)?;
+    sym_bits::concretize(&mut rhs, solver, info)?;
     if let (Some(left), Some(right)) = (merge_bit_width(&lhs, solver, info)?, merge_bit_width(&rhs, solver, info)?) {
         if left != right {
             return Ok(Val::Bool(false));
@@ -4834,7 +4971,12 @@ fn read_mem_byte_count<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<i128, ExecError> {
-    let value = concretize_proven_i128(value, solver, info)?;
+    let value = match value {
+        Val::Symbolic(symbol) => {
+            proven_symbolic_i128_in_scope(symbol, solver, info, true)?.map_or(Val::Symbolic(symbol), Val::I128)
+        }
+        value => value,
+    };
     if let Val::Symbolic(symbol) = value {
         // 符号内存使用非空位向量保存读数据，按字节展开后位宽须能用 u32 表示。
         return Err(ExecError::SymbolicNatural {
@@ -6634,7 +6776,7 @@ mod tests {
             SourceLoc::unknown(),
         )
         .expect_err("负索引必须返回越界错误");
-        assert!(matches!(error, ExecError::Type(message, _) if message == "vector_subrange out of bounds"));
+        assert!(matches!(error, ExecError::Type(message, _) if message == "subrange 的长度或范围无效"));
     }
 
     #[test]
@@ -6648,16 +6790,18 @@ mod tests {
         solver.assert_eq(Exp::Var(high), smt_i128(7));
         solver.assert_eq(Exp::Var(low), smt_i128(4));
 
-        match subrange_internal(
+        let info = SourceLoc::unknown();
+        let mut slice = subrange_internal(
             Val::Bits(B64::new(0b1011_0010, 8)),
             Val::Symbolic(high),
             Val::Symbolic(low),
             &mut solver,
-            SourceLoc::unknown(),
-        )? {
-            Val::Bits(bits) => assert_eq!(bits, B64::new(0b1011, 4)),
-            value => panic!("expected concrete extracted bits, got {:?}", value),
-        }
+            info,
+        )?;
+        sym_bits::concretize(&mut slice, &mut solver, info)?;
+        assert_eq!(length_bits(&slice, &mut solver, info)?, 4);
+        let mismatch = Exp::Neq(Box::new(smt_value(&slice, info)?), Box::new(bits64(0b1011, 4)));
+        assert_eq!(solver.check_sat_with(&mismatch, info), SmtResult::Unsat);
 
         Ok(())
     }
@@ -6680,33 +6824,23 @@ mod tests {
                 &mut solver,
                 SourceLoc::unknown(),
             ),
-            Err(ExecError::SymbolicLength("vector_subrange", _))
+            Err(ExecError::RetryCondition(..))
         ));
         solver.assert(Exp::Bvsge(Box::new(Exp::Var(low)), Box::new(smt_i128(0))));
         solver.assert(Exp::Bvsle(Box::new(Exp::Var(low)), Box::new(Exp::Var(high))));
         solver.assert(Exp::Bvslt(Box::new(Exp::Var(high)), Box::new(smt_i128(64))));
 
-        match subrange_internal(
-            Val::Symbolic(solver.declare_const(Ty::BitVec(64), SourceLoc::unknown())),
-            Val::Symbolic(high),
-            Val::Symbolic(low),
-            &mut solver,
-            SourceLoc::unknown(),
-        )? {
-            Val::Symbolic(bits) => assert_eq!(solver.length(bits), Some(8)),
-            value => panic!("expected symbolic extracted byte, got {:?}", value),
-        }
+        let info = SourceLoc::unknown();
+        let symbolic = solver.declare_bitvector(64, info);
+        let args = (Val::Symbolic(high), Val::Symbolic(low));
+        let slice = subrange_internal(Val::Symbolic(symbolic), args.0.clone(), args.1.clone(), &mut solver, info)?;
+        assert_eq!(length_bits(&slice, &mut solver, info)?, 8);
 
-        match subrange_internal(
-            Val::Bits(B64::zeros(64)),
-            Val::Symbolic(high),
-            Val::Symbolic(low),
-            &mut solver,
-            SourceLoc::unknown(),
-        )? {
-            Val::Bits(bits) => assert_eq!(bits, B64::zeros(8)),
-            value => panic!("expected concrete zero byte, got {:?}", value),
-        }
+        let mut slice = subrange_internal(Val::Bits(B64::zeros(64)), args.0, args.1, &mut solver, info)?;
+        sym_bits::concretize(&mut slice, &mut solver, info)?;
+        assert_eq!(length_bits(&slice, &mut solver, info)?, 8);
+        let mismatch = Exp::Neq(Box::new(smt_value(&slice, info)?), Box::new(smt_zeros(8)));
+        assert_eq!(solver.check_sat_with(&mismatch, info), SmtResult::Unsat);
 
         Ok(())
     }
@@ -6749,10 +6883,8 @@ mod tests {
         crate::smt::reset_test_mandatory_query_count();
         let transaction = solver.start_transaction();
         let result = solver.with_deferred_region_queries(|solver| {
-            match subrange_internal(Val::Symbolic(bits), Val::Symbolic(high), Val::Symbolic(low), solver, info)? {
-                Val::Symbolic(slice) => assert_eq!(solver.length(slice), Some(9)),
-                value => panic!("expected symbolic 9-bit slice, got {value:?}"),
-            }
+            let slice = subrange_internal(Val::Symbolic(bits), Val::Symbolic(high), Val::Symbolic(low), solver, info)?;
+            assert_eq!(length_bits(&slice, solver, info)?, 9);
             Ok(())
         });
         solver.rollback_transaction(transaction);
@@ -6886,7 +7018,7 @@ mod tests {
         let vpn = solver.declare_const(Ty::BitVec(36), SourceLoc::unknown());
         let result = and_bits(Val::Symbolic(vpn), Val::Bits(B64::zeros(27)), &mut solver, SourceLoc::unknown());
         match result {
-            Err(ExecError::Type(message, _)) => assert!(message.contains("左 36，右 27"), "{message}"),
+            Err(ExecError::Type(message, _)) => assert_eq!(message, "and_bits 的长度或范围无效"),
             other => panic!("位宽不一致应返回类型错误：{other:?}"),
         }
     }

@@ -100,42 +100,64 @@ fn region_consumer_mixed_integer_and_strict_operand_read() {
 
 #[test]
 fn region_consumer_known_domain_joins_native_widths() {
+    use crate::primop_util::{length_bits, smt_i128, smt_value};
+    use smtlib::Exp::*;
+
+    #[derive(Debug)]
+    enum Consumer {
+        Power,
+        Length,
+        Export,
+    }
+
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);
     for strategy in strategies() {
         for no_smt in [false, true] {
-            let width = Exp::Id(test_name(1800));
-            let consumers = [
-                (
-                    Instr::PrimopBinary(
-                        Loc::Id(RETURN),
-                        primop::binary_primops()["pow_int"],
-                        Exp::I128(-1),
-                        width.clone(),
-                        info(),
+            for consumer in [Consumer::Power, Consumer::Length, Consumer::Export] {
+                let width = Exp::Id(test_name(1800));
+                let zero_bits = test_name(1801);
+                let (mut code, expected_paths) = match consumer {
+                    Consumer::Power => (
+                        vec![Instr::PrimopBinary(
+                            Loc::Id(RETURN),
+                            primop::binary_primops()["pow_int"],
+                            Exp::I128(-1),
+                            width,
+                            info(),
+                        )],
+                        1,
                     ),
-                    1,
-                ),
-                (Instr::PrimopUnary(Loc::Id(RETURN), primop::unary_primops()["zeros"], width, info()), 1),
-            ];
-            for (consumer, expected) in consumers {
+                    Consumer::Length => (
+                        vec![
+                            Instr::Decl(zero_bits, Ty::AnyBits, info()),
+                            Instr::PrimopUnary(Loc::Id(zero_bits), primop::unary_primops()["zeros"], width, info()),
+                            Instr::PrimopUnary(
+                                Loc::Id(RETURN),
+                                primop::unary_primops()["length"],
+                                Exp::Id(zero_bits),
+                                info(),
+                            ),
+                        ],
+                        1,
+                    ),
+                    Consumer::Export => {
+                        (vec![Instr::PrimopUnary(Loc::Id(RETURN), primop::unary_primops()["zeros"], width, info())], 4)
+                    }
+                };
+                code.push(Instr::End);
                 let mut config = Config::new();
                 config.solver_options.no_smt = no_smt;
                 config.solver_options.finite_domain_enumeration = true;
                 let context = Context::new(config);
-                let mut solver = Solver::new(&context);
+                let mut solver = Solver::<B64>::new(&context);
                 let sym = solver.declare_bitvector(64, info());
-                use smtlib::Exp::*;
-                solver.assert(
-                    [32, 39, 48, 57]
-                        .into_iter()
-                        .map(|width| Eq(Box::new(Var(sym)), Box::new(smtlib::bits64(width, 64))))
-                        .reduce(|a, b| Or(Box::new(a), Box::new(b)))
-                        .unwrap(),
-                );
+                let widths = [32, 39, 48, 57];
+                let has_width = |width| Eq(Box::new(Var(sym)), Box::new(smtlib::bits64(width, 64)));
+                solver.assert(widths.into_iter().map(has_width).reduce(|a, b| Or(Box::new(a), Box::new(b))).unwrap());
                 assert!(
                     matches!(solver.finite_domain(sym), crate::smt::FiniteDomain::Known(values) if values.len() == 4)
                 );
-                let mut frame = make_frame(vec![consumer, Instr::End]);
+                let mut frame = make_frame(code);
                 frame.vars_mut().insert(test_name(1800), UVal::Init(Val::Symbolic(sym)));
                 let state = TaskState::new().with_execution_limits(limits(strategy));
                 let shared = empty_shared_state();
@@ -165,16 +187,48 @@ fn region_consumer_known_domain_joins_native_widths() {
                     )
                     .unwrap();
                     let Run::Finished(value) = result else { panic!("应正常完成") };
-                    assert!(
-                        frame.region_merge_records().iter().any(|record| record.branch_pc == 0),
-                        "{strategy:?}, no_smt={no_smt}, expected={expected}, value={value:?}",
-                    );
-                    outputs.push(value);
+                    if matches!(consumer, Consumer::Power | Consumer::Export) {
+                        assert!(frame.region_merge_records().iter().any(|record| record.branch_pc == 0));
+                    }
+                    assert!(!value.contains_sym_bits(), "顶层返回不能携带变长值");
+                    outputs.push((value, checkpoint(&mut solver)));
                 }
-                assert_eq!(outputs.len(), expected, "{strategy:?}, no_smt={no_smt}");
+                assert_eq!(outputs.len(), expected_paths, "{strategy:?}, no_smt={no_smt}, {consumer:?}");
                 if no_smt {
                     assert_eq!(crate::smt::test_query_count() - query_start, 0);
                 }
+
+                // 独立求解器复核每条返回路径的守卫与结果，执行阶段仍保持零查询。
+                let checking_context = Context::new(Config::new());
+                let mut covered = Vec::new();
+                for (value, point) in outputs {
+                    let mut solver = Solver::from_checkpoint(&checking_context, point);
+                    let mut feasible = false;
+                    for width in widths {
+                        let guard = has_width(width);
+                        if solver.check_sat_with(&guard, info()).is_unsat().unwrap() {
+                            continue;
+                        }
+                        feasible = true;
+                        covered.push(width);
+                        let expected = match consumer {
+                            Consumer::Power => smt_i128(if width % 2 == 0 { 1 } else { -1 }),
+                            Consumer::Length => smt_i128(i128::from(width)),
+                            Consumer::Export => {
+                                assert_eq!(length_bits(&value, &mut solver, info()).unwrap(), width as u32);
+                                smtlib::bits64(0, width as u32)
+                            }
+                        };
+                        let mismatch = And(
+                            Box::new(guard),
+                            Box::new(Neq(Box::new(smt_value(&value, info()).unwrap()), Box::new(expected))),
+                        );
+                        assert!(solver.check_sat_with(&mismatch, info()).is_unsat().unwrap());
+                    }
+                    assert!(feasible, "每条返回路径都须覆盖至少一个可行输入");
+                }
+                covered.sort_unstable();
+                assert_eq!(covered, widths, "每种输入宽度都须且只须出现一次");
             }
         }
     }
@@ -513,4 +567,310 @@ fn region_consumer_carries_four_widths_across_return() {
             "四种位宽应穿过两个返回边界，{strategy:?}"
         );
     }
+}
+
+#[test]
+fn region_sym_bits_concretizes_at_boundaries() {
+    if !run_in_diagnostics_process(concat!(module_path!(), "::region_sym_bits_concretizes_at_boundaries")) {
+        return;
+    }
+    let mut shared = empty_shared_state();
+    let reg = shared.symtab.intern("zsym_bits_reg");
+    shared.registers.insert(reg, Ty::Bits(8));
+    let [source, result] = [1800, 1801].map(test_name);
+    let observe = shared.symtab.intern("zaudit_observe");
+    shared.externs.insert(observe, (&[Ty::AnyBits], &Ty::Unit, "audit_observe"));
+    let function = shared.symtab.intern("zaudit_function");
+    shared.functions.insert(function, (Vec::new(), &Ty::Unit, &[]));
+    let make = |symbol, solver: &mut Solver<B64>, wide| {
+        let len = solver.define_const(
+            smtlib::Exp::Ite(
+                Box::new(smtlib::Exp::Var(symbol)),
+                Box::new(crate::primop_util::smt_i128(8)),
+                Box::new(crate::primop_util::smt_i128(wide)),
+            ),
+            info(),
+        );
+        let data = solver.define_bitvector(smtlib::bits64(0x55, 16), info());
+        UVal::Init(Val::SymBits { data, len, cap: 16 })
+    };
+    let run = |instrs, wide| {
+        paths_with_solver_state(
+            instrs,
+            &shared,
+            1,
+            limits(MergeStrategy::Recursive).with_path_merging(false),
+            crate::memory::Memory::new(),
+            |frame, solver| {
+                let UVal::Init(Val::Symbolic(symbol)) = frame.vars()[&test_name(900)] else { unreachable!() };
+                frame.vars_mut().insert(source, make(symbol, solver, wide));
+                frame.vars_mut().insert(result, UVal::Init(Val::Unit));
+            },
+            false,
+        )
+        .0
+    };
+
+    let paths = run(
+        vec![
+            Instr::PrimopUnary(Loc::Id(RETURN), primop::unary_primops()["string_of_bits"], Exp::Id(source), info()),
+            Instr::End,
+        ],
+        16,
+    );
+    assert_eq!(paths.len(), 2);
+    assert!(paths.iter().all(|path| matches!(path.value, Val::String(_))));
+
+    let paths = run(
+        vec![
+            Instr::Copy(Loc::Id(reg), Exp::Id(source), info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), info()),
+            Instr::End,
+        ],
+        8,
+    );
+    assert_eq!(paths.len(), 1);
+    assert!(paths[0]
+        .events
+        .iter()
+        .any(|event| matches!(event, Event::WriteReg(name, _, Val::Symbolic(_)) if *name == reg)));
+    assert!(matches!(paths[0].value, Val::Symbolic(_)));
+
+    let paths = run(
+        vec![
+            Instr::Monomorphize(source, Ty::AnyBits, info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Id(source), info()),
+            Instr::End,
+        ],
+        16,
+    );
+    assert_eq!(paths.len(), 2);
+    assert!(paths.iter().all(|path| matches!(path.value, Val::Bits(_))));
+
+    let paths = run(vec![Instr::Copy(Loc::Id(RETURN), Exp::Id(source), info()), Instr::End], 16);
+    assert_eq!(paths.len(), 2);
+    assert!(paths.iter().all(|path| matches!(path.value, Val::Symbolic(_))));
+
+    for (special, observed, primitive) in [(ABSTRACT_PRIMOP, observe, true), (ABSTRACT_CALL, function, false)] {
+        let paths = run(
+            vec![
+                Instr::Call(Loc::Id(RETURN), false, special, vec![Exp::Id(source), Exp::Ref(observed)], info()),
+                Instr::End,
+            ],
+            16,
+        );
+        assert_eq!(paths.len(), 2);
+        let mut widths = Vec::new();
+        for path in paths {
+            let context = Context::new(Config::new());
+            let solver = Solver::from_checkpoint(&context, path.checkpoint);
+            let args = path
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Abstract { name, primitive: actual, args, return_value: Val::Unit } => {
+                        assert_eq!((*name, *actual), (observed, primitive));
+                        Some(args.as_slice())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(args.len(), 1, "重试后只发布一次抽象事件");
+            let [Val::Symbolic(data)] = args[0] else {
+                panic!("抽象实参必须保留定长符号数据");
+            };
+            widths.push(solver.length(*data).unwrap());
+        }
+        widths.sort_unstable();
+        assert_eq!(widths, [8, 16]);
+    }
+
+    let width = test_name(1802);
+    let paths = run(
+        vec![
+            Instr::Decl(width, Ty::I128, info()),
+            Instr::PrimopUnary(Loc::Id(width), primop::length, Exp::Id(source), info()),
+            Instr::PrimopUnary(Loc::Id(reg), primop::unary_primops()["ones"], Exp::Id(width), info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), info()),
+            Instr::End,
+        ],
+        16,
+    );
+    assert_eq!(paths.len(), 2);
+    for path in paths {
+        let writes = path
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                Event::WriteReg(name, _, value) if *name == reg => Some(value),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(writes, [&path.value], "直接赋给寄存器的原语结果只应写入一次");
+        assert!(!path.value.contains_sym_bits());
+    }
+
+    let resets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = Arc::clone(&resets);
+    let reset: Reset<B64> = Arc::new(move |_, _, solver| {
+        count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let symbol = solver.declare_const(smtlib::Ty::Bool, info());
+        let UVal::Init(value) = make(symbol, solver, 16) else { unreachable!() };
+        Ok(value)
+    });
+    let paths = run(
+        vec![
+            Instr::PrimopReset(Loc::Id(reg), reset, primop::Effect::Pure, info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), info()),
+            Instr::End,
+        ],
+        16,
+    );
+    assert_eq!(paths.len(), 2);
+    assert_eq!(resets.load(std::sync::atomic::Ordering::Relaxed), 1, "重试写入时不能再次执行回调");
+
+    let [selected_ctor, other_ctor] = [1803, 1804].map(test_name);
+    let (paths, _, _) = paths_with_solver_state(
+        vec![
+            Instr::Call(Loc::Id(RETURN), false, ABSTRACT_PRIMOP, vec![Exp::Id(source), Exp::Ref(observe)], info()),
+            Instr::End,
+        ],
+        &shared,
+        1,
+        limits(MergeStrategy::Recursive).with_path_merging(false),
+        crate::memory::Memory::new(),
+        |frame, solver| {
+            let UVal::Init(Val::Symbolic(symbol)) = frame.vars()[&test_name(900)] else { unreachable!() };
+            let tag = solver.define_const(
+                smtlib::Exp::Ite(
+                    Box::new(smtlib::Exp::Var(symbol)),
+                    Box::new(selected_ctor.to_smt()),
+                    Box::new(other_ctor.to_smt()),
+                ),
+                info(),
+            );
+            // 未选中载荷时长度为负，不能对该输入应用载荷里的长度约束。
+            let UVal::Init(payload) = make(symbol, solver, -1) else { unreachable!() };
+            frame.vars_mut().insert(
+                source,
+                UVal::Init(Val::SymbolicCtor(
+                    tag,
+                    [(selected_ctor, payload), (other_ctor, Val::Unit)].into_iter().collect(),
+                )),
+            );
+        },
+        false,
+    );
+    assert_eq!(paths.len(), 2, "不活动的载荷不能裁剪另一构造子所在路径");
+    for path in paths {
+        assert!(path.events.iter().any(|event| matches!(event,
+            Event::Abstract { name, args, .. } if *name == observe && !args.iter().any(Val::contains_sym_bits)
+        )));
+    }
+
+    let context = Context::new(Config::new());
+    let mut solver = Solver::new(&context);
+    let mut frame =
+        make_frame(vec![Instr::Call(Loc::Id(RETURN), false, function, vec![Exp::Id(source)], info()), Instr::End]);
+    let symbol = solver.declare_const(smtlib::Ty::Bool, info());
+    frame.vars_mut().insert(source, make(symbol, &mut solver, 16));
+    let mut stop = StopConditions::new();
+    stop.add(function, None, StopAction::Abstract);
+    let state = TaskState::new();
+    let mut task = frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver));
+    task.set_stop_conditions(&stop);
+    let widths = Mutex::new(Vec::new());
+    start_single(task, &shared, &widths, &|_, _, result, _, solver, widths| {
+        assert!(matches!(result, Ok((Run::Finished(Val::Poison), _))));
+        let events = solver.trace().to_vec();
+        let widths_in_trace = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Abstract { name, args, primitive: false, return_value: Val::Poison } if *name == function => {
+                    let [Val::Symbolic(data)] = args.as_slice() else {
+                        panic!("停止点必须发布定长实参");
+                    };
+                    solver.length(*data)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(widths_in_trace.len(), 1);
+        widths.lock().unwrap().extend(widths_in_trace);
+    });
+    let mut widths = widths.into_inner().unwrap();
+    widths.sort_unstable();
+    assert_eq!(widths, [8, 16]);
+
+    let write = primop::memory::variadic_primops::<B64>()["write_mem"];
+    let paths = run(
+        vec![
+            Instr::PrimopVariadic(
+                Loc::Id(result),
+                write,
+                vec![Exp::Unit, Exp::Unit, Exp::Bits(B64::new(0x2000, 64)), Exp::Unit, Exp::Id(source)],
+                info(),
+            ),
+            Instr::Copy(Loc::Id(RETURN), Exp::Id(result), info()),
+            Instr::End,
+        ],
+        16,
+    );
+    let mut sizes: Vec<_> = paths
+        .iter()
+        .flat_map(|path| &path.events)
+        .filter_map(|event| if let Event::WriteMem { bytes, .. } = event { Some(*bytes) } else { None })
+        .collect();
+    sizes.sort_unstable();
+    assert_eq!(sizes, [1, 2]);
+
+    let bytes = width;
+    let length = Instr::PrimopUnary(Loc::Id(bytes), primop::length, Exp::Id(source), info());
+    let read = primop::memory::variadic_primops::<B64>()["read_mem"];
+    let paths = run(
+        vec![
+            Instr::Decl(bytes, Ty::I128, info()),
+            length.clone(),
+            Instr::PrimopVariadic(
+                Loc::Id(RETURN),
+                read,
+                vec![Exp::Unit, Exp::Unit, Exp::Bits(B64::new(0x2000, 64)), Exp::Id(bytes)],
+                info(),
+            ),
+            Instr::End,
+        ],
+        16,
+    );
+    let mut sizes: Vec<_> = paths
+        .iter()
+        .flat_map(|path| &path.events)
+        .filter_map(|event| if let Event::ReadMem { bytes, .. } = event { Some(*bytes) } else { None })
+        .collect();
+    sizes.sort_unstable();
+    assert_eq!(sizes, [8, 16]);
+
+    let paths = run(
+        vec![
+            Instr::Decl(bytes, Ty::I128, info()),
+            length,
+            Instr::PrimopBinary(
+                Loc::Id(RETURN),
+                primop::binary_primops()["vector_init"],
+                Exp::Id(bytes),
+                Exp::Unit,
+                info(),
+            ),
+            Instr::End,
+        ],
+        16,
+    );
+    let mut sizes: Vec<_> = paths
+        .iter()
+        .map(|path| {
+            let Val::Vector(values) = &path.value else { panic!("宿主分配必须返回向量") };
+            values.len()
+        })
+        .collect();
+    sizes.sort_unstable();
+    assert_eq!(sizes, [8, 16]);
 }

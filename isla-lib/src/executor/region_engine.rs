@@ -74,11 +74,11 @@ pub(super) fn advance_arm<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> + ?Sized
             && (is_arm_execution_error(error) || assertion))
             || (state.observe_assertion_failures && assertion);
         if keep_error {
-            let reach = arm.local_state.speculative_access.as_ref().unwrap().guard.clone().unwrap();
-            if solver.structural_bool(&reach) != Some(false) {
+            let reach = arm.local_state.speculative_access.as_ref().unwrap().guard.as_ref().unwrap();
+            if !solver.arm_error_guard_is_dead(reach) {
                 let owner = arm.region_arm.expect("失败前沿必须有逻辑臂");
                 let location = error.source_loc();
-                let selector = solver.define_const(reach, location);
+                let selector = solver.define_const(reach.clone(), location);
                 let mut failed = arm.clone();
                 publish_register_writes(&mut failed, shared, solver);
                 let (checkpoint, memory_guards) = solver.arm_error_snapshot(owner);
@@ -1070,6 +1070,10 @@ fn prepare_state<'ir, B: BV>(
                 }
             })?
         };
+        if value.contains_sym_bits() {
+            // 寄存器的后态和读取事件必须保持定长。沿用区域的分离或重放保留两臂。
+            return Err(incompatible());
+        }
         merged.regs_mut().assign(*reg, value, shared);
     }
     for reg in read_or_written {

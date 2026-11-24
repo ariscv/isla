@@ -238,6 +238,7 @@ fn value_expression<B: BV>(
     shared: &SharedState<B>,
     observed: &mut Option<HashMap<Sym, Sym>>,
 ) -> String {
+    assert!(!value.contains_sym_bits(), "观测的位宽必须在执行器出口收束");
     if observed.is_some() {
         match value {
             Val::MixedBits(_) => {
@@ -269,7 +270,8 @@ fn value_expression<B: BV>(
             });
             solver.exp_to_str(&Exp::Var(sym))
         }
-        Val::Bits(bits) => solver.exp_to_str(&Exp::Bits(bits.to_vec())),
+        // 空位向量使用执行迹的现有格式。SMT-LIB 的位向量 sort 要求正位宽。
+        Val::Bits(bits) if bits.len() > 0 => solver.exp_to_str(&Exp::Bits(bits.to_vec())),
         _ => value.to_string(shared),
     }
 }

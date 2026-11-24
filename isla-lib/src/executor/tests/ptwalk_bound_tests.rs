@@ -280,11 +280,9 @@ fn finite_domain_ptwalk_zeros_projects_signed_arm_through_narrowing() {
             let tx = solver.start_transaction_with_guard(Some(Var(positive)));
             crate::smt::reset_test_mandatory_query_count();
             assert_eq!(solver.finite_domain(width), expected(&[9]));
-            assert_eq!(
-                primop::unary_primops()["zeros"](Val::Symbolic(width), solver, info()).unwrap(),
-                Val::Bits(B64::zeros(9))
-            );
+            let zero_value = primop::unary_primops()["zeros"](Val::Symbolic(width), solver, info()).unwrap();
             assert_eq!(crate::smt::test_mandatory_query_count(), 0);
+            solver.assert_test_bitvector(&zero_value, B64::zeros(9));
             solver.rollback_transaction(tx);
             let sibling = solver.start_transaction_with_guard(Some(Not(Box::new(Var(positive)))));
             assert_eq!(solver.finite_domain(width), expected(&[-9, 0]));
