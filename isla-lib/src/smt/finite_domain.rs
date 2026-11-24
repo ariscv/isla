@@ -418,12 +418,23 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             let anchor = self.translate_exp(subject);
             let mut result = None;
             let mut undecided = false;
+            let mut independent = None;
+            let mut independent_truth = None;
             for candidate in candidates {
                 let value = self.translate_exp(&candidate.value);
                 if *candidate.excluded.get_or_insert_with(|| prefix.excludes_branch_candidate(self, &anchor, &value)) {
                     continue;
                 }
-                match predicate.substitute(&anchor, &value).structural_bool() {
+                let truth = if self.ctx.solver_options.skip_independent_predicate_substitution
+                    && *independent.get_or_insert_with(|| {
+                        let mut dependencies = rewrites::InputDependencies::new(std::iter::once((0, anchor.z3_ast)));
+                        dependencies.mask(predicate.z3_ast, self.ctx.z3_ctx) == 0
+                    }) {
+                    *independent_truth.get_or_insert_with(|| predicate.clone().structural_bool())
+                } else {
+                    predicate.substitute(&anchor, &value).structural_bool()
+                };
+                match truth {
                     Some(current) if result.is_none() || result == Some(current) => result = Some(current),
                     _ => {
                         undecided = true;
@@ -727,23 +738,24 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         }
         let mut cache = prefix.index.projection.borrow_mut();
         prefix.translate_projection_suffix(self, &mut cache);
-        let ProjectionCache { assertions, guards, anchors, simplified } = &mut *cache;
+        let ProjectionCache { assertions, guards, ordinary, active } = &mut *cache;
         let asts = &prefix.index.asts;
-        let facts = &mut anchors.entry(asts.keep(anchor.clone())).or_default().projection;
+        let ordinary =
+            &mut ordinary.anchors.entry(prefix.index.ordinary_asts.keep(anchor.clone())).or_default().projection;
+        let active = &mut active.anchors.entry(asts.keep(anchor.clone())).or_default().projection;
         let mut independent = HashSet::new();
         let mut common = ProjectionLiterals::new();
         let empty = HashMap::new();
         let mut dependent = Vec::new();
         let mut independent_residual = false;
         for (&key, is_guard) in assertions.iter().rev().map(|k| (k, false)).chain(guards.iter().map(|k| (k, true))) {
+            let facts = if is_guard { &mut *active } else { &mut *ordinary };
             if probe.as_ref().is_some_and(|p| facts.contains_anchor(key, &anchor, p, &mut independent)) {
                 dependent.push((key, is_guard));
                 continue;
             }
-            let (truth, residual) = simplified.entry(key).or_insert_with(|| {
-                let (truth, residual) = prefix.index.rewrites.for_assertion(is_guard).simplified(asts.get(key));
-                (truth, asts.keep(residual))
-            });
+            let (truth, residual) = prefix.index.rewrites.for_assertion(is_guard).simplified(asts.get(key));
+            let residual = &residual.z3_ast;
             match truth {
                 Some(false) => return FiniteDomain::Known(Vec::new()),
                 Some(true) => (),
@@ -762,6 +774,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             let binding = (!free).then(|| Ast::mk_eq(&anchor, &value));
             let mut rebuilt = HashMap::new();
             let path_facts = dependent.iter().map(|&(key, is_guard)| {
+                let facts = if is_guard { &mut *active } else { &mut *ordinary };
                 prefix.index.rewrites.for_assertion(is_guard).single(anchor.z3_ast, value.z3_ast, key, || {
                     facts.project_assertion(asts, key, &anchor, &value, &mut rebuilt)
                 })
@@ -860,6 +873,7 @@ thread_local! {
     pub(super) static STRUCTURAL_BOOLS: Cell<usize> = const { Cell::new(0) };
     static BOUND_NODE_VISITS: Cell<usize> = const { Cell::new(0) };
     static SPLIT_RECOMPUTATIONS: Cell<usize> = const { Cell::new(0) };
+    static AFTER_NARROW: Cell<usize> = const { Cell::new(0) };
     static BOUND_SEARCHES: Cell<usize> = const { Cell::new(0) };
 }
 
@@ -874,3 +888,6 @@ mod arithmetic_tests;
 
 #[cfg(test)]
 mod ground_tests;
+
+#[cfg(test)]
+mod incremental_rewrite_tests;

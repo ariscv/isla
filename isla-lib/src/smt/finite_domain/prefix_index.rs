@@ -29,6 +29,7 @@ pub(in crate::smt) struct PrefixIndex<'ctx> {
     pub(super) rewrites: rewrites::ScopedRewriteCache<'ctx>,
     pub(super) domains: RefCell<HashMap<(Sym, bool, bool), FiniteDomain>>,
     pub(super) asts: ProjectionAsts<'ctx>,
+    pub(super) ordinary_asts: ProjectionAsts<'ctx>,
     pub(super) branch: RefCell<Option<BranchCandidates>>,
 }
 
@@ -36,23 +37,26 @@ pub(in crate::smt) struct PrefixIndex<'ctx> {
 pub(super) struct ProjectionCache {
     pub(super) assertions: Vec<Z3_ast>,
     pub(super) guards: Vec<Z3_ast>,
-    pub(super) simplified: HashMap<Z3_ast, (Option<bool>, Z3_ast)>,
+    pub(super) ordinary: ProjectionLayer,
+    pub(super) active: ProjectionLayer,
+}
+
+#[derive(Default)]
+pub(super) struct ProjectionLayer {
     pub(super) anchors: HashMap<Z3_ast, AnchorFacts>,
 }
 
 #[derive(Default)]
 pub(super) struct AnchorFacts {
     pub(super) projection: AnchorProjection,
-    // 普通追加只检查新后缀。条件替换、前缀缩短和改绑随整个投影缓存失效。
-    indexed_assertions: usize,
-    indexed_guards: usize,
-    related: Vec<Z3_ast>,
+    indexed: usize,
+    related: Vec<(usize, Z3_ast)>,
     candidates: HashMap<Z3_ast, BranchCheck>,
 }
 
 #[derive(Clone, Copy)]
 enum BranchCheck {
-    Excluded,
+    ExcludedAt(usize),
     Checked(usize),
 }
 
@@ -120,8 +124,8 @@ impl<'ctx> ProjectionAsts<'ctx> {
         }
     }
 
-    fn clear(&mut self) {
-        for key in self.refs.get_mut().drain() {
+    pub(super) fn release_all(&self) {
+        for key in self.refs.borrow_mut().drain() {
             unsafe { Z3_dec_ref(self.ctx.z3_ctx, key) };
         }
     }
@@ -129,7 +133,7 @@ impl<'ctx> ProjectionAsts<'ctx> {
 
 impl Drop for ProjectionAsts<'_> {
     fn drop(&mut self) {
-        self.clear();
+        self.release_all();
         for (key, _) in self.stable.get_mut().drain() {
             unsafe { Z3_dec_ref(self.ctx.z3_ctx, key) };
         }
@@ -177,6 +181,7 @@ impl<'ctx> PrefixIndex<'ctx> {
             bool_symbols: Vec::new(),
             projection: RefCell::default(),
             asts: ProjectionAsts::new(ctx),
+            ordinary_asts: ProjectionAsts::new(ctx),
             domains: Default::default(),
             rewrites: rewrites::ScopedRewriteCache::new(ctx),
             branch: RefCell::default(),
@@ -283,7 +288,7 @@ impl<'ctx> PrefixIndex<'ctx> {
         }
         if has_suffix {
             self.arm_facts.get_mut().truncate_assertions(self.assertions.len());
-            let preserve = if self.incremental_choices { self.assertions.len() } else { 0 };
+            let preserve = if self.incremental_choices || self.retain_ordinary() { self.assertions.len() } else { 0 };
             self.clear_candidate_caches(preserve);
         }
     }
@@ -300,7 +305,17 @@ impl<'ctx> PrefixIndex<'ctx> {
                 self.asts.release_stable(key);
             }
         }
+        self.projection.get_mut().ordinary = ProjectionLayer::default();
+        self.ordinary_asts.release_all();
         self.clear_candidate_caches(0);
+    }
+
+    fn retain_ordinary(&self) -> bool {
+        self.asts.ctx.solver_options.retain_ordinary_prefix_cache
+    }
+
+    fn stable_assertions(&self) -> bool {
+        self.retain_ordinary() || super::scalar::enabled() || self.incremental_choices
     }
 
     pub(in crate::smt) fn guarded_suffix(&mut self, offset: usize, guard_depth: usize) {
@@ -311,16 +326,33 @@ impl<'ctx> PrefixIndex<'ctx> {
         }
         self.arm_facts.get_mut().truncate_assertions(retained);
         self.truncate_guards(guard_depth);
-        self.clear_candidate_caches(if self.incremental_choices { retained } else { 0 });
+        self.clear_candidate_caches(if self.incremental_choices || self.retain_ordinary() { retained } else { 0 });
     }
 
     fn clear_candidate_caches(&mut self, preserve: usize) {
         self.bounds.get_mut().clear();
-        let assertions = &mut self.projection.get_mut().assertions;
-        let preserve = preserve.min(assertions.len());
-        for key in assertions.drain(preserve..) {
-            if super::scalar::enabled() || self.incremental_choices {
-                self.asts.release_stable(key);
+        let stable = self.stable_assertions();
+        let cache = self.projection.get_mut();
+        let preserve = preserve.min(cache.assertions.len());
+        if preserve < cache.assertions.len() {
+            for facts in cache.ordinary.anchors.values_mut() {
+                // 依赖索引含有被删根的子节点，先丢掉裸指针再释放根引用。
+                facts.projection = AnchorProjection::default();
+                let retained_related = facts.related.partition_point(|&(index, _)| index < preserve);
+                facts.candidates.retain(|_, check| match check {
+                    BranchCheck::ExcludedAt(index) => *index < preserve,
+                    BranchCheck::Checked(count) => {
+                        *count = (*count).min(retained_related);
+                        true
+                    }
+                });
+                facts.indexed = 0;
+                facts.related.clear();
+            }
+            for key in cache.assertions.drain(preserve..) {
+                if stable {
+                    self.asts.release_stable(key);
+                }
             }
         }
         self.clear_guard_caches();
@@ -349,15 +381,21 @@ impl<'ctx> PrefixIndex<'ctx> {
     }
 
     fn clear_guard_caches(&mut self) {
+        let stable_assertions = self.stable_assertions();
+        let retain_ordinary = self.retain_ordinary();
         let cache = self.projection.get_mut();
-        let assertions = if super::scalar::enabled() || self.incremental_choices {
-            std::mem::take(&mut cache.assertions)
-        } else {
-            Vec::new()
-        };
-        let guards = if self.incremental_choices { std::mem::take(&mut cache.guards) } else { Vec::new() };
-        *cache = ProjectionCache { assertions, guards, ..Default::default() };
-        self.asts.clear();
+        cache.active = ProjectionLayer::default();
+        if !retain_ordinary || self.ordinary_asts.retained_count() > 32_768 {
+            cache.ordinary = ProjectionLayer::default();
+            self.ordinary_asts.release_all();
+        }
+        if !stable_assertions {
+            cache.assertions.clear();
+        }
+        if !self.incremental_choices {
+            cache.guards.clear();
+        }
+        self.asts.release_all();
         self.domains.get_mut().clear();
         self.rewrites.advance();
         *self.branch.get_mut() = None;
@@ -388,16 +426,21 @@ impl<'ctx> PrefixIndex<'ctx> {
             + layers.capacity() * size_of::<GuardBounds>()
             + guarded_bytes
             + (cache.assertions.capacity() + cache.guards.capacity()) * size_of::<Z3_ast>()
-            + map_bytes::<Z3_ast, (Option<bool>, Z3_ast)>(cache.simplified.capacity())
-            + map_bytes::<Z3_ast, ()>(self.asts.refs.borrow().capacity())
-            + map_bytes::<Z3_ast, AnchorFacts>(cache.anchors.capacity())
-            + cache
-                .anchors
-                .values()
-                .map(|facts| {
-                    facts.projection.heap_bytes()
-                        + facts.related.capacity() * size_of::<Z3_ast>()
-                        + map_bytes::<Z3_ast, BranchCheck>(facts.candidates.capacity())
+            + self.asts.heap_bytes()
+            + self.ordinary_asts.heap_bytes()
+            + [&cache.ordinary, &cache.active]
+                .into_iter()
+                .map(|layer| {
+                    map_bytes::<Z3_ast, AnchorFacts>(layer.anchors.capacity())
+                        + layer
+                            .anchors
+                            .values()
+                            .map(|facts| {
+                                facts.projection.heap_bytes()
+                                    + facts.related.capacity() * size_of::<(usize, Z3_ast)>()
+                                    + map_bytes::<Z3_ast, BranchCheck>(facts.candidates.capacity())
+                            })
+                            .sum::<usize>()
                 })
                 .sum::<usize>()
             + map_bytes::<Sym, (usize, Bound)>(self.bounds.borrow().capacity())
@@ -547,7 +590,7 @@ impl<'a, B: BV> PathConditions<'a, B> {
     pub(super) fn translate_projection_suffix(&self, solver: &Solver<'_, B>, cache: &mut ProjectionCache) {
         for &position in &self.index.assertions[cache.assertions.len()..] {
             let ast = solver.translate_projection_assertion(self.assertion(position));
-            let key = if super::scalar::enabled() || self.index.incremental_choices {
+            let key = if self.index.stable_assertions() {
                 self.index.asts.keep_stable(ast)
             } else {
                 self.index.asts.keep(ast)
@@ -572,37 +615,51 @@ impl<'a, B: BV> PathConditions<'a, B> {
         let asts = &self.index.asts;
         let mut cache = self.index.projection.borrow_mut();
         self.translate_projection_suffix(solver, &mut cache);
-        let ProjectionCache { assertions, guards, anchors, .. } = &mut *cache;
-        let facts = anchors.entry(asts.keep(anchor.clone())).or_default();
-        let checked = match facts.candidates.get(&value.z3_ast) {
-            Some(BranchCheck::Excluded) => return true,
-            Some(BranchCheck::Checked(count)) => *count,
-            None => 0,
-        };
-
-        // 同一批新断言常共享很大的子式。每个 DAG 节点只查一次是否含锚点。
-        let mut independent = HashSet::new();
-        for &key in assertions[facts.indexed_assertions..].iter().chain(&guards[facts.indexed_guards..]) {
-            if facts.projection.contains_anchor(key, anchor, value, &mut independent) {
-                facts.related.push(key);
-            }
-        }
-        facts.indexed_assertions = assertions.len();
-        facts.indexed_guards = guards.len();
+        let ProjectionCache { assertions, guards, ordinary, active } = &mut *cache;
         let evaluator = ground::AstEvaluator::new(asts.ctx);
         let replacement = [(anchor.z3_ast, value.z3_ast)];
-        let excluded = facts.related[checked..].iter().any(|&key| {
-            evaluator.evaluate(key, &replacement).map_or_else(
-                || {
-                    let mut residual = asts.get(key).substitute(anchor, value);
-                    residual.z3_ast != key && residual.structural_bool() == Some(false)
-                },
-                |(truth, changed)| changed && !truth,
-            )
-        });
-        let result = if excluded { BranchCheck::Excluded } else { BranchCheck::Checked(facts.related.len()) };
-        facts.candidates.insert(asts.keep(value.clone()), result);
-        excluded
+        let mut rebuilt = HashMap::new();
+        for (is_guard, layer, roots, owners) in
+            [(false, ordinary, assertions, &self.index.ordinary_asts), (true, active, guards, asts)]
+        {
+            let facts = layer.anchors.entry(owners.keep(anchor.clone())).or_default();
+            let checked = match facts.candidates.get(&value.z3_ast) {
+                Some(BranchCheck::ExcludedAt(_)) => return true,
+                Some(BranchCheck::Checked(count)) => *count,
+                None => 0,
+            };
+            let mut independent = HashSet::new();
+            for (index, &key) in roots.iter().enumerate().skip(facts.indexed) {
+                if facts.projection.contains_anchor(key, anchor, value, &mut independent) {
+                    facts.related.push((index, key));
+                }
+            }
+            facts.indexed = roots.len();
+            let result = facts.related[checked..].iter().find_map(|&(index, key)| {
+                let excluded = if asts.ctx.solver_options.branch_candidate_sparse_rewrite {
+                    let fact =
+                        self.index.rewrites.for_assertion(is_guard).single(anchor.z3_ast, value.z3_ast, key, || {
+                            facts.projection.project_assertion(asts, key, anchor, value, &mut rebuilt)
+                        });
+                    !fact.unchanged && fact.truth == Some(false)
+                } else {
+                    evaluator.evaluate(key, &replacement).map_or_else(
+                        || {
+                            let mut residual = asts.get(key).substitute(anchor, value);
+                            residual.z3_ast != key && residual.structural_bool() == Some(false)
+                        },
+                        |(truth, changed)| changed && !truth,
+                    )
+                };
+                excluded.then_some(index)
+            });
+            let progress = result.map_or(BranchCheck::Checked(facts.related.len()), BranchCheck::ExcludedAt);
+            facts.candidates.insert(owners.keep(value.clone()), progress);
+            if result.is_some() {
+                return true;
+            }
+        }
+        false
     }
 
     fn assertion(&self, position: Position) -> &'a Exp<Sym> {
