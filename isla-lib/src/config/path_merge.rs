@@ -117,7 +117,7 @@ pub struct PathMergeConfig {
     pub max_merge_depth: Option<i64>,
     /// 区域因局部汇合失败可保留的片段上限；缺省或 -1 不限。
     pub max_fragments: Option<i64>,
-    /// 按当前臂的定义和断言解析符号标量。默认关闭。
+    /// 按当前臂的定义和断言解析符号标量。默认开启。
     pub symbolic_scalar_resolver: bool,
     /// 延后推演时，范围证明转为出口待证义务；默认开启。
     pub defer_range_proofs: bool,
@@ -152,8 +152,9 @@ pub struct PathMergeConfig {
     /// 需要具体值时按精确有限域枚举；默认开启。
     pub finite_domain_enumeration: bool,
     pub witness_eval: bool,
+    /// 迭代边界前缀固化并释放已完成轮次的历史。默认开启。
     pub prefix_compact: bool,
-    /// 扩展循环逐轮折叠形状；缺省关闭。
+    /// 扩展循环逐轮折叠形状。默认开启。
     pub loop_fold_shapes: bool,
     pub diagnostics: PathMergeDiagnostics,
     pub regions: Option<Vec<PathMergeRegionConfig>>,
@@ -172,7 +173,7 @@ impl Default for PathMergeConfig {
             parallel: PathMergeParallelConfig::default(),
             max_merge_depth: None,
             max_fragments: None,
-            symbolic_scalar_resolver: false,
+            symbolic_scalar_resolver: true,
             defer_range_proofs: true,
             defer_ctor_checks: true,
             merge_poison_slots: true,
@@ -195,8 +196,8 @@ impl Default for PathMergeConfig {
             lazy_z3_scope: false,
             finite_domain_enumeration: true,
             witness_eval: false,
-            prefix_compact: false,
-            loop_fold_shapes: false,
+            prefix_compact: true,
+            loop_fold_shapes: true,
             diagnostics: PathMergeDiagnostics::default(),
             regions: None,
             enumeration: None,

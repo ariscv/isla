@@ -47,7 +47,7 @@ fn run_deep_region_test(test: impl FnOnce() + Send + 'static) {
 type Formula = smtlib::Exp<Sym>;
 
 // 任意测试的 SMT 查询都可能写入进程级诊断。在只运行本用例的进程内启用诊断。
-fn run_in_diagnostics_process(test_path: &str) -> bool {
+pub(super) fn run_in_diagnostics_process(test_path: &str) -> bool {
     let (_, test_name) = test_path.split_once("::").unwrap();
     let args = ["--exact", test_name, "--nocapture", "--test-threads=1"];
     if std::env::args_os().skip(1).eq(args.map(std::ffi::OsStr::new)) {

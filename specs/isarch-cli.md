@@ -472,7 +472,8 @@ isarch [原 J1 探索参数] \
 | `path_merge.witness_eval` | `--region-witness-eval=true/false` | `false` | 完整前提见证求值 |
 | `path_merge.diagnostics.witness_shadow` | `--region-witness-shadow=true/false` | `false` | 见证影子诊断 |
 | `path_merge.diagnostics.witness_local_shadow` | `--region-witness-local-shadow=true/false` | `false` | 局部见证补全影子诊断 |
-| `path_merge.prefix_compact` | `--region-prefix-compact=true/false` | `false` | 迭代边界前缀固化 |
+| `path_merge.loop_fold_shapes` | `--region-loop-fold-shapes=true/false` | `true` | 扩展循环逐轮折叠形状 |
+| `path_merge.prefix_compact` | `--region-prefix-compact=true/false` | `true` | 迭代边界前缀固化与已完成轮次的历史释放 |
 | `path_merge.diagnostics.bool_proof_profile` | `--region-bool-proof-profile=true/false` | `false` | 可选布尔证明资源统计 |
 | `path_merge.diagnostics.progress` | `--region-progress=true/false` | `false` | 区域步数和查询进度诊断 |
 | `path_merge.diagnostics.native_snapshot` | `--region-native-snapshot=true/false` | `false` | 原生查询快照 |
@@ -576,7 +577,7 @@ partial_commit_control = false
 
 ### 区域合并具体值
 
-在 `[execution_limits.path_merge]` 设置 `symbolic_scalar_resolver = true`，或传入 `--symbolic-scalar-resolver=true`，可开启符号长度、位宽和索引的统一具体化。默认关闭。读长的可表示范围是 `1..=u32::MAX/8` 字节。开启后，延后区域可以把读长范围登记为出口需要验证的安全义务；出口认证仍需排除越界反例。设置 `--obligation-dump-dir` 后，目录中的 `scalar-range-*.smt2` 保存登记义务之前的原始前缀和反例条件，可独立用 Z3 检查。若 ITE 的一个值臂直接来自有显式有限域的输入，解析器可按这些值拆分，并要求出口同时排除越界值和该集合之外的合法值。若反例可达，区域撤销推演并从原前缀重试。
+符号长度、位宽和索引的统一具体化默认开启。在 `[execution_limits.path_merge]` 设置 `symbolic_scalar_resolver = false`，或传入 `--symbolic-scalar-resolver=false`，可关闭此功能。读长的可表示范围是 `1..=u32::MAX/8` 字节。开启后，延后区域可以把读长范围登记为出口需要验证的安全义务，出口认证仍需排除越界反例。设置 `--obligation-dump-dir` 后，目录中的 `scalar-range-*.smt2` 保存登记义务之前的原始前缀和反例条件，可独立用 Z3 检查。若 ITE 的一个值臂直接来自有显式有限域的输入，解析器可按这些值拆分，并要求出口同时排除越界值和该集合之外的合法值。若反例可达，区域撤销推演并从原前缀重试。
 
 `[execution_limits.path_merge].merge_concrete_values` 默认开启，`--merge-concrete-values=true|false` 可覆盖。区域出口用守卫保留两臂不同的具体字符串或 I64。字符串相等比较直接计算对应的符号布尔值。需要具体操作数的指令沿原守卫重试，区域内重试通过共用汇合入口交回正常前沿。
 

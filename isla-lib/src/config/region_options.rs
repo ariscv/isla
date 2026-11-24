@@ -12,7 +12,7 @@ pub struct RegionOptions {
     pub bv_rewrite: crate::smt::rewrite::BvRewrite,
     /// 区域推演嵌套上限；缺省或-1不限。
     pub max_merge_depth: Option<i64>,
-    /// 按当前臂的定义和断言解析符号标量。默认关闭。
+    /// 按当前臂的定义和断言解析符号标量。默认开启。
     pub symbolic_scalar_resolver: bool,
     /// 延后推演时，范围证明转为出口待证义务；默认开启。
     pub defer_range_proofs: bool,
@@ -51,7 +51,7 @@ pub struct RegionOptions {
     pub witness_shadow: bool,
     /// 局部见证补全影子诊断；默认关闭。
     pub witness_local_shadow: bool,
-    /// 迭代边界前缀固化，并压缩已完成轮次的记录和逻辑臂；默认关闭。
+    /// 迭代边界前缀固化，并压缩已完成轮次的记录和逻辑臂。默认开启。
     pub prefix_compact: bool,
     pub loop_fold_shapes: bool,
     /// 可选布尔证明资源统计；默认关闭。

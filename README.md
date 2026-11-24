@@ -821,7 +821,9 @@ witness_eval = true
 
 精确有限域识别默认开启，只在长度、索引等消费者需要具体值时枚举。已确认的候选可以直接复用，有穷上界内的每个候选仍受完整路径约束。结构层不能确定上界时，有 SMT 的执行沿用模型枚举，无 SMT 的执行报告缺少具体值。候选数量没有隐式上限。可用 `--finite-domain-enumeration=false` 或在 `[execution_limits.path_merge]` 设置 `finite_domain_enumeration = false` 关闭。旧字段 `finite_domain_max` 会产生配置错误。
 
-在 `[execution_limits.path_merge]` 中，`symbolic_scalar_resolver = true` 启用符号标量具体化，延后区域的读长范围可交给出口证明。`partial_commit_prefix = true` 配合相应的原因类别开关，可在任意层保留已认证的子合并，从拒绝指令继续执行。两个开关独立，默认均关闭。[前缀固化配置](specs/isarch-cli.md#探索路径的限时与求解失败) · [标量具体化配置](specs/isarch-cli.md#区域合并具体值)
+在 `[execution_limits.path_merge]` 中，符号标量统一具体化（`symbolic_scalar_resolver`）、扩展循环逐轮折叠（`loop_fold_shapes`）和历史释放（`prefix_compact`）默认开启。各项可在 TOML 中独立设为 `false`，也可通过对应 CLI 参数关闭。符号标量统一具体化允许延后区域把读长范围交给出口证明。[循环配置](specs/isarch-cli.md#分段合并候选与诊断配置) · [标量具体化配置](specs/isarch-cli.md#区域合并具体值)
+
+`partial_commit_prefix` 默认关闭。设为 `true` 并配合相应的原因类别开关，可在任意层保留已认证的子合并，从拒绝指令继续执行。[前缀固化配置](specs/isarch-cli.md#探索路径的限时与求解失败)
 
 在 `[execution_limits.path_merge]` 中，`arms_as_tasks = true` 允许把区域 B 臂和根提交的错误叶认证交给空闲线程，缺省关闭。`[execution_limits.path_merge.parallel]` 的 `min_arm_instructions` 缺省为 32，按区域中的 IR 指令和直接被调函数的指令数估算。设为 0 可取消这一调度门槛。`min_error_leaves` 缺省为 64，设置根错误叶认证开始并行的最小叶数。任务规模过小或没有可用线程时，当前执行线程继续处理。
 

@@ -24,7 +24,7 @@ const BOOL_OPTIONS: &[(&str, &str, &str)] = &[
     ("partial_commit_structure", "partial-commit-structure", "在区域结构屏障处保存前缀，默认关闭"),
     ("partial_commit_state_effect", "partial-commit-state-effect", "在状态效应执行前保存前缀，默认关闭"),
     ("partial_commit_control", "partial-commit-control", "在可恢复的控制指令前保存前缀，默认关闭"),
-    ("symbolic_scalar_resolver", "symbolic-scalar-resolver", "使用随臂符号标量具体化，默认关闭"),
+    ("symbolic_scalar_resolver", "symbolic-scalar-resolver", "使用随臂符号标量具体化，默认开启"),
     ("finite_domain_enumeration", "finite-domain-enumeration", "先按可确认的有限域枚举具体值；默认开启"),
     ("merge_poison_slots", "merge-poison-slots", "只消除已证明不可观察的局部未初始化槽位或载荷；默认开启"),
     ("defer_ctor_checks", "region-defer-ctor-checks", "延后推演时，构造子解包标签转为出口待证义务；默认开启"),
@@ -38,8 +38,8 @@ const BOOL_OPTIONS: &[(&str, &str, &str)] = &[
     ("witness_eval", "region-witness-eval", "完整前提见证求值；默认关闭"),
     ("witness_shadow", "region-witness-shadow", "见证影子诊断；默认关闭"),
     ("witness_local_shadow", "region-witness-local-shadow", "局部见证补全影子诊断；默认关闭"),
-    ("loop_fold_shapes", "region-loop-fold-shapes", "扩展循环逐轮折叠形状；默认关闭"),
-    ("prefix_compact", "region-prefix-compact", "迭代边界前缀固化；默认关闭"),
+    ("loop_fold_shapes", "region-loop-fold-shapes", "扩展循环逐轮折叠形状，默认开启"),
+    ("prefix_compact", "region-prefix-compact", "迭代边界前缀固化，默认开启"),
     ("bool_proof_profile", "region-bool-proof-profile", "可选布尔证明资源统计；默认关闭"),
     ("progress", "region-progress", "区域步数和查询进度诊断；默认关闭"),
     ("native_snapshot", "region-native-snapshot", "原生查询快照；默认关闭"),
@@ -217,6 +217,27 @@ mod tests {
         let prior = config.clone();
         assert!(cli(&mut config, &["--bv-rewrite=unknown"]).is_err());
         assert_eq!(config, prior);
+    }
+
+    #[test]
+    fn region_options_cli_disables_default_scalar_and_loop_options() {
+        let mut limits = ExecutionLimitsConfig::default();
+        cli(&mut limits, &[]).unwrap();
+        assert!(limits.path_merge.symbolic_scalar_resolver);
+        assert!(limits.path_merge.loop_fold_shapes);
+        assert!(limits.path_merge.prefix_compact);
+        assert!(!limits.path_merge.partial_commit_prefix);
+        assert!(!limits.path_merge.arms_as_tasks);
+
+        cli(
+            &mut limits,
+            &["--symbolic-scalar-resolver=false", "--region-loop-fold-shapes=false", "--region-prefix-compact=false"],
+        )
+        .unwrap();
+        let options = RegionOptions::from_config(&limits);
+        assert!(!options.symbolic_scalar_resolver);
+        assert!(!options.loop_fold_shapes);
+        assert!(!options.prefix_compact);
     }
 
     #[test]

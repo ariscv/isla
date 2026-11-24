@@ -2794,6 +2794,23 @@ end_column = 0
     }
 
     #[test]
+    fn region_options_toml_scalar_and_loop_defaults() {
+        let config = merge_config("[execution_limits.path_merge]").unwrap();
+        assert_eq!(config.path_merge, PathMergeConfig::default());
+        assert!(config.path_merge.symbolic_scalar_resolver);
+        assert!(config.path_merge.loop_fold_shapes);
+        assert!(config.path_merge.prefix_compact);
+        assert!(!config.path_merge.partial_commit_prefix);
+        assert!(!config.path_merge.arms_as_tasks);
+
+        let options = RegionOptions::from_config(&config);
+        assert!(options.symbolic_scalar_resolver);
+        assert!(options.loop_fold_shapes);
+        assert!(options.prefix_compact);
+        assert!(!options.partial_commit_prefix);
+    }
+
+    #[test]
     fn region_options_lazy_scope_toml_defaults_and_dependency() {
         let defaults = merge_config("[execution_limits.path_merge]\n").unwrap().path_merge;
         assert!(!defaults.lazy_z3_scope);
@@ -2889,7 +2906,7 @@ obligation_dump_dir = "obligations"
             RegionOptions {
                 bv_rewrite: Default::default(),
                 max_merge_depth: None,
-                symbolic_scalar_resolver: false,
+                symbolic_scalar_resolver: true,
                 defer_range_proofs: true,
                 defer_ctor_checks: true,
                 prune_constant_branches: true,
@@ -2913,7 +2930,7 @@ obligation_dump_dir = "obligations"
                 lazy_z3_scope: true,
                 witness_eval: true,
                 prefix_compact: true,
-                loop_fold_shapes: false,
+                loop_fold_shapes: true,
                 witness_shadow: true,
                 witness_local_shadow: true,
                 bool_proof_profile: true,

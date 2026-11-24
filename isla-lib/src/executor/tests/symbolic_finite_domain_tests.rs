@@ -1,3 +1,4 @@
+use super::region_merge_tests::run_in_diagnostics_process;
 use super::*;
 use smtlib::Exp as Formula;
 
@@ -117,6 +118,10 @@ fn symbolic_finite_domain_keeps_every_explicit_candidate_above_the_old_limit() {
 
 #[test]
 fn symbolic_finite_domain_matches_smt_enumeration() {
+    if !run_in_diagnostics_process(concat!(module_path!(), "::symbolic_finite_domain_matches_smt_enumeration")) {
+        return;
+    }
+    crate::config::RegionOptions { symbolic_scalar_resolver: false, ..Default::default() }.configure();
     let expected = vec![(1, vec![1]), (2, vec![2]), (4, vec![4]), (8, vec![8])];
     for enabled in [false, true] {
         let (results, queries) = lengths(false, enabled, four_lengths);
@@ -172,6 +177,13 @@ fn symbolic_finite_domain_unknown_reports_error_and_does_not_certify() {
 
 #[test]
 fn symbolic_finite_domain_region_preserves_retry_and_rollback() {
+    if !run_in_diagnostics_process(concat!(
+        module_path!(),
+        "::symbolic_finite_domain_region_preserves_retry_and_rollback"
+    )) {
+        return;
+    }
+    crate::config::RegionOptions { symbolic_scalar_resolver: false, ..Default::default() }.configure();
     use crate::smt::FiniteDomain;
     use symbolic_length::ValueRetry;
     crate::smt::configure_tastic(crate::smt::Tactic::Qfaufbv);

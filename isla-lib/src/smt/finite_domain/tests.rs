@@ -794,6 +794,12 @@ fn slice_queries_mixed_single_and_joint_keep_the_previous_joint_results() {
 
 #[test]
 fn finite_domain_operand_bound_is_local_to_the_retry_arm() {
+    if !resolver_test_options(
+        "finite_domain_operand_bound_is_local_to_the_retry_arm",
+        crate::config::RegionOptions { symbolic_scalar_resolver: false, ..Default::default() },
+    ) {
+        return;
+    }
     configure_tastic(Tactic::Qfaufbv);
     let mut config = Config::new();
     config.solver_options.finite_domain_enumeration = true;

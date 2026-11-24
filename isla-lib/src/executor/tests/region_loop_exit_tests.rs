@@ -21,6 +21,13 @@ fn region_loop_exit_keeps_register_writes_across_rounds_with_small_budget() {
 
 #[test]
 fn region_loop_exit_budget_publishes_one_task_per_guarded_continuation() {
+    if !run_in_diagnostics_process(concat!(
+        module_path!(),
+        "::region_loop_exit_budget_publishes_one_task_per_guarded_continuation"
+    )) {
+        return;
+    }
+    crate::config::RegionOptions { loop_fold_shapes: false, ..Default::default() }.configure();
     use super::loop_segment_tests::segment_paths;
     use smtlib::Exp::{And, Var};
 
@@ -129,6 +136,7 @@ fn region_loop_exit_nested_budget_returns_both_frontiers_to_parent() {
     )) {
         return;
     }
+    crate::config::RegionOptions { loop_fold_shapes: false, ..Default::default() }.configure();
     use super::loop_segment_tests::{equivalent_scalar_paths_for_inputs, segment_paths_with_solver};
     let [a, b, pick_a, pick_b, ignored, wrote] = [1881, 1882, 1883, 1884, 1885, 1887].map(test_name);
     for depth in [3, 4] {
