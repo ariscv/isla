@@ -3,6 +3,11 @@ use super::*;
 use std::rc::Rc;
 
 type Formula = Exp<Sym>;
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static COMBINED_VALUES_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 #[derive(Default)]
 struct Evaluated<'ctx> {
     values: HashMap<*const Expression, Ast<'ctx>>,
@@ -155,11 +160,13 @@ struct Graph<'a, 'prefix, 'ctx, B> {
     prefix: &'a PathConditions<'prefix, B>,
     state: &'a mut ChoiceGraph,
     incremental: bool,
+    // 上界证明只读取定义前的普通断言，不借用活动臂事实。
+    scalar_proof_assertions: Option<usize>,
 }
 
 impl<'a, 'ctx, B: BV> Graph<'a, '_, 'ctx, B> {
     fn build_join_arm(&mut self, output: Option<Sym>, exp: &Formula, side: usize) -> Option<Node> {
-        if let (Some(output), Exp::Var(symbol)) = (output, exp) {
+        if let (None, Some(output), Exp::Var(symbol)) = (self.scalar_proof_assertions, output, exp) {
             if let Some(joined) = self.prefix.index.joined_choices.get(&output) {
                 if let Some(values) = &joined.operands[side] {
                     if joined.ancestors.iter().all(|guard| self.prefix.known_choice(self.solver, guard) == Some(true)) {
@@ -192,7 +199,16 @@ impl<'a, 'ctx, B: BV> Graph<'a, '_, 'ctx, B> {
             }
             let definition = self.prefix.definition(*sym);
             let node = definition.and_then(|exp| self.build_definition(exp, Some(*sym))).or_else(|| {
-                let choices = if self.incremental {
+                let choices = if let Some(count) = self.scalar_proof_assertions {
+                    let subject = resolve(exp, self.prefix);
+                    let mut memo = HashMap::new();
+                    self.prefix.ordinary_suffix(0).take(count).fold(
+                        value_bound(subject, self.prefix),
+                        |previous, assertion| {
+                            intersect(previous, bound(assertion, subject, self.prefix, false, &mut memo))
+                        },
+                    )
+                } else if self.incremental {
                     self.state.bounds.entry(*sym).or_insert_with(|| self.prefix.bounds(exp)).clone()
                 } else {
                     self.prefix.bounds(exp)
@@ -618,11 +634,31 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             let mut scopes = dag.scopes.borrow_mut();
             let (guards, revision) = prefix.index.choice_revision();
             let state = IncrementalChoiceDag::current(&mut scopes, guards, revision);
-            f(&mut Graph { solver: self, prefix, state, incremental: true })
+            f(&mut Graph { solver: self, prefix, state, incremental: true, scalar_proof_assertions: None })
         } else {
             let mut state = ChoiceGraph::default();
-            f(&mut Graph { solver: self, prefix, state: &mut state, incremental: false })
+            f(&mut Graph { solver: self, prefix, state: &mut state, incremental: false, scalar_proof_assertions: None })
         }
+    }
+
+    pub(super) fn scalar_definition_upper(&self, prefix: &PathConditions<'_, B>, sym: Sym, count: usize) -> Bound {
+        let mut state = ChoiceGraph::default();
+        let mut graph =
+            Graph { solver: self, prefix, state: &mut state, incremental: false, scalar_proof_assertions: Some(count) };
+        let root = graph.build(&Exp::Var(sym))?;
+        let mut seen = HashMap::new();
+        let mut output = Vec::new();
+        // 上界缓存只做有限的预计算。达到缓存预算时，继续用原入口完整推导。
+        let mut remaining = 512;
+        let complete = graph.visit(&root, None, |mut value, _, _, _| {
+            let constant = value.finite_bits().expect("标量上界必须为位向量常量");
+            if seen.insert(value.z3_ast, value).is_none() {
+                output.push(constant);
+            }
+            remaining -= 1;
+            remaining > 0
+        });
+        complete.then_some(output)
     }
 
     pub(super) fn choice_bounds(&self, prefix: &PathConditions<'_, B>, subject: &Formula) -> Bound {
@@ -689,6 +725,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         exp: &Formula,
         mut accept: impl FnMut(Ast<'ctx>, bool) -> bool,
     ) -> Option<()> {
+        #[cfg(test)]
+        COMBINED_VALUES_CALLS.set(COMBINED_VALUES_CALLS.get() + 1);
         self.with_choice_graph(prefix, |graph| {
             let witness = self.has_stashed_model();
             if graph.incremental {

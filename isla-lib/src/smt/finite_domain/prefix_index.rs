@@ -10,6 +10,31 @@ struct Position(usize, usize);
 
 type GuardBounds = HashMap<Sym, Option<Arc<Vec<Exp<Sym>>>>>;
 
+struct ScalarUpperBound {
+    definition: Position,
+    proof_assertions: usize,
+    checked_assertions: usize,
+    // 记录首条排除候选的断言下标。只有该断言消失时才恢复候选。
+    candidates: Vec<(Exp<Sym>, Option<usize>)>,
+}
+
+impl ScalarUpperBound {
+    fn rewind(&mut self, retained: usize) -> bool {
+        if self.proof_assertions > retained {
+            return false;
+        }
+        if self.checked_assertions > retained {
+            self.checked_assertions = retained;
+            for (_, excluded) in &mut self.candidates {
+                if excluded.is_some_and(|index| index >= retained) {
+                    *excluded = None;
+                }
+            }
+        }
+        true
+    }
+}
+
 pub(in crate::smt) struct PrefixIndex<'ctx> {
     choice_epoch: u64,
     choice_assertions: Vec<u64>,
@@ -20,6 +45,7 @@ pub(in crate::smt) struct PrefixIndex<'ctx> {
     pub(super) arm_facts: RefCell<ArmFacts>,
     pub(super) layouts: HashMap<Sym, ScalarLayout>,
     symbols: ahash::AHashMap<Sym, Position>,
+    symbol_upper_bounds: RefCell<HashMap<Sym, ScalarUpperBound>>,
     rebindings: usize,
     bounds: RefCell<HashMap<Sym, (usize, Bound)>>,
     guard_bounds: RefCell<Vec<GuardBounds>>,
@@ -170,6 +196,7 @@ impl<'ctx> PrefixIndex<'ctx> {
             arm_facts: Default::default(),
             layouts: Default::default(),
             symbols: Default::default(),
+            symbol_upper_bounds: Default::default(),
             rebindings: 0,
             bounds: Default::default(),
             guard_bounds: RefCell::default(),
@@ -282,6 +309,8 @@ impl<'ctx> PrefixIndex<'ctx> {
             }
         }
         if has_suffix {
+            let retained = self.assertions.len();
+            self.symbol_upper_bounds.get_mut().retain(|_, bound| bound.definition < first && bound.rewind(retained));
             self.arm_facts.get_mut().truncate_assertions(self.assertions.len());
             let preserve = if self.incremental_choices { self.assertions.len() } else { 0 };
             self.clear_candidate_caches(preserve);
@@ -293,6 +322,7 @@ impl<'ctx> PrefixIndex<'ctx> {
             self.choice_binding_revision = self.next_choice_epoch();
         }
         self.joined_choices.clear();
+        self.symbol_upper_bounds.get_mut().clear();
         *self.arm_facts.get_mut() = ArmFacts::default();
         self.guard_bounds.get_mut().clear();
         if self.incremental_choices {
@@ -309,6 +339,7 @@ impl<'ctx> PrefixIndex<'ctx> {
             let epoch = self.next_choice_epoch();
             self.choice_assertions[retained..].fill(epoch);
         }
+        self.symbol_upper_bounds.get_mut().retain(|_, bound| bound.rewind(retained));
         self.arm_facts.get_mut().truncate_assertions(retained);
         self.truncate_guards(guard_depth);
         self.clear_candidate_caches(if self.incremental_choices { retained } else { 0 });
@@ -422,6 +453,16 @@ impl<'ctx> PrefixIndex<'ctx> {
                 })
                 .sum::<usize>()
             + map_bytes::<Sym, Position>(self.symbols.capacity())
+            + map_bytes::<Sym, ScalarUpperBound>(self.symbol_upper_bounds.borrow().capacity())
+            + self
+                .symbol_upper_bounds
+                .borrow()
+                .values()
+                .map(|bound| {
+                    bound.candidates.capacity() * size_of::<(Exp<Sym>, Option<usize>)>()
+                        + bound.candidates.iter().map(|(value, _)| exp_heap_bytes(value)).sum::<usize>()
+                })
+                .sum::<usize>()
             + self.assertions.capacity() * size_of::<Position>()
             + self.bool_symbols.capacity() * size_of::<(Position, Sym)>()
             + self.branch.borrow().as_ref().map_or(0, |branch| {
@@ -565,6 +606,79 @@ impl<'a, B: BV> PathConditions<'a, B> {
         }
     }
 
+    pub(super) fn scalar_proof_prefix(&self, sym: Sym, savepoint: usize) -> Option<usize> {
+        let position = *self.index.symbols.get(&sym)?;
+        (position < Position(BUFFERED, savepoint)).then(|| self.index.assertions.partition_point(|p| *p < position))
+    }
+
+    pub(super) fn remember_scalar_upper(&self, sym: Sym, count: usize, values: Vec<Exp<Sym>>) {
+        let mut bounds = self.index.symbol_upper_bounds.borrow_mut();
+        // 只限制缓存开销。容量满时仍按原入口完整推导。
+        if bounds.len() < 64 {
+            bounds.insert(
+                sym,
+                ScalarUpperBound {
+                    definition: self.index.symbols[&sym],
+                    proof_assertions: count,
+                    checked_assertions: 0,
+                    candidates: values.into_iter().map(|value| (value, None)).collect(),
+                },
+            );
+        }
+    }
+
+    pub(super) fn scalar_upper(&self, solver: &Solver<'_, B>, sym: Sym) -> Option<Vec<Exp<Sym>>> {
+        let mut bounds = self.index.symbol_upper_bounds.borrow_mut();
+        let upper = bounds.get_mut(&sym)?;
+        let asts = &self.index.asts;
+        let mut cache = self.index.projection.borrow_mut();
+        self.translate_projection_suffix(solver, &mut cache);
+        let anchor = solver.translate_exp(&Exp::Var(sym));
+        let mut dependency = AnchorProjection::default();
+        let mut independent = HashSet::new();
+        let mut related = |key, value: &Ast| dependency.contains_anchor(key, &anchor, value, &mut independent);
+        let relevant_candidates: Vec<_> =
+            upper.candidates.iter().map(|(value, _)| solver.translate_exp(value)).collect();
+        let probe = relevant_candidates.iter().find(|v| v.z3_ast != anchor.z3_ast);
+        if let Some(probe) = probe {
+            for (index, &key) in cache.assertions.iter().enumerate().skip(upper.checked_assertions) {
+                if related(key, probe) {
+                    for ((_, excluded), value) in upper.candidates.iter_mut().zip(&relevant_candidates) {
+                        if excluded.is_none() && Self::excludes_candidate(asts, key, &anchor, value) {
+                            *excluded = Some(index);
+                        }
+                    }
+                }
+            }
+        }
+        upper.checked_assertions = cache.assertions.len();
+        let mut result = Vec::new();
+        for ((candidate, excluded), value) in upper.candidates.iter().zip(&relevant_candidates) {
+            if excluded.is_none()
+                && !cache.guards.iter().any(|&key| {
+                    probe.is_some_and(|probe| related(key, probe))
+                        && Self::excludes_candidate(asts, key, &anchor, value)
+                })
+            {
+                result.push(candidate.clone());
+            }
+        }
+        Some(result)
+    }
+
+    fn excludes_candidate(asts: &ProjectionAsts<'_>, key: Z3_ast, anchor: &Ast, value: &Ast) -> bool {
+        if value.z3_ast == anchor.z3_ast {
+            return false;
+        }
+        ground::AstEvaluator::new(asts.ctx).evaluate(key, &[(anchor.z3_ast, value.z3_ast)]).map_or_else(
+            || {
+                let mut residual = asts.get(key).substitute(anchor, value);
+                residual.z3_ast != key && residual.structural_bool() == Some(false)
+            },
+            |(truth, changed)| changed && !truth,
+        )
+    }
+
     pub(super) fn excludes_branch_candidate(&self, solver: &Solver<'_, B>, anchor: &Ast, value: &Ast) -> bool {
         if value.z3_ast == anchor.z3_ast {
             return false;
@@ -589,17 +703,7 @@ impl<'a, B: BV> PathConditions<'a, B> {
         }
         facts.indexed_assertions = assertions.len();
         facts.indexed_guards = guards.len();
-        let evaluator = ground::AstEvaluator::new(asts.ctx);
-        let replacement = [(anchor.z3_ast, value.z3_ast)];
-        let excluded = facts.related[checked..].iter().any(|&key| {
-            evaluator.evaluate(key, &replacement).map_or_else(
-                || {
-                    let mut residual = asts.get(key).substitute(anchor, value);
-                    residual.z3_ast != key && residual.structural_bool() == Some(false)
-                },
-                |(truth, changed)| changed && !truth,
-            )
-        });
+        let excluded = facts.related[checked..].iter().any(|&key| Self::excludes_candidate(asts, key, anchor, value));
         let result = if excluded { BranchCheck::Excluded } else { BranchCheck::Checked(facts.related.len()) };
         facts.candidates.insert(asts.keep(value.clone()), result);
         excluded
