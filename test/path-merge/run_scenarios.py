@@ -42,6 +42,7 @@ DEFAULTS = {
     "merge_concrete_values": None,
     "expect_local_rejection": None,
     "expect_prefix_rejection": None,
+    "require_coi_slice": False,
 }
 
 
@@ -73,7 +74,7 @@ def read_scene(path):
             and all(mode in scene["modes"] for mode in MODES), "modes 必须包含 off、recursive、flat 各一次")
     for key in ("expect_paths_unmerged", "expect_paths_merged"):
         require(type(scene[key]) is int and scene[key] >= 0, f"{key} 须是非负整数")
-    for key in ("ordered_events", "ordered_memory_events", "sequential_ram", "reverse_region_ready"):
+    for key in ("ordered_events", "ordered_memory_events", "sequential_ram", "reverse_region_ready", "require_coi_slice"):
         require(type(scene[key]) is bool, f"{key} 须是布尔值")
     reads = scene["register_reads"]
     require(isinstance(reads, dict) and all(NAME.fullmatch(name) and type(count) is int and count >= 0
@@ -328,6 +329,9 @@ def run_mode(scene, shape, mode, binary, directory, seconds, *, reverse=False):
     prefix_rejection = scene["expect_prefix_rejection"] if enabled else None
     if prefix_rejection is not None:
         settings += "defer_exit_check = true\npartial_commit_deferred_mode = true\npartial_commit_prefix = true\n"
+    if enabled and scene["require_coi_slice"]:
+        settings += ("incremental_choice_dag = true\ncoi_query_slicing = true\ndefer_exit_check = true\n"
+                     "[execution_limits.path_merge.diagnostics]\nprobe_query_timings = true\n")
     config.write_text(settings, encoding="utf-8")
     try:
         command = [str(binary), "-A", str(directory / "model.ir"), "-C", str(config), "-p", "prop", "-T", "2",
@@ -345,6 +349,11 @@ def run_mode(scene, shape, mode, binary, directory, seconds, *, reverse=False):
         log.write_text(process.stdout + process.stderr, encoding="utf-8")
         require(process.returncode in (0, 2) and "ok" in process.stdout.splitlines(),
                 f"property 执行或性质失败（退出 {process.returncode}），见 {log}")
+        if enabled and scene["require_coi_slice"]:
+            events = (json.loads(line) for line in process.stderr.splitlines()
+                      if line.startswith('{"') and '"probe_query_event"' in line)
+            require(any(row["event"]["type"] == "coi_slice" and row["event"]["removed"] > 0 for row in events),
+                    f"没有实际省略断言的切片，见 {log}")
         paths = json.loads(target.read_text(encoding="utf-8"))
         result.count = sum(path.get("terminal") is None for path in paths)
         failures = [path for path in paths if path.get("terminal") is not None]

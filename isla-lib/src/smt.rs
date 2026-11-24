@@ -325,6 +325,7 @@ pub(crate) use deferred_assertions::DeferredArmAssertions;
 #[cfg(test)]
 pub(crate) use deferred_assertions::{reset_test_mandatory_query_count, test_mandatory_query_count};
 mod finite_domain;
+pub(crate) use finite_domain::ArrivalFactSummary;
 pub(crate) use finite_domain::{FiniteDomain, OperandBounds, ScalarChoice, ScalarLayout};
 mod arm_error_replay;
 pub mod no_smt;
@@ -922,6 +923,8 @@ pub struct SolverOptions {
     pub no_smt: bool,
     pub keep_bool_proofs: bool,
     pub finite_domain_enumeration: bool,
+    pub incremental_choice_dag: bool,
+    pub coi_query_slicing: bool,
     pub bv_rewrite: rewrite::BvRewrite,
 }
 
@@ -934,6 +937,8 @@ impl Default for SolverOptions {
             no_smt: false,
             keep_bool_proofs: false,
             finite_domain_enumeration: crate::config::PathMergeConfig::default().finite_domain_enumeration,
+            incremental_choice_dag: false,
+            coi_query_slicing: false,
             bv_rewrite: Default::default(),
         }
     }
@@ -1333,6 +1338,7 @@ macro_rules! z3_float_binary_op {
 }
 
 mod arithmetic;
+mod coi;
 mod const_binding;
 use const_binding::ConstBinding;
 pub mod rewrite;
@@ -2121,6 +2127,8 @@ pub struct Solver<'ctx, B> {
     replay_assertions: Option<Vec<Ast<'ctx>>>,
     transaction_events: Vec<Event<B>>,
     finite_prefix: Option<finite_domain::PrefixIndex<'ctx>>,
+    coi: Option<coi::Coi<'ctx>>,
+    choice_dag: Option<finite_domain::IncrementalChoiceDag<'ctx>>,
     logical_arms: logical_arm::LogicalArms,
     // 与缓冲事件一一对应；不改变 Event，避免波及全部迹消费方。
     transaction_event_guards: Vec<Option<Exp<Sym>>>,
@@ -2945,6 +2953,11 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     .solver_options
                     .finite_domain_enumeration
                     .then(|| finite_domain::PrefixIndex::new(ctx)),
+                coi: ctx.solver_options.coi_query_slicing.then(coi::Coi::default),
+                choice_dag: ctx
+                    .solver_options
+                    .incremental_choice_dag
+                    .then(|| finite_domain::IncrementalChoiceDag::new(ctx)),
                 logical_arms: logical_arm::LogicalArms::default(),
                 transaction_event_guards: Vec::new(),
                 committed_transaction_events: Vec::new(),
@@ -5551,3 +5564,6 @@ impl<B: BV> Solver<'_, B> {
 
 // 有界短探针的只读逐查询诊断。
 pub(crate) use z3_timeout::{probe_query_event, probe_query_timings_enabled, thread_smt_check_count, ArmErrorSmtCall};
+
+#[cfg(test)]
+mod coi_tests;

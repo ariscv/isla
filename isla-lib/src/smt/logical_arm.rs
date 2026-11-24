@@ -174,7 +174,7 @@ impl<B: BV> Solver<'_, B> {
             self.invalidate_error_snapshot(start);
         }
         if let (Some(prefix), Some(start)) = (&mut self.finite_prefix, first_removed) {
-            prefix.remove_suffix(finite_domain::BUFFERED, &self.transaction_events, start);
+            prefix.remove_suffix(finite_domain::BUFFERED, &self.transaction_events, start, false);
         }
         let mut drop = remove.iter();
         self.transaction_events.retain(|_| !drop.next().unwrap());

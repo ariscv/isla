@@ -212,6 +212,7 @@ pub fn unfreeze_frame<'ir, B: BV>(frame: &Frame<'ir, B>) -> LocalFrame<'ir, B> {
         prefix_resume: frame.prefix_resume,
         region_replay: frame.region_replay,
         region_merge_records: frame.region_merge_records.clone(),
+        arrival_facts: None,
         region_arrivals: Vec::new(),
         region_arm: None,
         arm_error: frame.arm_error.clone(),
@@ -247,6 +248,7 @@ pub struct LocalFrame<'ir, B> {
     pub(super) region_execution: Option<super::region_merge::RegionExecution>,
     pub(super) prefix_resume: Option<super::region_engine::prefix_resume::Site>,
     /// 未能汇合的已到达片段，仅在活动区域的挂起边界上传递。
+    pub(super) arrival_facts: Option<Arc<crate::smt::ArrivalFactSummary>>,
     pub(super) region_arrivals: Vec<LocalFrame<'ir, B>>,
     pub(super) region_arm: Option<crate::smt::LogicalArm>,
     pub(super) region_merge_records: super::MergeHistory<B>,
@@ -304,6 +306,7 @@ impl<'ir, B: Clone> Clone for LocalFrame<'ir, B> {
             prefix_resume: self.prefix_resume,
             region_replay: self.region_replay,
             region_execution: self.region_execution.clone(),
+            arrival_facts: self.arrival_facts.clone(),
             region_arrivals: Vec::new(),
             region_arm: self.region_arm,
             region_merge_records: self.region_merge_records.clone(),
@@ -378,6 +381,9 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
         #[cfg(feature = "tracetool")]
         cost::make_mut(&mut self.trace_path).remap_branch_conditions(remap);
         self.region_merge_records.remap_suffix(history_prefix, remap);
+        if let Some(facts) = &mut self.arrival_facts {
+            Arc::make_mut(facts).remap_symbols(remap);
+        }
         self.arm_error_memory_guards = Arc::from(
             self.arm_error_memory_guards.iter().map(|(index, guard)| (*index, remap.exp(guard))).collect::<Vec<_>>(),
         );
@@ -657,6 +663,7 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             pc: 0,
             speculation_mode: SpeculationMode::Off,
             region_execution: None,
+            arrival_facts: None,
             region_arrivals: Vec::new(),
             region_arm: None,
             prefix_resume: None,

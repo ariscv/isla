@@ -51,6 +51,43 @@ impl<'ctx, K, V> Recent<'ctx, K, V> {
     }
 }
 
+/// 普通断言的改写按 AST 和实际代入项共享。守卫及临时绑定随活跃臂换代。
+pub(super) struct ScopedRewriteCache<'ctx> {
+    base_rewrites: Option<Rewrites<'ctx>>,
+    guard_rewrites: Rewrites<'ctx>,
+}
+
+impl<'ctx> ScopedRewriteCache<'ctx> {
+    pub(super) fn new(ctx: &'ctx Context) -> Self {
+        Self {
+            base_rewrites: ctx.solver_options.incremental_choice_dag.then(|| Rewrites::new(ctx)),
+            guard_rewrites: Rewrites::new(ctx),
+        }
+    }
+
+    pub(super) fn for_assertion(&self, is_guard: bool) -> &Rewrites<'ctx> {
+        if is_guard {
+            &self.guard_rewrites
+        } else {
+            self.base_rewrites.as_ref().unwrap_or(&self.guard_rewrites)
+        }
+    }
+
+    pub(super) fn advance(&mut self) {
+        self.guard_rewrites.advance();
+        // 释放缓存页的软水位。约束与可枚举候选的数量不受此值限制。
+        if let Some(base) = &mut self.base_rewrites {
+            if base.retained_ast_count() > 32_768 {
+                *base = Rewrites::new(base.single.current.asts.ctx);
+            }
+        }
+    }
+
+    pub(super) fn heap_bytes(&self) -> usize {
+        self.guard_rewrites.heap_bytes() + self.base_rewrites.as_ref().map_or(0, Rewrites::heap_bytes)
+    }
+}
+
 pub(super) struct Rewrites<'ctx> {
     single: Recent<'ctx, (Z3_ast, Z3_ast, Z3_ast), ProjectedFact>,
     joint: Recent<'ctx, Vec<Replacement>, ByAssertion>,
@@ -66,6 +103,12 @@ impl<'ctx> Rewrites<'ctx> {
         self.single.advance();
         self.joint.advance();
         self.simplified.advance();
+    }
+
+    fn retained_ast_count(&self) -> usize {
+        self.single.current.asts.retained_count()
+            + self.joint.current.asts.retained_count()
+            + self.simplified.current.asts.retained_count()
     }
 
     pub(super) fn heap_bytes(&self) -> usize {

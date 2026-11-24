@@ -166,9 +166,10 @@ fn record_path_smt_call(operation: SmtOperation, source_loc: SourceLoc, wall: Du
     }
     if matches!(operation, SmtOperation::CheckSat | SmtOperation::CheckSatAssuming) {
         THREAD_SMT_CHECKS.with(|checks| checks.set(checks.get() + 1));
-        probe_query_event(
-            || serde_json::json!({"type":"check", "operation":format!("{operation:?}"), "seconds":wall.as_secs_f64(), "source":source_loc, "timed_out":timed_out}),
-        );
+        probe_query_event(|| {
+            serde_json::json!({"type":"check", "operation":format!("{operation:?}"), "seconds":wall.as_secs_f64(), "source":source_loc, "timed_out":timed_out,
+            "purpose":crate::executor::stats::region_progress::query_label()})
+        });
     }
     PATH_SMT_STATS.with(|stats| stats.borrow_mut().record(operation, source_loc, wall, timed_out));
     crate::executor::stats::merge_timing::record_smt_call(operation, wall);

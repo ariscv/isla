@@ -674,22 +674,31 @@ fn region_arm_nested_two_arms() {
 #[test]
 fn region_arm_nested_imports_guarded_assertions() {
     const CHILD: &str = "ISLA_STAGE4_NESTED_ASSERT";
-    if std::env::var_os(CHILD).is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "executor::tests::region_arm_runtime_tests::region_arm_nested_imports_guarded_assertions",
-            ])
-            .env(CHILD, "1")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+    let Some(mode) = std::env::var_os(CHILD) else {
+        for mode in ["existing", "choice_dag_and_coi"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "executor::tests::region_arm_runtime_tests::region_arm_nested_imports_guarded_assertions",
+                ])
+                .env(CHILD, mode)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{mode}: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
         return;
+    };
+    if mode == "choice_dag_and_coi" {
+        crate::smt::configure_solver_options(crate::smt::SolverOptions {
+            incremental_choice_dag: true,
+            coi_query_slicing: true,
+            ..Default::default()
+        });
     }
     crate::config::RegionOptions { defer_exit_check: true, ..Default::default() }.configure();
     check_nested_b(Body::NestedAssert, "nested_assert");

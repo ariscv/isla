@@ -404,24 +404,34 @@ fn collect_path<'ir, B: BV>(
     collected: &PathResults,
 ) {
     match &result {
-        Ok((Run::Finished(value), frame)) => match solver.check_sat(SourceLoc::unknown()) {
-            SmtResult::Sat => {
-                let summary = if collected.scenario_observations {
-                    // 单独重放到未求解的 solver，避免把 Z3 的模型转换器写进守卫。
-                    let context = Context::new(Config::new());
-                    let mut replay = Solver::from_checkpoint(&context, checkpoint(&mut solver));
-                    path_summary(value, frame, shared, &mut replay, true)
-                } else {
-                    path_summary(value, frame, shared, &mut solver, false)
-                };
-                collected.paths.lock().unwrap().push(summary);
+        Ok((Run::Finished(value), frame)) => {
+            match if collected.scenario_observations && solver.coi_query_slicing_enabled() {
+                let mut symbols = value.symbolic_variables();
+                for (_, register) in frame.regs().iter() {
+                    register.collect_symbolic_variables(&mut symbols);
+                }
+                solver.check_exit_feasibility(symbols, SourceLoc::unknown())
+            } else {
+                solver.check_sat(SourceLoc::unknown())
+            } {
+                SmtResult::Sat => {
+                    let summary = if collected.scenario_observations {
+                        // 单独重放到未求解的 solver，避免把 Z3 的模型转换器写进守卫。
+                        let context = Context::new(Config::new());
+                        let mut replay = Solver::from_checkpoint(&context, checkpoint(&mut solver));
+                        path_summary(value, frame, shared, &mut replay, true)
+                    } else {
+                        path_summary(value, frame, shared, &mut solver, false)
+                    };
+                    collected.paths.lock().unwrap().push(summary);
+                }
+                SmtResult::Unsat => (),
+                SmtResult::Unproven(error) | SmtResult::Error(error) => {
+                    eprintln!("路径求解失败：{error}");
+                    collected.incomplete.store(true, Ordering::Release);
+                }
             }
-            SmtResult::Unsat => (),
-            SmtResult::Unproven(error) | SmtResult::Error(error) => {
-                eprintln!("路径求解失败：{error}");
-                collected.incomplete.store(true, Ordering::Release);
-            }
-        },
+        }
         Ok((Run::Dead, _)) => (),
         Ok((Run::Exit | Run::Suspended { .. }, _)) => collected.incomplete.store(true, Ordering::Release),
         Err((ExecError::AssertionFailure(..), frame))

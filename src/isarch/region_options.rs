@@ -25,6 +25,8 @@ const BOOL_OPTIONS: &[(&str, &str, &str)] = &[
     ("partial_commit_state_effect", "partial-commit-state-effect", "在状态效应执行前保存前缀，默认关闭"),
     ("partial_commit_control", "partial-commit-control", "在可恢复的控制指令前保存前缀，默认关闭"),
     ("symbolic_scalar_resolver", "symbolic-scalar-resolver", "使用随臂符号标量具体化，默认开启"),
+    ("incremental_choice_dag", "region-incremental-choice-dag", "在当前臂复用增量选择图，默认关闭"),
+    ("coi_query_slicing", "region-coi-query-slicing", "切片检查分支和出口可行性，默认关闭"),
     ("finite_domain_enumeration", "finite-domain-enumeration", "先按可确认的有限域枚举具体值；默认开启"),
     ("merge_poison_slots", "merge-poison-slots", "只消除已证明不可观察的局部未初始化槽位或载荷；默认开启"),
     ("defer_ctor_checks", "region-defer-ctor-checks", "延后推演时，构造子解包标签转为出口待证义务；默认开启"),
@@ -90,6 +92,8 @@ pub fn apply_cli(matches: &getopts::Matches, limits: &mut ExecutionLimitsConfig)
             let value: bool = value.parse().map_err(|_| format!("--{flag} 必须是 true 或 false"))?;
             match *field {
                 "symbolic_scalar_resolver" => updated.path_merge.symbolic_scalar_resolver = value,
+                "incremental_choice_dag" => updated.path_merge.incremental_choice_dag = value,
+                "coi_query_slicing" => updated.path_merge.coi_query_slicing = value,
                 "merge_poison_slots" => updated.path_merge.merge_poison_slots = value,
                 "defer_ctor_checks" => updated.path_merge.defer_ctor_checks = value,
                 "defer_range_proofs" => updated.path_merge.defer_range_proofs = value,
@@ -251,6 +255,8 @@ mod tests {
         for (field, flag, _) in BOOL_OPTIONS {
             let section = if [
                 "symbolic_scalar_resolver",
+                "incremental_choice_dag",
+                "coi_query_slicing",
                 "partial_commit_finite_domain",
                 "partial_commit_unknown_z3",
                 "partial_commit_z3_timeout",

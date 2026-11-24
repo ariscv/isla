@@ -63,6 +63,16 @@ impl<B: BV> Solver<'_, B> {
         if literal(exp).is_some_and(|(sym, _)| self.knowledge.both == Some((sym, self.knowledge.version))) {
             return Some(Sat);
         }
+        if self.transaction_depth() == 0 && self.coi.is_some() && !matches!(self.cached_bool_value(exp), Ok(Some(true)))
+        {
+            if let Some(result) = self.coi_feasibility(&[], Some(exp), info, "branch_feasibility") {
+                if result == Sat {
+                    self.knowledge.sat = true;
+                    self.knowledge.literal = literal(exp);
+                }
+                return Some(result);
+            }
+        }
         Some(if speculative {
             // 分支可行性必须完整判定；仅复用复杂查询策略，不复用可选常量证明预算。
             self.check_sat_with_strategy(exp, info, query::QueryPurpose::BranchFeasibility)

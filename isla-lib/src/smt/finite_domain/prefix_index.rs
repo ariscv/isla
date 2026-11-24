@@ -11,6 +11,12 @@ struct Position(usize, usize);
 type GuardBounds = HashMap<Sym, Option<Arc<Vec<Exp<Sym>>>>>;
 
 pub(in crate::smt) struct PrefixIndex<'ctx> {
+    choice_epoch: u64,
+    choice_assertions: Vec<u64>,
+    choice_guards: Vec<u64>,
+    choice_binding_revision: u64,
+    incremental_choices: bool,
+    pub(super) joined_choices: HashMap<Sym, super::arithmetic::JoinedChoices>,
     pub(super) arm_facts: RefCell<ArmFacts>,
     pub(super) layouts: HashMap<Sym, ScalarLayout>,
     symbols: ahash::AHashMap<Sym, Position>,
@@ -20,7 +26,7 @@ pub(in crate::smt) struct PrefixIndex<'ctx> {
     assertions: Vec<Position>,
     bool_symbols: Vec<(Position, Sym)>,
     pub(super) projection: RefCell<ProjectionCache>,
-    pub(super) rewrites: rewrites::Rewrites<'ctx>,
+    pub(super) rewrites: rewrites::ScopedRewriteCache<'ctx>,
     pub(super) domains: RefCell<HashMap<(Sym, bool, bool), FiniteDomain>>,
     pub(super) asts: ProjectionAsts<'ctx>,
     pub(super) branch: RefCell<Option<BranchCandidates>>,
@@ -55,18 +61,22 @@ enum BranchCheck {
 pub(super) struct ProjectionAsts<'ctx> {
     pub(super) ctx: &'ctx Context,
     refs: RefCell<HashSet<Z3_ast>>,
-    ordinary: RefCell<HashSet<Z3_ast>>,
+    stable: RefCell<HashMap<Z3_ast, usize>>,
 }
 
 impl<'ctx> ProjectionAsts<'ctx> {
     pub(super) fn new(ctx: &'ctx Context) -> Self {
-        Self { ctx, refs: Default::default(), ordinary: Default::default() }
+        Self { ctx, refs: Default::default(), stable: Default::default() }
     }
 
     pub(super) fn retain(&self, key: Z3_ast) {
         if self.refs.borrow_mut().insert(key) {
             unsafe { Z3_inc_ref(self.ctx.z3_ctx, key) };
         }
+    }
+
+    pub(super) fn retained_count(&self) -> usize {
+        self.refs.borrow().len()
     }
 
     pub(super) fn heap_bytes(&self) -> usize {
@@ -83,9 +93,31 @@ impl<'ctx> ProjectionAsts<'ctx> {
     }
 
     pub(super) fn get(&self, key: Z3_ast) -> Ast<'ctx> {
-        assert!(self.refs.borrow().contains(&key) || self.ordinary.borrow().contains(&key));
+        assert!(self.refs.borrow().contains(&key) || self.stable.borrow().contains_key(&key));
         unsafe { Z3_inc_ref(self.ctx.z3_ctx, key) };
         Ast { ctx: self.ctx, z3_ast: key }
+    }
+
+    fn keep_stable(&self, ast: Ast<'_>) -> Z3_ast {
+        assert!(std::ptr::eq(self.ctx, ast.ctx));
+        let key = ast.z3_ast;
+        let mut roots = self.stable.borrow_mut();
+        let count = roots.entry(key).or_default();
+        if *count == 0 {
+            std::mem::forget(ast);
+        }
+        *count += 1;
+        key
+    }
+
+    fn release_stable(&mut self, key: Z3_ast) {
+        let roots = self.stable.get_mut();
+        let count = roots.get_mut(&key).expect("断言翻译必须持有 AST 引用");
+        *count -= 1;
+        if *count == 0 {
+            roots.remove(&key);
+            unsafe { Z3_dec_ref(self.ctx.z3_ctx, key) };
+        }
     }
 
     fn clear(&mut self) {
@@ -98,7 +130,7 @@ impl<'ctx> ProjectionAsts<'ctx> {
 impl Drop for ProjectionAsts<'_> {
     fn drop(&mut self) {
         self.clear();
-        for key in self.ordinary.get_mut().drain() {
+        for (key, _) in self.stable.get_mut().drain() {
             unsafe { Z3_dec_ref(self.ctx.z3_ctx, key) };
         }
     }
@@ -129,6 +161,12 @@ impl<'ctx> PrefixIndex<'ctx> {
 
     pub(in crate::smt) fn new(ctx: &'ctx Context) -> Self {
         Self {
+            choice_epoch: 0,
+            choice_assertions: Vec::new(),
+            choice_guards: Vec::new(),
+            choice_binding_revision: 0,
+            incremental_choices: ctx.solver_options.incremental_choice_dag,
+            joined_choices: HashMap::new(),
             arm_facts: Default::default(),
             layouts: Default::default(),
             symbols: Default::default(),
@@ -140,9 +178,19 @@ impl<'ctx> PrefixIndex<'ctx> {
             projection: RefCell::default(),
             asts: ProjectionAsts::new(ctx),
             domains: Default::default(),
-            rewrites: rewrites::Rewrites::new(ctx),
+            rewrites: rewrites::ScopedRewriteCache::new(ctx),
             branch: RefCell::default(),
         }
+    }
+
+    fn next_choice_epoch(&mut self) -> u64 {
+        self.choice_epoch = self.choice_epoch.checked_add(1).expect("选择图版本溢出");
+        self.choice_epoch
+    }
+
+    pub(super) fn choice_revision(&self) -> (&[u64], (u64, u64)) {
+        let assertions = self.choice_assertions.last().copied().unwrap_or(0);
+        (&self.choice_guards, (assertions, self.choice_binding_revision))
     }
 
     pub(in crate::smt) fn push<B>(&mut self, segment: usize, offset: usize, event: &Event<B>) {
@@ -173,21 +221,40 @@ impl<'ctx> PrefixIndex<'ctx> {
         } else if matches!(event, Event::Smt(Def::Assert(_), ..)) {
             self.domains.get_mut().clear();
             self.assertions.push(position);
+            if self.incremental_choices {
+                let epoch = self.next_choice_epoch();
+                self.choice_assertions.push(epoch);
+            }
         } else {
             return;
         }
         *self.branch.get_mut() = None;
     }
 
-    pub(in crate::smt) fn remove_suffix<B>(&mut self, segment: usize, events: &[Event<B>], start: usize) {
+    pub(in crate::smt) fn remove_suffix<B>(
+        &mut self,
+        segment: usize,
+        events: &[Event<B>],
+        start: usize,
+        publishing: bool,
+    ) {
         let first = Position(segment, start);
         self.assertions.truncate(self.assertions.partition_point(|position| *position < first));
+        if self.incremental_choices {
+            self.choice_assertions.truncate(self.assertions.len());
+        }
         self.bool_symbols.truncate(self.bool_symbols.partition_point(|(position, _)| *position < first));
         for (index, event) in events.iter().enumerate().skip(start).rev() {
             if let Some((sym, _)) = binding(event) {
+                if self.incremental_choices {
+                    self.choice_binding_revision = self.next_choice_epoch();
+                }
                 let first = self.symbols[&sym];
                 if first == Position(segment, index) {
                     self.symbols.remove(&sym);
+                    if !publishing {
+                        self.joined_choices.remove(&sym);
+                    }
                     self.layouts.remove(&sym);
                     for layer in self.guard_bounds.get_mut() {
                         layer.remove(&sym);
@@ -199,33 +266,62 @@ impl<'ctx> PrefixIndex<'ctx> {
         }
         if start < events.len() {
             self.arm_facts.get_mut().truncate_assertions(self.assertions.len());
-            self.clear_candidate_caches();
+            let preserve = if self.incremental_choices { self.assertions.len() } else { 0 };
+            self.clear_candidate_caches(preserve);
         }
     }
 
     pub(in crate::smt) fn invalidate_candidates(&mut self) {
+        if self.incremental_choices {
+            self.choice_binding_revision = self.next_choice_epoch();
+        }
+        self.joined_choices.clear();
         *self.arm_facts.get_mut() = ArmFacts::default();
         self.guard_bounds.get_mut().clear();
-        self.clear_candidate_caches();
+        if self.incremental_choices {
+            for key in self.projection.get_mut().guards.drain(..) {
+                self.asts.release_stable(key);
+            }
+        }
+        self.clear_candidate_caches(0);
     }
 
     pub(in crate::smt) fn guarded_suffix(&mut self, offset: usize, guard_depth: usize) {
         let retained = self.assertions.partition_point(|p| *p < Position(BUFFERED, offset));
+        if self.incremental_choices && retained < self.choice_assertions.len() {
+            let epoch = self.next_choice_epoch();
+            self.choice_assertions[retained..].fill(epoch);
+        }
         self.arm_facts.get_mut().truncate_assertions(retained);
         self.truncate_guards(guard_depth);
-        self.clear_candidate_caches();
+        self.clear_candidate_caches(if self.incremental_choices { retained } else { 0 });
     }
 
-    fn clear_candidate_caches(&mut self) {
+    fn clear_candidate_caches(&mut self, preserve: usize) {
         self.bounds.get_mut().clear();
-        self.projection.get_mut().assertions.clear();
-        for key in self.asts.ordinary.get_mut().drain() {
-            unsafe { Z3_dec_ref(self.asts.ctx.z3_ctx, key) };
+        let assertions = &mut self.projection.get_mut().assertions;
+        let preserve = preserve.min(assertions.len());
+        for key in assertions.drain(preserve..) {
+            if super::scalar::enabled() || self.incremental_choices {
+                self.asts.release_stable(key);
+            }
         }
         self.clear_guard_caches();
     }
 
     fn truncate_guards(&mut self, depth: usize) {
+        if self.incremental_choices {
+            let guards = &mut self.projection.get_mut().guards;
+            let keep = depth.min(guards.len());
+            for key in guards.drain(keep..) {
+                self.asts.release_stable(key);
+            }
+            self.choice_guards.truncate(depth);
+            while self.choice_guards.len() < depth {
+                let epoch = self.next_choice_epoch();
+                self.choice_guards.push(epoch);
+            }
+        }
         self.arm_facts.get_mut().truncate_guards(depth);
         self.guard_bounds.get_mut().truncate(depth);
     }
@@ -237,8 +333,13 @@ impl<'ctx> PrefixIndex<'ctx> {
 
     fn clear_guard_caches(&mut self) {
         let cache = self.projection.get_mut();
-        let assertions = if super::scalar::enabled() { std::mem::take(&mut cache.assertions) } else { Vec::new() };
-        *cache = ProjectionCache { assertions, ..Default::default() };
+        let assertions = if super::scalar::enabled() || self.incremental_choices {
+            std::mem::take(&mut cache.assertions)
+        } else {
+            Vec::new()
+        };
+        let guards = if self.incremental_choices { std::mem::take(&mut cache.guards) } else { Vec::new() };
+        *cache = ProjectionCache { assertions, guards, ..Default::default() };
         self.asts.clear();
         self.domains.get_mut().clear();
         self.rewrites.advance();
@@ -266,7 +367,7 @@ impl<'ctx> PrefixIndex<'ctx> {
             .sum::<usize>();
         self.arm_facts.borrow().heap_bytes()
             + map_bytes::<Sym, ScalarLayout>(self.layouts.capacity())
-            + map_bytes::<Z3_ast, ()>(self.asts.ordinary.borrow().capacity())
+            + map_bytes::<Z3_ast, usize>(self.asts.stable.borrow().capacity())
             + layers.capacity() * size_of::<GuardBounds>()
             + guarded_bytes
             + (cache.assertions.capacity() + cache.guards.capacity()) * size_of::<Z3_ast>()
@@ -361,6 +462,11 @@ impl<'a, B: BV> PathConditions<'a, B> {
         }
     }
 
+    pub(super) fn known_choice(&self, solver: &Solver<'_, B>, guard: &Exp<Sym>) -> Option<bool> {
+        let mut facts = self.index.arm_facts.borrow_mut();
+        facts.choice(guard, solver, self)
+    }
+
     pub(super) fn definition(&self, sym: Sym) -> Option<&'a Exp<Sym>> {
         match self.event(*self.index.symbols.get(&sym)?) {
             Event::Smt(Def::DefineConst(_, exp), ..) => Some(exp),
@@ -413,6 +519,10 @@ impl<'a, B: BV> PathConditions<'a, B> {
         total
     }
 
+    pub(super) fn ordinary_assertion_count(&self) -> usize {
+        self.index.assertions.len()
+    }
+
     pub(super) fn ordinary_suffix(&self, start: usize) -> impl Iterator<Item = &'a Exp<Sym>> + '_ {
         self.index.assertions[start..].iter().map(|position| self.assertion(*position))
     }
@@ -420,19 +530,21 @@ impl<'a, B: BV> PathConditions<'a, B> {
     pub(super) fn translate_projection_suffix(&self, solver: &Solver<'_, B>, cache: &mut ProjectionCache) {
         for &position in &self.index.assertions[cache.assertions.len()..] {
             let ast = solver.translate_projection_assertion(self.assertion(position));
-            let key = if super::scalar::enabled() {
-                let key = ast.z3_ast;
-                if self.index.asts.ordinary.borrow_mut().insert(key) {
-                    std::mem::forget(ast);
-                }
-                key
+            let key = if super::scalar::enabled() || self.index.incremental_choices {
+                self.index.asts.keep_stable(ast)
             } else {
                 self.index.asts.keep(ast)
             };
             cache.assertions.push(key);
         }
         for guard in &self.guards[cache.guards.len()..] {
-            cache.guards.push(self.index.asts.keep(solver.translate_projection_assertion(guard)));
+            let ast = solver.translate_projection_assertion(guard);
+            let key = if self.index.incremental_choices {
+                self.index.asts.keep_stable(ast)
+            } else {
+                self.index.asts.keep(ast)
+            };
+            cache.guards.push(key);
         }
     }
 
