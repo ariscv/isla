@@ -91,6 +91,13 @@ impl<B: BV> Solver<'_, B> {
         true
     }
 
+    pub(crate) fn structural_int_bounds(&self, exp: &Exp<Sym>) -> Option<(i128, i128)> {
+        let mut value = self.translate_exp(exp);
+        value.simplify();
+        let range = unsafe { bitvector_range(self.ctx, value.z3_ast)? };
+        Some((range.min, range.max))
+    }
+
     /// 判定层统一选择立即验证或登记义务；常量 false 仍由调用方的死臂路径处理。
     pub(crate) fn defer_symbolic_assertion(&mut self, condition: Exp<Sym>, info: SourceLoc) -> bool {
         if !self.no_smt() && !self.deferred_region_queries {
@@ -144,13 +151,64 @@ impl<B: BV> Solver<'_, B> {
     }
 }
 
+// 每个 Context 独占表。键区分原生默认参数与 Isla 的三项 BV 参数。
+#[derive(Default)]
+pub(super) struct StructuralBoolCache {
+    entries: ahash::AHashMap<(Z3_ast, bool), (Option<bool>, Z3_ast)>,
+}
+
+impl StructuralBoolCache {
+    pub(super) fn clear(&mut self, z3: Z3_context) {
+        for ((input, _), (_, output)) in self.entries.drain() {
+            unsafe {
+                Z3_dec_ref(z3, input);
+                Z3_dec_ref(z3, output);
+            }
+        }
+    }
+}
+
 impl Ast<'_> {
     pub(super) fn structural_bool(&mut self) -> Option<bool> {
         #[cfg(test)]
         finite_domain::STRUCTURAL_BOOLS.set(finite_domain::STRUCTURAL_BOOLS.get() + 1);
+        if !self.ctx.solver_options.structural_bool_cache || !self.ctx.has_unbounded_rewriting() {
+            return self.structural_bool_uncached();
+        }
+
+        let default_params = SMT_CONFIG.get().is_some_and(|config| config.tactic == Tactic::Default);
+        let key = (self.z3_ast, default_params);
+        let z3 = self.ctx.z3_ctx;
+        let mut cache = self.ctx.structural_bools.borrow_mut();
+        if let Some(&(truth, residual)) = cache.entries.get(&key) {
+            unsafe {
+                Z3_inc_ref(z3, residual);
+                Z3_dec_ref(z3, self.z3_ast);
+            }
+            self.z3_ast = residual;
+            return truth;
+        }
+
+        // 化简可能释放输入。先保活原 AST；失败退出时也由 Ast 释放。
+        let input = self.clone();
+        let truth = self.structural_bool_uncached();
+        if self.ctx.has_unbounded_rewriting() {
+            const MAX_ENTRIES: usize = 16_384;
+            if cache.entries.len() >= MAX_ENTRIES {
+                cache.clear(z3);
+            }
+            unsafe { Z3_inc_ref(z3, self.z3_ast) };
+            std::mem::forget(input);
+            cache.entries.insert(key, (truth, self.z3_ast));
+        }
+        truth
+    }
+
+    fn structural_bool_uncached(&mut self) -> Option<bool> {
         if let Some(value) = unsafe { structural_comparison(self.ctx, self.z3_ast) } {
             return Some(value);
         }
+        // 原生 Z3 在超时、步数耗尽或中断时报告失败。此处只有成功返回才入表。
         self.simplify();
         self.get_bool_value().or_else(|| unsafe { structural_comparison(self.ctx, self.z3_ast) })
     }
@@ -276,10 +334,7 @@ unsafe fn bitvector_range(ctx: &Context, root: Z3_ast) -> Option<BitvectorRange>
             k if [DeclKind::BAND, DeclKind::CONCAT, DeclKind::BADD, DeclKind::BSUB].map(|d| d as u32).contains(&k) => {
                 0..arity
             }
-            _ if negated.is_some() => {
-                let index = negated.unwrap();
-                index..index + 1
-            }
+            k if k == DeclKind::BMUL as u32 || k == DeclKind::BSHL as u32 => 0..arity,
             _ => {
                 bounds.insert(ast, Some(full));
                 continue;
@@ -294,7 +349,7 @@ unsafe fn bitvector_range(ctx: &Context, root: Z3_ast) -> Option<BitvectorRange>
         let operand = |index| bounds[&arg(index)];
         let range = (|| {
             if negated.is_some() || kind == DeclKind::BNEG as u32 {
-                let value = operand(args.start)?;
+                let value = operand(negated.unwrap_or(args.start))?;
                 let (min, max) = (value.max.checked_neg()?, value.min.checked_neg()?);
                 return (min >= full.min && max <= full.max).then(|| with_signed((min, max)));
             }
@@ -346,6 +401,29 @@ unsafe fn bitvector_range(ctx: &Context, root: Z3_ast) -> Option<BitvectorRange>
                             .filter(|&(min, max)| min >= full.min && max <= full.max)
                             .map_or(unsigned, |(min, max)| unsigned.intersect_signed(min, max, mask)),
                     )
+                }
+                k if k == DeclKind::BMUL as u32 => {
+                    let (min, max) = args.map(operand).try_fold((1i128, 1i128), |(min, max), value| {
+                        let value = value?;
+                        let endpoints = [
+                            min.checked_mul(value.min)?,
+                            min.checked_mul(value.max)?,
+                            max.checked_mul(value.min)?,
+                            max.checked_mul(value.max)?,
+                        ];
+                        Some((*endpoints.iter().min().unwrap(), *endpoints.iter().max().unwrap()))
+                    })?;
+                    (min >= full.min && max <= full.max).then(|| with_signed((min, max)))
+                }
+                k if k == DeclKind::BSHL as u32 => {
+                    let shift = numeral(ctx, arg(1))?;
+                    if shift >= u128::from(width) {
+                        return Some(with_signed((0, 0)));
+                    }
+                    let factor = 1i128.checked_shl(shift as u32).filter(|&value| value > 0)?;
+                    let value = operand(0)?;
+                    let (min, max) = (value.min.checked_mul(factor)?, value.max.checked_mul(factor)?);
+                    (min >= full.min && max <= full.max).then(|| with_signed((min, max)))
                 }
                 k if k == DeclKind::BSUB as u32 => {
                     let (a, b) = (operand(0)?, operand(1)?);

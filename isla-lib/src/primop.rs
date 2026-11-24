@@ -61,6 +61,7 @@ use crate::source_loc::SourceLoc;
 pub mod float;
 pub mod memory;
 mod stable_pack;
+pub(crate) mod sym_bits;
 mod vector_bits;
 
 #[cfg(test)]
@@ -178,7 +179,11 @@ fn try_concretize_bool_exp<B: BV>(exp: Exp<Sym>, solver: &mut Solver<B>, info: S
     Ok(Val::Symbolic(value))
 }
 
-fn concretize_proven_i128<B: BV>(value: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+pub(crate) fn concretize_proven_i128<B: BV>(
+    value: Val<B>,
+    solver: &mut Solver<B>,
+    info: SourceLoc,
+) -> Result<Val<B>, ExecError> {
     match value {
         Val::Symbolic(sym) => match proven_symbolic_i128(sym, solver, info) {
             Ok(Some(value)) => Ok(Val::I128(value)),
@@ -1099,6 +1104,7 @@ fn sub_nat<B: BV>(x: Val<B>, y: Val<B>, solver: &mut Solver<B>, info: SourceLoc)
 
 pub(crate) fn length<B: BV>(x: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
     match x {
+        Val::SymBits { len, .. } => Ok(Val::Symbolic(len)),
         Val::Guarded(guard, values) => {
             let yes = guarded_comparison_arm(guard, length(values.0, solver, info), info)?;
             let no = guarded_comparison_arm(guard, length(values.1, solver, info), info)?;
@@ -1126,6 +1132,9 @@ pub(crate) fn eq_bits<B: BV>(
     if matches!(x, Val::Guarded(..)) || matches!(y, Val::Guarded(..)) {
         return compare_guarded(x, y, solver, info, eq_bits);
     }
+    if sym_bits::is_dynamic(&x) || sym_bits::is_dynamic(&y) {
+        return sym_bits::compare(&x, &y, true, solver, info);
+    }
     let x_len = length_bits(&x, solver, info)?;
     let y_len = length_bits(&y, solver, info)?;
     if x_len != y_len {
@@ -1147,9 +1156,40 @@ pub(crate) fn neq_bits<B: BV>(
 ) -> Result<Val<B>, ExecError> {
     not_bool(eq_bits(x, y, solver, info)?, solver, info)
 }
-unary_primop_copy!(not_bits, "not_bits".to_string(), Val::Bits, Val::Bits, B::not, Exp::Bvnot, define_bitvector);
+unary_primop_copy!(not_fixed_bits, "not_bits".to_string(), Val::Bits, Val::Bits, B::not, Exp::Bvnot, define_bitvector);
+pub fn not_bits<B: BV>(value: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    if sym_bits::is_dynamic(&value) {
+        sym_bits::bit_not(&value, solver, info)
+    } else {
+        not_fixed_bits(value, solver, info)
+    }
+}
+
+macro_rules! sym_bit_binop {
+    ($name:ident, $fixed:ident, $op:ident, $modular:expr) => {
+        pub fn $name<B: BV>(
+            x: Val<B>,
+            y: Val<B>,
+            solver: &mut Solver<B>,
+            info: SourceLoc,
+        ) -> Result<Val<B>, ExecError> {
+            if sym_bits::is_dynamic(&x) || sym_bits::is_dynamic(&y) {
+                sym_bits::bit_binary(&x, &y, Exp::$op, $modular, stringify!($name), solver, info)
+            } else {
+                $fixed(x, y, solver, info)
+            }
+        }
+    };
+}
+
+sym_bit_binop!(xor_bits, xor_fixed_bits, Bvxor, false);
+sym_bit_binop!(or_bits, or_fixed_bits, Bvor, false);
+sym_bit_binop!(and_bits, and_fixed_bits, Bvand, false);
+sym_bit_binop!(add_bits, add_fixed_bits, Bvadd, true);
+sym_bit_binop!(sub_bits, sub_fixed_bits, Bvsub, true);
+
 binary_primop_copy!(
-    xor_bits,
+    xor_fixed_bits,
     "xor_bits".to_string(),
     Val::Bits,
     Val::Bits,
@@ -1159,7 +1199,7 @@ binary_primop_copy!(
     define_bitvector
 );
 binary_primop_copy!(
-    or_bits,
+    or_fixed_bits,
     "or_bits".to_string(),
     Val::Bits,
     Val::Bits,
@@ -1169,7 +1209,7 @@ binary_primop_copy!(
     define_bitvector
 );
 binary_primop_copy!(
-    and_bits,
+    and_fixed_bits,
     "and_bits".to_string(),
     Val::Bits,
     Val::Bits,
@@ -1179,7 +1219,7 @@ binary_primop_copy!(
     define_bitvector
 );
 binary_primop_copy!(
-    add_bits,
+    add_fixed_bits,
     "add_bits".to_string(),
     Val::Bits,
     Val::Bits,
@@ -1189,7 +1229,7 @@ binary_primop_copy!(
     define_bitvector
 );
 binary_primop_copy!(
-    sub_bits,
+    sub_fixed_bits,
     "sub_bits".to_string(),
     Val::Bits,
     Val::Bits,
@@ -1200,6 +1240,9 @@ binary_primop_copy!(
 );
 
 fn add_bits_int<B: BV>(bits: Val<B>, n: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    if sym_bits::is_dynamic(&bits) {
+        return sym_bits::add_int(&bits, &n, Exp::Bvadd, solver, info);
+    }
     let bits = replace_mixed_bits(bits, solver, info)?;
     if length_bits(&bits, solver, info)? == 0 {
         return Ok(bits);
@@ -1256,6 +1299,9 @@ fn add_bits_int<B: BV>(bits: Val<B>, n: Val<B>, solver: &mut Solver<B>, info: So
 }
 
 fn sub_bits_int<B: BV>(bits: Val<B>, n: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    if sym_bits::is_dynamic(&bits) {
+        return sym_bits::add_int(&bits, &n, Exp::Bvsub, solver, info);
+    }
     let bits = replace_mixed_bits(bits, solver, info)?;
     if length_bits(&bits, solver, info)? == 0 {
         return Ok(bits);
@@ -1446,6 +1492,9 @@ fn proven_symbolic_i128_in_scope<B: BV>(
 }
 
 fn zeros<B: BV>(len: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    if let Some(value) = sym_bits::fill(&len, false, solver, info)? {
+        return Ok(value);
+    }
     let len = concretize_proven_i128(len, solver, info)?;
     panic_if_negative_concretized_nat("zeros", &len);
     match len {
@@ -1462,6 +1511,9 @@ fn zeros<B: BV>(len: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<
 }
 
 fn ones<B: BV>(len: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    if let Some(value) = sym_bits::fill(&len, true, solver, info)? {
+        return Ok(value);
+    }
     let len = concretize_proven_i128(len, solver, info)?;
     panic_if_negative_concretized_nat("ones", &len);
     match len {
@@ -1480,13 +1532,18 @@ fn ones<B: BV>(len: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<V
 /// The zero_extend and sign_extend functions are essentially the
 /// same, so use a macro to define both.
 macro_rules! extension {
-    ($id: ident, $name: expr, $smt_extension: path, $concrete_extension: path) => {
+    ($id: ident, $name: expr, $smt_extension: path, $concrete_extension: path, $signed:expr) => {
         pub fn $id<B: BV>(
             bits: Val<B>,
             len: Val<B>,
             solver: &mut Solver<B>,
             info: SourceLoc,
         ) -> Result<Val<B>, ExecError> {
+            if let Some(value) = sym_bits::extend(&bits, &len, $signed, solver, info)? {
+                return Ok(value);
+            }
+            let mut bits = bits;
+            sym_bits::concretize(&mut bits, solver, info)?;
             let len = concretize_proven_i128(len, solver, info)?;
             panic_if_negative_concretized_nat("extension", &len);
             let len = match len {
@@ -1522,8 +1579,8 @@ macro_rules! extension {
     };
 }
 
-extension!(zero_extend, "zero_extend".to_string(), Exp::ZeroExtend, B::zero_extend);
-extension!(sign_extend, "sign_extend".to_string(), Exp::SignExtend, B::sign_extend);
+extension!(zero_extend, "zero_extend".to_string(), Exp::ZeroExtend, B::zero_extend, false);
+extension!(sign_extend, "sign_extend".to_string(), Exp::SignExtend, B::sign_extend, true);
 
 pub(crate) fn op_zero_extend<B: BV>(
     bits: Val<B>,
@@ -1531,6 +1588,9 @@ pub(crate) fn op_zero_extend<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if sym_bits::is_dynamic(&bits) {
+        return zero_extend(bits, Val::I128(i128::from(len)), solver, info);
+    }
     let bits = replace_mixed_bits(bits, solver, info)?;
     match bits {
         Val::Bits(bits) => {
@@ -1712,6 +1772,9 @@ pub(crate) fn op_slice<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if let Some(value) = sym_bits::slice(&bits, &from, &Val::I128(i128::from(length)), solver, info)? {
+        return Ok(value);
+    }
     let bits_length = length_bits(&bits, solver, info)?;
     if length == 0 {
         return Ok(Val::Bits(B::zeros(0)));
@@ -1770,6 +1833,9 @@ fn slice_internal<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if let Some(value) = sym_bits::slice(&bits, &from, &length, solver, info)? {
+        return Ok(value);
+    }
     let length = concretize_proven_i128(length, solver, info)?;
     panic_if_negative_concretized_nat("slice_internal", &length);
     match length {
@@ -1802,6 +1868,9 @@ pub fn subrange_internal<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if let Some(value) = sym_bits::subrange(&bits, &high, &low, solver, info)? {
+        return Ok(value);
+    }
     // 同一有限域输入派生的两个端点可能各自只有保守的 Bounded 集合；分别用模型法
     // 具体化会在延后区域制造强制查询。保留相关性，随后由 high - low + 1 联合推导长度。
     let preserve_correlated_bounded_endpoints = solver.region_queries_deferred()
@@ -1956,6 +2025,9 @@ fn sail_truncate_lsb<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if let Some(value) = sym_bits::truncate_lsb(&bits, &len, solver, info)? {
+        return Ok(value);
+    }
     let len = concretize_proven_i128(len, solver, info)?;
     panic_if_negative_concretized_nat("sail_truncateLSB", &len);
     if let Val::I128(n) = &len {
@@ -1993,6 +2065,9 @@ fn sail_truncate_lsb<B: BV>(
 }
 
 fn sail_unsigned<B: BV>(bits: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    if sym_bits::is_dynamic(&bits) {
+        return sym_bits::to_int(&bits, false, solver, info);
+    }
     let bits = replace_mixed_bits(bits, solver, info)?;
     check_integer_conversion(sail_unsigned::<B>, &bits, solver, info)?;
     match bits {
@@ -2023,6 +2098,9 @@ fn sail_unsigned<B: BV>(bits: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -
 }
 
 fn sail_signed<B: BV>(bits: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    if sym_bits::is_dynamic(&bits) {
+        return sym_bits::to_int(&bits, true, solver, info);
+    }
     let bits = replace_mixed_bits(bits, solver, info)?;
     check_integer_conversion(sail_signed::<B>, &bits, solver, info)?;
     match bits {
@@ -2089,6 +2167,9 @@ fn smt_shift(
 }
 
 fn shiftr<B: BV>(bits: Val<B>, shift: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    if sym_bits::is_dynamic(&bits) || sym_bits::is_dynamic(&shift) {
+        return sym_bits::shift(&bits, &shift, sym_bits::Shift::Right, false, solver, info);
+    }
     let bits = replace_mixed_bits(bits, solver, info)?;
     if matches!(&shift, Val::Bits(amount) if amount.len() == 0) {
         return Ok(bits);
@@ -2154,6 +2235,9 @@ fn arith_shiftr<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if sym_bits::is_dynamic(&bits) || sym_bits::is_dynamic(&shift) {
+        return sym_bits::shift(&bits, &shift, sym_bits::Shift::ArithmeticRight, false, solver, info);
+    }
     let bits = replace_mixed_bits(bits, solver, info)?;
     match (bits, shift) {
         (bits @ (Val::Bits(_) | Val::Symbolic(_)), Val::Symbolic(y)) => {
@@ -2251,6 +2335,9 @@ fn arith_shiftr<B: BV>(
 }
 
 fn shiftl<B: BV>(bits: Val<B>, shift: Val<B>, solver: &mut Solver<B>, info: SourceLoc) -> Result<Val<B>, ExecError> {
+    if sym_bits::is_dynamic(&bits) || sym_bits::is_dynamic(&shift) {
+        return sym_bits::shift(&bits, &shift, sym_bits::Shift::Left, false, solver, info);
+    }
     let bits = replace_mixed_bits(bits, solver, info)?;
     if matches!(&shift, Val::Bits(amount) if amount.len() == 0) {
         return Ok(bits);
@@ -2316,6 +2403,9 @@ pub fn shift_bits_right<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if sym_bits::is_dynamic(&bits) || sym_bits::is_dynamic(&shift) {
+        return sym_bits::shift(&bits, &shift, sym_bits::Shift::Right, true, solver, info);
+    }
     // We could support (MixedBits, Bits) explicitly, if necessary
     let bits = replace_mixed_bits(bits, solver, info)?;
     let bits_len = length_bits(&bits, solver, info)?;
@@ -2359,6 +2449,9 @@ pub fn shift_bits_left<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if sym_bits::is_dynamic(&bits) || sym_bits::is_dynamic(&shift) {
+        return sym_bits::shift(&bits, &shift, sym_bits::Shift::Left, true, solver, info);
+    }
     // We could support (MixedBits, Bits) explicitly, if necessary
     let bits = replace_mixed_bits(bits, solver, info)?;
     let bits_len = length_bits(&bits, solver, info)?;
@@ -2402,6 +2495,9 @@ pub(crate) fn append<B: BV>(
     solver: &mut Solver<B>,
     info: SourceLoc,
 ) -> Result<Val<B>, ExecError> {
+    if sym_bits::is_dynamic(&lhs) || sym_bits::is_dynamic(&rhs) {
+        return sym_bits::concat(&lhs, &rhs, solver, info);
+    }
     match (lhs, rhs) {
         (Val::Symbolic(x), Val::Symbolic(y)) => {
             solver.define_bitvector(Exp::Concat(Box::new(Exp::Var(x)), Box::new(Exp::Var(y))), info).into()
@@ -3265,6 +3361,17 @@ pub fn eq_anything<B: BV>(
 ) -> Result<Val<B>, ExecError> {
     if matches!(lhs, Val::Guarded(..)) || matches!(rhs, Val::Guarded(..)) {
         return compare_guarded(lhs, rhs, solver, info, eq_anything);
+    }
+    if (sym_bits::is_dynamic(&lhs) || sym_bits::is_dynamic(&rhs))
+        && guarded_bits::is_bits(&lhs, solver)
+        && guarded_bits::is_bits(&rhs, solver)
+    {
+        return sym_bits::compare(&lhs, &rhs, false, solver, info);
+    }
+    let (mut lhs, mut rhs) = (lhs, rhs);
+    if solver.sym_bits_enabled() {
+        sym_bits::concretize(&mut lhs, solver, info)?;
+        sym_bits::concretize(&mut rhs, solver, info)?;
     }
     if let (Some(left), Some(right)) = (merge_bit_width(&lhs, solver, info)?, merge_bit_width(&rhs, solver, info)?) {
         if left != right {

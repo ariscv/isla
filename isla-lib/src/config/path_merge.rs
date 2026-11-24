@@ -166,6 +166,18 @@ pub struct PathMergeConfig {
     pub finite_domain_enumeration: bool,
     /// 使用 Isla 求值检查全为具体值的有限域候选。缺省开启。
     pub finite_domain_ground_eval: bool,
+    /// 按受影响节点代入分支候选断言。缺省开启。
+    pub branch_candidate_sparse_rewrite: bool,
+    /// 按子图复用联合候选的同时代入。缺省开启。
+    pub joint_candidate_sparse_rewrite: bool,
+    /// 复用同一输入的完整结构布尔判定。缺省开启。
+    pub structural_bool_cache: bool,
+    /// 切换守卫时保留普通断言的翻译及检查进度。缺省开启。
+    pub retain_ordinary_prefix_cache: bool,
+    /// 直接使用窄化已判定的真值。缺省开启。
+    pub reuse_narrow_truth: bool,
+    /// 跳过与候选锚点无关的谓词代入。缺省开启。
+    pub skip_independent_predicate_substitution: bool,
     pub witness_eval: bool,
     /// 迭代边界前缀固化并释放已完成轮次的历史。默认开启。
     pub prefix_compact: bool,
@@ -173,6 +185,8 @@ pub struct PathMergeConfig {
     pub loop_fold_shapes: bool,
     /// 跨过纯包装调用，在变长临时值用完后汇合。默认关闭。
     pub width_closed_continuation: bool,
+    /// 用定长 SMT 位向量保存变长数据。缺省关闭。
+    pub sym_bits: bool,
     pub diagnostics: PathMergeDiagnostics,
     pub regions: Option<Vec<PathMergeRegionConfig>>,
     #[serde(deserialize_with = "deserialize_enumeration")]
@@ -216,10 +230,17 @@ impl Default for PathMergeConfig {
             lazy_z3_scope: false,
             finite_domain_enumeration: true,
             finite_domain_ground_eval: true,
+            branch_candidate_sparse_rewrite: true,
+            joint_candidate_sparse_rewrite: true,
+            structural_bool_cache: true,
+            retain_ordinary_prefix_cache: true,
+            reuse_narrow_truth: true,
+            skip_independent_predicate_substitution: true,
             witness_eval: false,
             prefix_compact: true,
             loop_fold_shapes: true,
             width_closed_continuation: false,
+            sym_bits: false,
             diagnostics: PathMergeDiagnostics::default(),
             regions: None,
             enumeration: None,

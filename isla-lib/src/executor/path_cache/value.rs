@@ -44,6 +44,7 @@ pub enum Val<B> {
     Ref(Name),
     Poison,
     Guarded(u32, Box<(Val<B>, Val<B>)>),
+    SymBits { data: u32, len: u32, cap: u32 },
 }
 impl<B> From<crate::ir::Val<B>> for Val<B> {
     fn from(value: crate::ir::Val<B>) -> Self {
@@ -75,6 +76,7 @@ impl<B> From<crate::ir::Val<B>> for Val<B> {
                 let (left, right) = *values;
                 Val::Guarded(guard.id, Box::new((left.into(), right.into())))
             }
+            crate::ir::Val::SymBits { data, len, cap } => Val::SymBits { data: data.id, len: len.id, cap },
             crate::ir::Val::Poison => Val::Poison,
         }
     }
@@ -114,6 +116,11 @@ impl<B> From<Val<B>> for crate::ir::Val<B> {
                 let (left, right) = *values;
                 crate::ir::Val::Guarded(crate::smt::Sym::from_u32(guard), Box::new((left.into(), right.into())))
             }
+            Val::SymBits { data, len, cap } => crate::ir::Val::SymBits {
+                data: crate::smt::Sym::from_u32(data),
+                len: crate::smt::Sym::from_u32(len),
+                cap,
+            },
             Val::Poison => crate::ir::Val::Poison,
         }
     }
@@ -122,6 +129,22 @@ impl<B> From<Val<B>> for crate::ir::Val<B> {
 #[cfg(test)]
 mod concrete_tests {
     use super::*;
+    #[test]
+    fn sym_bits_cache_keeps_both_symbols() {
+        use crate::bitvector::b64::B64;
+        use crate::smt::Sym;
+        let (data, len) = (Sym::from_u32(7), Sym::from_u32(12));
+        let original = crate::ir::Val::<B64>::SymBits { data, len, cap: 4 };
+        let dto = Val::from(original.clone());
+        let json: Val<B64> = serde_json::from_slice(&serde_json::to_vec(&dto).unwrap()).unwrap();
+        let bin: Val<B64> = bincode::deserialize(&bincode::serialize(&dto).unwrap()).unwrap();
+        assert_eq!(original, json.into());
+        assert_eq!(original, bin.into());
+        let symbols = original.symbolic_variables();
+        assert_eq!(symbols.len(), 2);
+        assert!(symbols.contains(&data) && symbols.contains(&len));
+    }
+
     #[test]
     fn region_concrete_values_guarded_cache_round_trip() {
         use crate::bitvector::b64::B64;

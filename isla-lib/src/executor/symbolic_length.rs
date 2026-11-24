@@ -177,9 +177,15 @@ pub(super) fn retry_symbolic_length<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B
         return Err(ExecError::Smt(solver.no_smt_cannot_continue(op, info)));
     }
     if let ExecError::SymbolicNatural { symbol, minimum, maximum, .. } = error {
+        let range = i128::from(minimum)..=i128::from(maximum);
+        let bounds = if op == primop::sym_bits::LENGTH_BOUNDARY {
+            OperandBounds::Established(range)
+        } else {
+            OperandBounds::RequireWithin(range)
+        };
         return match fork_symbolic_value(
             symbol,
-            Some(OperandBounds::RequireWithin(i128::from(minimum)..=i128::from(maximum))),
+            Some(bounds),
             consumer,
             operands,
             info,
@@ -811,8 +817,11 @@ pub(super) fn fork_symbolic_value<'ir, 'task, B: BV, S: ForkSink<'ir, 'task, B> 
 }
 
 fn cache_retry_operand<B: BV>(frame: &mut LocalFrame<'_, B>, operands: &[Val<B>]) {
-    let cached =
-        if frame.local_state.expression_retry_operands.is_some() { Val::Unit } else { Val::Vector(operands.to_vec()) };
+    let cached = if operands.is_empty() || frame.local_state.expression_retry_operands.is_some() {
+        Val::Unit
+    } else {
+        Val::Vector(operands.to_vec())
+    };
     frame.pending_retry_operand = Some((frame.pc, cached));
 }
 

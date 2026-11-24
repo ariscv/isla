@@ -27,6 +27,8 @@ python3 test/path-merge/run_scenarios.py --bitvector both \
 python3 -m unittest discover -s test/path-merge
 ```
 
+加上 `--sym-bits` 可在同一组场景开启 `path_merge.sym_bits`。对照时分别指定输出目录。`A23-symbolic-level-mask` 用 `sym_bits_expected_paths` 登记开启后的路径数。
+
 ## 新增场景
 
 用 `A1-concrete-diff-bits.sail` 的 [完整样例](scenarios/A1-concrete-diff-bits.sail) 起步。编号由 A–I 组字母、组内正整数编号和短英文名组成。源码通常 5–20 行，使用 Sail 标准库和 property 的共用配置。

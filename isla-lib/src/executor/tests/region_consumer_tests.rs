@@ -514,3 +514,155 @@ fn region_consumer_carries_four_widths_across_return() {
         );
     }
 }
+
+#[test]
+fn region_sym_bits_concretizes_at_boundaries() {
+    if !run_in_diagnostics_process(concat!(module_path!(), "::region_sym_bits_concretizes_at_boundaries")) {
+        return;
+    }
+    crate::smt::configure_solver_options(crate::smt::SolverOptions { sym_bits: true, ..Default::default() });
+    let mut shared = empty_shared_state();
+    let reg = shared.symtab.intern("zsym_bits_reg");
+    shared.registers.insert(reg, Ty::Bits(8));
+    let [source, result] = [1800, 1801].map(test_name);
+    let make = |symbol, solver: &mut Solver<B64>, wide| {
+        let len = solver.define_const(
+            smtlib::Exp::Ite(
+                Box::new(smtlib::Exp::Var(symbol)),
+                Box::new(crate::primop_util::smt_i128(8)),
+                Box::new(crate::primop_util::smt_i128(wide)),
+            ),
+            info(),
+        );
+        let data = solver.define_bitvector(smtlib::bits64(0x55, 16), info());
+        UVal::Init(Val::SymBits { data, len, cap: 16 })
+    };
+    let run = |instrs, wide| {
+        paths_with_solver_state(
+            instrs,
+            &shared,
+            1,
+            limits(MergeStrategy::Recursive).with_path_merging(false),
+            crate::memory::Memory::new(),
+            |frame, solver| {
+                let UVal::Init(Val::Symbolic(symbol)) = frame.vars()[&test_name(900)] else { unreachable!() };
+                frame.vars_mut().insert(source, make(symbol, solver, wide));
+                frame.vars_mut().insert(result, UVal::Init(Val::Unit));
+            },
+            false,
+        )
+        .0
+    };
+
+    let paths = run(
+        vec![
+            Instr::PrimopUnary(Loc::Id(RETURN), primop::unary_primops()["string_of_bits"], Exp::Id(source), info()),
+            Instr::End,
+        ],
+        16,
+    );
+    assert_eq!(paths.len(), 2);
+    assert!(paths.iter().all(|path| matches!(path.value, Val::String(_))));
+
+    let paths = run(
+        vec![
+            Instr::Copy(Loc::Id(reg), Exp::Id(source), info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Id(reg), info()),
+            Instr::End,
+        ],
+        8,
+    );
+    assert_eq!(paths.len(), 1);
+    assert!(paths[0]
+        .events
+        .iter()
+        .any(|event| matches!(event, Event::WriteReg(name, _, Val::Symbolic(_)) if *name == reg)));
+    assert!(matches!(paths[0].value, Val::Symbolic(_)));
+
+    let paths = run(
+        vec![
+            Instr::Monomorphize(source, Ty::AnyBits, info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Id(source), info()),
+            Instr::End,
+        ],
+        16,
+    );
+    assert_eq!(paths.len(), 2);
+    assert!(paths.iter().all(|path| matches!(path.value, Val::Bits(_))));
+
+    let paths = run(vec![Instr::Copy(Loc::Id(RETURN), Exp::Id(source), info()), Instr::End], 16);
+    assert_eq!(paths.len(), 2);
+    assert!(paths.iter().all(|path| matches!(path.value, Val::Symbolic(_))));
+
+    let write = primop::memory::variadic_primops::<B64>()["write_mem"];
+    let paths = run(
+        vec![
+            Instr::PrimopVariadic(
+                Loc::Id(result),
+                write,
+                vec![Exp::Unit, Exp::Unit, Exp::Bits(B64::new(0x2000, 64)), Exp::Unit, Exp::Id(source)],
+                info(),
+            ),
+            Instr::Copy(Loc::Id(RETURN), Exp::Id(result), info()),
+            Instr::End,
+        ],
+        16,
+    );
+    let mut sizes: Vec<_> = paths
+        .iter()
+        .flat_map(|path| &path.events)
+        .filter_map(|event| if let Event::WriteMem { bytes, .. } = event { Some(*bytes) } else { None })
+        .collect();
+    sizes.sort_unstable();
+    assert_eq!(sizes, [1, 2]);
+
+    let bytes = test_name(1802);
+    let length = Instr::PrimopUnary(Loc::Id(bytes), primop::length, Exp::Id(source), info());
+    let read = primop::memory::variadic_primops::<B64>()["read_mem"];
+    let paths = run(
+        vec![
+            Instr::Decl(bytes, Ty::I128, info()),
+            length.clone(),
+            Instr::PrimopVariadic(
+                Loc::Id(RETURN),
+                read,
+                vec![Exp::Unit, Exp::Unit, Exp::Bits(B64::new(0x2000, 64)), Exp::Id(bytes)],
+                info(),
+            ),
+            Instr::End,
+        ],
+        16,
+    );
+    let mut sizes: Vec<_> = paths
+        .iter()
+        .flat_map(|path| &path.events)
+        .filter_map(|event| if let Event::ReadMem { bytes, .. } = event { Some(*bytes) } else { None })
+        .collect();
+    sizes.sort_unstable();
+    assert_eq!(sizes, [8, 16]);
+
+    let paths = run(
+        vec![
+            Instr::Decl(bytes, Ty::I128, info()),
+            length,
+            Instr::PrimopBinary(
+                Loc::Id(RETURN),
+                primop::binary_primops()["vector_init"],
+                Exp::Id(bytes),
+                Exp::Unit,
+                info(),
+            ),
+            Instr::End,
+        ],
+        16,
+    );
+    let mut sizes: Vec<_> = paths
+        .iter()
+        .map(|path| {
+            let Val::Vector(values) = &path.value else { panic!("宿主分配必须返回向量") };
+            values.len()
+        })
+        .collect();
+    sizes.sort_unstable();
+    assert_eq!(sizes, [8, 16]);
+}

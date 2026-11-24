@@ -585,9 +585,12 @@ impl<B: BV> Solver<'_, B> {
                     FiniteDomain::Bounded(values)
                 } else {
                     let domain = self.finite_domain(sym);
-                    let savepoint = self.savepoints.last().expect("延后推演必须位于保存点内");
                     if matches!(domain, FiniteDomain::Bounded(_)) {
-                        if let Some(count) = prefix.scalar_proof_prefix(sym, savepoint.events_len) {
+                        if let Some(count) = self
+                            .savepoints
+                            .last()
+                            .and_then(|savepoint| prefix.scalar_proof_prefix(sym, savepoint.events_len))
+                        {
                             if let Some(values) = self.scalar_definition_upper(&prefix, sym, count) {
                                 prefix.remember_scalar_upper(sym, count, values);
                             }

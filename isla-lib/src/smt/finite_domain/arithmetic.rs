@@ -487,52 +487,8 @@ impl Expression {
 }
 
 // 每位代表一类输入。超过 128 个输入时碰撞只会多保留代入项。
-fn input_bit(index: usize) -> u128 {
+pub(super) fn input_bit(index: usize) -> u128 {
     1 << (index % u128::BITS as usize)
-}
-
-// 断言根、输入和各自的子节点在此次遍历中均由调用方持有。
-// 即使节点本身是锚点也要统计子树：某组赋值可能只选中了内层锚点。
-fn assertion_inputs(inputs: impl Iterator<Item = (usize, Z3_ast)>, facts: &[(&Formula, Ast)]) -> Vec<u128> {
-    let mut anchors = HashMap::new();
-    for (index, anchor) in inputs {
-        *anchors.entry(anchor).or_insert(0) |= input_bit(index);
-    }
-    let mut dependencies = HashMap::new();
-    facts
-        .iter()
-        .map(|(_, fact)| {
-            let z3 = fact.ctx.z3_ctx;
-            let mut pending = vec![(fact.z3_ast, false)];
-            while let Some((node, expanded)) = pending.pop() {
-                if dependencies.contains_key(&node) {
-                    continue;
-                }
-                let mut mask = anchors.get(&node).copied().unwrap_or(0);
-                unsafe {
-                    match Z3_get_ast_kind(z3, node) {
-                        AstKind::App => {
-                            let app = Z3_to_app(z3, node);
-                            let children = (0..Z3_get_app_num_args(z3, app)).map(|i| Z3_get_app_arg(z3, app, i));
-                            if !expanded {
-                                pending.push((node, true));
-                                pending.extend(children.map(|child| (child, false)));
-                                continue;
-                            }
-                            for child in children {
-                                mask |= dependencies[&child];
-                            }
-                        }
-                        AstKind::Numeral | AstKind::Var => (),
-                        // 带绑定器的子式交给 Z3 按原有作用域执行全部代入。
-                        _ => mask = u128::MAX,
-                    }
-                }
-                dependencies.insert(node, mask);
-            }
-            dependencies[&fact.z3_ast]
-        })
-        .collect()
 }
 
 fn source_uses_input<B: BV>(exp: &Formula, prefix: &PathConditions<'_, B>, memo: &mut HashMap<Sym, bool>) -> bool {
@@ -759,12 +715,11 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
             let fixed_base = graph.state.inputs.len();
             let fixed_indices: HashMap<_, _> =
                 fixed.into_iter().enumerate().map(|(i, a)| (a, fixed_base + i)).collect();
-            let dependencies = assertion_inputs(
+            let mut dependencies = rewrites::InputDependencies::new(
                 reachable
                     .iter()
                     .map(|&i| (i, graph.state.inputs[i].anchor.z3_ast))
                     .chain(fixed_indices.iter().map(|(&anchor, &i)| (i, anchor))),
-                &facts,
             );
             // 原始定义也可能含有被 Z3 化简消去的锚点，须同时检查两个表达式图。
             let mut source_dependencies = HashMap::new();
@@ -774,7 +729,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 }
             }
             let mut relevant_facts = Vec::new();
-            for (index, ((exp, ast), mask)) in facts.iter().zip(dependencies).enumerate() {
+            for (index, (exp, ast)) in facts.iter().enumerate() {
+                let mask = dependencies.mask(ast.z3_ast, ast.ctx.z3_ctx);
                 let is_guard = index >= prefix.ordinary_assertion_count();
                 let depends = !stage1 || mask != 0 || source_uses_input(exp, prefix, &mut source_dependencies);
                 if !depends {
@@ -841,12 +797,14 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 let replacements: Vec<_> = anchors.iter().copied().zip(values.iter().copied()).collect();
                 let mut local_replacements = HashMap::new();
                 let rewrites = prefix.index.rewrites.for_assertion(true);
+                let mut binding_dependencies =
+                    rewrites::InputDependencies::new(free_replacements.iter().map(|&(from, _)| from).enumerate());
                 // 派生输入必须满足其定义。先用同组自由输入检查绑定，矛盾组无需访问路径断言。
                 // 幸存组仍按原顺序合取残余，绑定的化简结果已在重写表内。
                 if !free_replacements.is_empty()
                     && bindings.iter().any(|binding| {
-                        let (_, _, fact) = rewrites.narrow(&free_replacements, binding);
-                        rewrites.simplified(fact).0 == Some(false)
+                        let (_, truth, fact) = rewrites.narrow(&free_replacements, binding, &mut binding_dependencies);
+                        rewrites.after_narrow(truth, fact).0 == Some(false)
                     })
                 {
                     return true;
@@ -876,7 +834,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     } else {
                         &free_replacements
                     };
-                    let (unchanged, truth, mut fact) = rewrites.narrow(relevant, original);
+                    let inputs = if source.is_some() { &mut dependencies } else { &mut binding_dependencies };
+                    let (unchanged, mut truth, mut fact) = rewrites.narrow(relevant, original, inputs);
                     reuse_witness &= unchanged;
                     if truth.is_none() {
                         if let Some((source, _, _)) = source.filter(|(_, _, depends)| *depends && !projected.is_empty())
@@ -893,14 +852,15 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                                 .unwrap();
                             if changed {
                                 let mut other = self.translate_exp(&substituted).substitute_many(&anchors, &values);
-                                if other.structural_bool().is_some() {
+                                if let Some(current) = other.structural_bool() {
+                                    truth = Some(current);
                                     fact = other;
                                     reuse_witness = false;
                                 }
                             }
                         }
                     }
-                    let (truth, fact) = rewrites.simplified(fact);
+                    let (truth, fact) = rewrites.after_narrow(truth, fact);
                     match truth {
                         Some(true) => (),
                         Some(false) => {
