@@ -17,7 +17,9 @@ pub(super) struct ThreadSlot<'a> {
 
 impl Drop for ThreadSlot<'_> {
     fn drop(&mut self) {
-        self.release.take().unwrap()();
+        if let Some(release) = self.release.take() {
+            release();
+        }
     }
 }
 
@@ -36,17 +38,22 @@ impl Cancellation {
     }
 }
 
-pub(super) trait ArmThreads: Sync {
+pub(super) trait ArmThreads<'ir, B: BV>: Sync {
     fn reserve(&self) -> Option<ThreadSlot<'_>>;
+
+    fn enqueue_reserved(&self, work: QueuedArm<'ir, B>, _slot: &mut ThreadSlot<'_>) -> Option<QueuedArm<'ir, B>> {
+        Some(work)
+    }
 }
 
 #[derive(Clone, Copy)]
 pub(super) struct Scheduler<'a, 'ir, B: BV> {
-    pub threads: &'a dyn ArmThreads,
+    pub threads: &'a dyn ArmThreads<'ir, B>,
     pub queue: &'a ArmQueue<'ir, B>,
 }
 
 pub(super) struct ArmJob<'ir, B: BV> {
+    pub cost: Option<Arc<super::arm_cost::ArmCost>>,
     pub checkpoint: Checkpoint<B>,
     pub options: (crate::smt::SolverOptions, bool),
     pub base: LocalFrame<'ir, B>,
@@ -133,7 +140,7 @@ pub(crate) enum ArmJobState {
 
 /// 状态与返回值共用锁，唤醒前先发布结果，等待者始终在锁内检查谓词。
 pub(crate) struct JoinCell<T> {
-    inner: Mutex<(ArmJobState, Option<Result<T, ExecError>>)>,
+    inner: Mutex<(ArmJobState, Option<Result<T, ExecError>>, bool)>,
     changed: Condvar,
     pub(super) cancelled: Arc<AtomicBool>,
 }
@@ -141,7 +148,7 @@ pub(crate) struct JoinCell<T> {
 impl<T> JoinCell<T> {
     pub(crate) fn new() -> Self {
         Self {
-            inner: Mutex::new((ArmJobState::Queued, None)),
+            inner: Mutex::new((ArmJobState::Queued, None, false)),
             changed: Condvar::new(),
             cancelled: Arc::new(AtomicBool::new(false)),
         }
@@ -153,6 +160,23 @@ impl<T> JoinCell<T> {
             hook(&format!("{point}/{self:p}"))?;
         }
         Ok(())
+    }
+
+    pub(super) fn worker_enqueued(&self) {
+        let mut slot = self.inner.lock().unwrap();
+        assert!(!slot.2);
+        slot.2 = true;
+    }
+
+    pub(super) fn worker_finished(&self) {
+        let mut slot = self.inner.lock().unwrap();
+        assert!(slot.2);
+        slot.2 = false;
+        self.changed.notify_all();
+    }
+
+    pub(super) fn wait_for_worker(&self) {
+        drop(self.changed.wait_while(self.inner.lock().unwrap(), |slot| slot.2).unwrap());
     }
 
     pub(crate) fn try_claim(&self) -> bool {
@@ -187,7 +211,8 @@ impl<T> JoinCell<T> {
         let mut slot = self.inner.lock().unwrap();
         if matches!(slot.0, ArmJobState::Queued | ArmJobState::Claimed) {
             self.cancelled.store(true, Ordering::Release);
-            *slot = (ArmJobState::Cancelled, Some(Err(error)));
+            slot.0 = ArmJobState::Cancelled;
+            slot.1 = Some(Err(error));
             self.changed.notify_all();
         }
     }

@@ -1,13 +1,17 @@
 //! A 独占主求解器。领取者只提交从入口重放所得的 B 臂数据。
 use super::*;
+use crate::executor::arm_cost::{ArmCost, ArmCpu};
 use crate::executor::region_arm::{
     self, ArmJob, ArmPath, Delivery, ErrorLeaf, JoinCell, QueuedArm, RegionId, RemoteArrival, Scheduler, ThreadSlot,
 };
 use crate::executor::region_summary::{constraint_binary, constraint_unary};
-use crate::smt::{ArmSuffixEvent, SymRemap};
+use crate::smt::{ArmReplay, ArmSuffixEvent, SymRemap};
 
 pub(super) use region_arm::ArmCell;
-pub(super) type Entry<'a, B> = (Option<ThreadSlot<'a>>, Checkpoint<B>);
+pub(super) struct Entry<'a, B> {
+    pub cost: Option<Arc<ArmCost>>,
+    pub remote: Option<(Option<ThreadSlot<'a>>, Checkpoint<B>)>,
+}
 
 /// B 只执行能在私有帧和事务中隔离的指令。按实际路径检查，允许被调函数内的循环和递归。
 pub(super) fn transferable_instruction<B: BV>(
@@ -81,17 +85,29 @@ pub(super) fn entry<'a, 'ir: 'a, 'task, B: BV>(
     {
         return None;
     }
+    let percent = limits.parallel.arm_cost_ratio_percent;
+    let cost = (percent != 0).then(|| state.arm_costs.site(frame.function_name, region.branch_pc));
+    if cost.as_ref().is_some_and(|cost| !cost.admits(percent)) {
+        return Some(Entry { cost, remote: None });
+    }
+    let dispatch = cost.as_ref().map(|_| ArmCpu::start());
     let slot = scheduler.threads.reserve();
     if slot.is_none() && !scheduler.queue.has_helper() {
         region_arm::observe(state, "no_slot").expect("名额观察点不可失败");
-        return None;
-    };
-    Some((slot, region_arm::capture_arm_entry_checkpoint(solver)))
+        return Some(Entry { cost, remote: None });
+    }
+    let checkpoint = region_arm::capture_arm_entry_checkpoint(solver);
+    if let (Some(cost), Some(timer)) = (&cost, dispatch) {
+        ArmCost::sample(&cost.dispatch, timer.elapsed());
+    }
+    Some(Entry { cost, remote: Some((slot, checkpoint)) })
 }
 
 #[allow(clippy::too_many_arguments)]
 fn run_b<'ir, B: BV>(
     job: ArmJob<'ir, B>,
+    replay: &mut ArmReplay<B>,
+    startup: Duration,
     tid: usize,
     cancelled: Arc<AtomicBool>,
     scheduler: Option<Scheduler<'_, 'ir, B>>,
@@ -99,16 +115,21 @@ fn run_b<'ir, B: BV>(
     state: &TaskState<B>,
     shared: &SharedState<'ir, B>,
 ) -> Result<Delivery<'ir, B>, ExecError> {
-    let ArmJob { checkpoint, options, mut base, pc, guard, task, mut fraction, timeout, info } = job;
+    let ArmJob { cost, checkpoint, options, mut base, pc, guard, task, mut fraction, timeout, info } = job;
     let memory_task = stats::memory_stats::enabled().then(|| stats::memory_stats::begin_task(task.as_usize()));
     let _ = &memory_task;
     base.path_timing.start_active();
-    let mut config = Config::new();
-    (config.solver_options, config.validation) = options;
+    assert_eq!(replay.options(), options);
     region_arm::observe(state, "context")?;
-    let ctx = Context::new(config);
+    let setup = cost.as_ref().map(|_| ArmCpu::start());
     let prefix = Arc::clone(checkpoint.path_cache_parts().2);
-    let mut solver = Solver::from_checkpoint(&ctx, checkpoint);
+    let (solver, visited) = replay.restore(checkpoint);
+    let setup = setup.map_or(Duration::ZERO, |timer| timer.elapsed());
+    let body = cost.as_ref().map(|_| ArmCpu::start());
+    #[cfg(test)]
+    if let Some(hook) = &state.arm_test_hook {
+        hook(&format!("replayed/{visited}"))?;
+    }
     let start = solver.next_join_symbol();
     let root = solver.start_transaction();
     let mut errors = ArmErrorSink::new();
@@ -121,7 +142,7 @@ fn run_b<'ir, B: BV>(
                 "{}",
                 serde_json::json!({"kind":"region_arm_start","root_attempt":diagnostics::root_attempt(),
                 "task":task.as_usize(),"function":diagnostics::name_string(base.function_name,&shared.symtab),
-                "pc":execution.region.branch_pc})
+                "pc":execution.region.branch_pc,"replayed_events":visited})
             );
         }
         let region = RegionId::new(vec![base.function_name.as_u32() as usize, execution.region.branch_pc]);
@@ -227,8 +248,17 @@ fn run_b<'ir, B: BV>(
             frame,
         }))
     };
-    let result = if solver.defer_region_checks() { solver.with_deferred_region_queries(run) } else { run(&mut solver) };
+    let result = if solver.defer_region_checks() { solver.with_deferred_region_queries(run) } else { run(solver) };
+    let body = body.map(|timer| timer.elapsed());
+    let teardown = cost.as_ref().map(|_| ArmCpu::start());
     solver.rollback_transaction(root);
+    replay.finish();
+    if let (Some(cost), Some(teardown)) = (cost, teardown) {
+        ArmCost::sample(&cost.restore, startup + setup + teardown.elapsed());
+        if matches!(&result, Ok(Some(_))) {
+            ArmCost::sample(&cost.body, body.unwrap());
+        }
+    }
     result
 }
 
@@ -360,33 +390,48 @@ impl<B: BV> Drop for CancelOnDrop<'_, '_, B> {
     }
 }
 
-fn execute_job<'ir, B: BV>(
+pub(in crate::executor) fn execute_job<'ir, B: BV>(
     work: QueuedArm<'ir, B>,
+    replay: &mut ArmReplay<B>,
+    startup: Duration,
     tid: usize,
     scheduler: Option<Scheduler<'_, 'ir, B>>,
     state: &TaskState<B>,
     stop: Option<&StopConditions>,
     shared: &SharedState<'ir, B>,
 ) {
-    let QueuedArm { job, cell, failure, .. } = work;
+    let QueuedArm { job, cell, failure, parent_attempt } = work;
     let before_claim = region_arm::observe(state, "before_claim");
     if !cell.try_claim() {
         return;
     }
     let mut cleanup = CancelOnDrop { cell: &cell, scheduler, error: Some(failure) };
 
-    let prior_smt = crate::smt::path_smt_stats();
+    struct RestoreDiagnostics(Option<usize>);
+    impl Drop for RestoreDiagnostics {
+        fn drop(&mut self) {
+            diagnostics::replace_arm_parent(self.0);
+        }
+    }
+    let _restore_diagnostics = RestoreDiagnostics(diagnostics::replace_arm_parent(parent_attempt));
+    struct RestoreSmt(crate::timeout::SmtCallStats);
+    impl Drop for RestoreSmt {
+        fn drop(&mut self) {
+            crate::smt::restore_path_smt_stats(self.0.clone());
+        }
+    }
+    let prior_smt = RestoreSmt(crate::smt::path_smt_stats());
 
     let result = before_claim.and_then(|()| {
         #[cfg(test)]
         cell.observe_id(state, "claim")?;
         region_arm::observe(state, "worker_claimed")?;
-        let packet = run_b(job, tid, cell.cancelled.clone(), scheduler, stop, state, shared)?;
+        let packet = run_b(job, replay, startup, tid, cell.cancelled.clone(), scheduler, stop, state, shared)?;
         region_arm::observe(state, "before_delivery")?;
         Ok(packet)
     });
 
-    crate::smt::restore_path_smt_stats(prior_smt);
+    drop(prior_smt);
     let failed = result.is_err();
     cell.deliver(result);
     cleanup.error = None;
@@ -407,27 +452,42 @@ pub(super) fn with_worker<'ir, B: BV, T>(
     let cell = Arc::new(JoinCell::new());
     let work =
         QueuedArm { job, cell: cell.clone(), failure: failure.clone(), parent_attempt: diagnostics::root_attempt() };
-    std::thread::scope(|scope| {
-        let cleanup = CancelOnDrop { cell: &cell, scheduler, error: Some(failure) };
-        let available = if let Some(slot) = slot {
-            std::thread::Builder::new()
-                .spawn_scoped(scope, move || {
-                    diagnostics::set_arm_parent(work.parent_attempt);
-                    execute_job(work, slot.tid, scheduler, state, stop, shared);
-                    drop(slot);
-                })
-                .is_ok()
-        } else {
-            scheduler.expect("等待线程来自当前任务").queue.enqueue(work);
-            true
-        };
-        let result = local(available.then_some(cell.as_ref()));
-        drop(cleanup);
-        if let Some(scheduler) = scheduler {
-            scheduler.queue.retire(&cell);
+    struct WaitForWorker<'a, T>(&'a JoinCell<T>);
+    impl<T> Drop for WaitForWorker<'_, T> {
+        fn drop(&mut self) {
+            self.0.wait_for_worker();
         }
+    }
+    std::thread::scope(|scope| {
+        let _wait = WaitForWorker(&cell);
+        let cleanup = CancelOnDrop { cell: &cell, scheduler, error: Some(failure) };
+        let scheduler = scheduler.expect("调度远端臂必须有任务队列");
+        if let Some(mut slot) = slot {
+            if let Some(work) = scheduler.threads.enqueue_reserved(work, &mut slot) {
+                // 只供直接构造 ForkSink 的定向测试使用。
+                scope.spawn(move || {
+                    let startup = work.job.cost.as_ref().map(|_| ArmCpu::start());
+                    let ctx = arm_context(work.job.options);
+                    let mut replay = ArmReplay::new(&ctx);
+                    let startup = startup.map_or(Duration::ZERO, |timer| timer.elapsed());
+                    execute_job(work, &mut replay, startup, slot.tid, Some(scheduler), state, stop, shared);
+                    drop(slot);
+                });
+            }
+        } else {
+            scheduler.queue.enqueue(work);
+        }
+        let result = local(Some(cell.as_ref()));
+        drop(cleanup);
+        scheduler.queue.retire(&cell);
         result
     })
+}
+
+pub(in crate::executor) fn arm_context(options: (crate::smt::SolverOptions, bool)) -> Context {
+    let mut config = Config::new();
+    (config.solver_options, config.validation) = options;
+    Context::new(config)
 }
 
 pub(super) enum Received<'ir, B> {
@@ -447,6 +507,7 @@ pub(super) fn receive<'ir, 'task, B: BV>(
     tid: usize,
     stop: Option<&'task StopConditions>,
     shared: &SharedState<'ir, B>,
+    cost: Option<&ArmCost>,
 ) -> Result<Received<'ir, B>, ExecError> {
     #[cfg(test)]
     cell.observe_id(state, "join")?;
@@ -465,11 +526,25 @@ pub(super) fn receive<'ir, 'task, B: BV>(
     base.path_timing.pause_active();
     region_arm::observe(state, "waiting").expect("等待观察点不可失败");
     if let Some(scheduler) = sink.arm_scheduler() {
+        let context = std::cell::OnceCell::new();
+        let mut replay = None;
         scheduler.queue.help_until(
             cell,
             |work| {
                 region_arm::observe(state, "helping").expect("帮助执行观察点不可失败");
-                execute_job(work, tid, Some(scheduler), state, stop, shared);
+                let helper = state
+                    .execution_limits
+                    .as_ref()
+                    .filter(|limits| limits.parallel.arm_cost_ratio_percent != 0)
+                    .map(|_| ArmCpu::start());
+                let startup = (context.get().is_none() && work.job.cost.is_some()).then(ArmCpu::start);
+                let context = context.get_or_init(|| arm_context(work.job.options));
+                let replay = replay.get_or_insert_with(|| ArmReplay::new(context));
+                let startup = startup.map_or(Duration::ZERO, |timer| timer.elapsed());
+                execute_job(work, replay, startup, tid, Some(scheduler), state, stop, shared);
+                if let Some(helper) = helper {
+                    helper.finish_help();
+                }
             },
             state,
         );
@@ -483,6 +558,7 @@ pub(super) fn receive<'ir, 'task, B: BV>(
         region_arm::observe(state, "serial_retry")?;
         return Ok(Received::Retry);
     };
+    let import = cost.map(|_| ArmCpu::start());
     let start = solver.next_join_symbol();
     let count = packet.symbols.end - packet.symbols.start;
     let end = start.checked_add(count).expect("区域臂编号溢出");
@@ -515,6 +591,9 @@ pub(super) fn receive<'ir, 'task, B: BV>(
     solver.import_arm_suffix(owner, packet.suffix);
     if packet.dead {
         solver.discard_logical_arm_effects(owner);
+        if let (Some(cost), Some(timer)) = (cost, import) {
+            ArmCost::sample(&cost.import, timer.elapsed());
+        }
         region_arm::observe(state, "imported")?;
         return Ok(Received::Dead);
     }
@@ -524,6 +603,9 @@ pub(super) fn receive<'ir, 'task, B: BV>(
     packet.frame.region_arm = Some(owner);
     packet.frame.path_timing = base.path_timing.clone();
     promote_initials(base, &packet.frame, solver);
+    if let (Some(cost), Some(timer)) = (cost, import) {
+        ArmCost::sample(&cost.import, timer.elapsed());
+    }
     region_arm::observe(state, "imported")?;
     Ok(Received::Arrived(packet.frame))
 }

@@ -180,13 +180,27 @@ impl<'ctx> PrefixIndex<'ctx> {
     }
 
     pub(in crate::smt) fn remove_suffix<B>(&mut self, segment: usize, events: &[Event<B>], start: usize) {
+        if start < events.len() {
+            self.rewind(
+                segment,
+                start,
+                events.iter().enumerate().skip(start).rev().map(|(offset, event)| (segment, offset, event)),
+            );
+        }
+    }
+
+    pub(in crate::smt) fn rewind<'a, B: 'a>(
+        &mut self,
+        segment: usize,
+        start: usize,
+        reversed: impl Iterator<Item = (usize, usize, &'a Event<B>)>,
+    ) {
         let first = Position(segment, start);
         self.assertions.truncate(self.assertions.partition_point(|position| *position < first));
         self.bool_symbols.truncate(self.bool_symbols.partition_point(|(position, _)| *position < first));
-        for (index, event) in events.iter().enumerate().skip(start).rev() {
+        for (segment, index, event) in reversed {
             if let Some((sym, _)) = binding(event) {
-                let first = self.symbols[&sym];
-                if first == Position(segment, index) {
+                if self.symbols[&sym] == Position(segment, index) {
                     self.symbols.remove(&sym);
                     self.layouts.remove(&sym);
                     for layer in self.guard_bounds.get_mut() {
@@ -197,10 +211,8 @@ impl<'ctx> PrefixIndex<'ctx> {
                 }
             }
         }
-        if start < events.len() {
-            self.arm_facts.get_mut().truncate_assertions(self.assertions.len());
-            self.clear_candidate_caches();
-        }
+        self.arm_facts.get_mut().truncate_assertions(self.assertions.len());
+        self.clear_candidate_caches();
     }
 
     pub(in crate::smt) fn invalidate_candidates(&mut self) {

@@ -6,21 +6,35 @@ pub(super) struct ConstBinding<'ctx> {
     ctx: &'ctx Context,
     value: Cell<Z3_ast>,
     pending: Cell<bool>,
+    replay_ast: Option<Ast<'ctx>>,
 }
 
 impl<'ctx> ConstBinding<'ctx> {
     pub(super) fn new(value: Ast<'ctx>, pending: bool) -> Self {
-        let binding = Self { ctx: value.ctx, value: Cell::new(value.z3_ast), pending: Cell::new(pending) };
+        let binding =
+            Self { ctx: value.ctx, value: Cell::new(value.z3_ast), pending: Cell::new(pending), replay_ast: None };
         // 将 AST 引用移交给绑定，保存点移动绑定时也一并移交。
         std::mem::forget(value);
         binding
     }
 
-    pub(super) fn ast(&self) -> Ast<'ctx> {
+    pub(super) fn keep_replay_ast(&mut self) {
+        self.replay_ast = Some(self.current_ast());
+    }
+
+    pub(super) fn raw_ast(&self) -> Ast<'ctx> {
+        self.replay_ast.clone().unwrap_or_else(|| self.current_ast())
+    }
+
+    fn current_ast(&self) -> Ast<'ctx> {
         let z3_ast = self.value.get();
         // 绑定与调用方各自持有一个引用，化简可以独立替换任一引用。
         unsafe { Z3_inc_ref(self.ctx.z3_ctx, z3_ast) };
-        let mut ast = Ast { ctx: self.ctx, z3_ast };
+        Ast { ctx: self.ctx, z3_ast }
+    }
+
+    pub(super) fn ast(&self) -> Ast<'ctx> {
+        let mut ast = self.current_ast();
         if self.pending.replace(false) {
             ast.simplify();
             unsafe {

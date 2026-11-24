@@ -795,9 +795,9 @@ pub(crate) fn record_current_site(function: Name, pc: usize, symtab: &Symtab) {
     CURRENT_SITE.with(|site| *site.borrow_mut() = Some(json!({"function":name_string(function, symtab),"pc":pc})));
 }
 
-/// 每个 B 使用独占的一次性 worker。内层尝试继续挂在 A 的根下，耗时仍按各自线程计量。
-pub(crate) fn set_arm_parent(parent: Option<usize>) {
-    ARM_PARENT.set(parent);
+/// B 的诊断归属随任务切换，嵌套帮忙结束后恢复原归属。
+pub(crate) fn replace_arm_parent(parent: Option<usize>) -> Option<usize> {
+    ARM_PARENT.replace(parent)
 }
 
 pub(super) fn arm_parent() -> Option<usize> {

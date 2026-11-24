@@ -1333,7 +1333,9 @@ macro_rules! z3_float_binary_op {
 }
 
 mod arithmetic;
+mod arm_replay;
 mod const_binding;
+pub(crate) use arm_replay::ArmReplay;
 use const_binding::ConstBinding;
 pub mod rewrite;
 #[cfg(test)]
@@ -2119,6 +2121,8 @@ pub struct Solver<'ctx, B> {
     declaration_undo: Vec<DeclarationUndo<'ctx>>,
     // 批量错误叶认证独占的翻译器。每条断言在当时的符号绑定下冻结。
     replay_assertions: Option<Vec<Ast<'ctx>>>,
+    replaying_arm_entry: bool,
+    arm_body_enums: Option<Vec<Name>>,
     transaction_events: Vec<Event<B>>,
     finite_prefix: Option<finite_domain::PrefixIndex<'ctx>>,
     logical_arms: logical_arm::LogicalArms,
@@ -2940,6 +2944,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 savepoints: Vec::new(),
                 declaration_undo: Vec::new(),
                 replay_assertions: None,
+                replaying_arm_entry: false,
+                arm_body_enums: None,
                 transaction_events: Vec::new(),
                 finite_prefix: ctx
                     .solver_options
@@ -3031,6 +3037,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         let ast = match exp {
             Var(v) => match self.decls.get(v) {
                 None => panic!("Could not get Z3 func_decl {}", *v),
+                Some(binding) if self.replaying_arm_entry => return binding.raw_ast(),
                 Some(binding) => binding.ast(),
             },
             Bits(bv) => Ast::mk_bv(self.ctx, bv.len().try_into().unwrap(), bv),
@@ -3341,7 +3348,11 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                 }
                 // 翻译时冻结操作数的绑定，第一次取值时再化简。
                 let ast = self.translate_exp(exp);
-                self.bind_constant(*v, ConstBinding::new(ast, true));
+                let mut binding = ConstBinding::new(ast, true);
+                if self.replaying_arm_entry && self.replay_assertions.is_some() {
+                    binding.keep_replay_ast();
+                }
+                self.bind_constant(*v, binding);
                 if self.def_attrs.attrs & 2 != 0 {
                     self.tag_bitvector(*v);
                 }
@@ -3359,6 +3370,8 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     self.enums.add_enum(*name, &members, &self.symbol_namer);
                     if self.replay_assertions.is_some() {
                         self.declaration_undo.push(DeclarationUndo::ReplayEnum(*name));
+                    } else if let Some(enums) = &mut self.arm_body_enums {
+                        enums.push(*name);
                     }
                 }
             }
@@ -3688,9 +3701,24 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         self.trace.tail = trace
     }
 
-    pub fn from_checkpoint(ctx: &'ctx Context, Checkpoint { num, next_var, trace, cycles }: Checkpoint<B>) -> Self {
+    pub fn from_checkpoint(ctx: &'ctx Context, point: Checkpoint<B>) -> Self {
+        Self::restore_checkpoint(ctx, point, false)
+    }
+
+    pub(crate) fn from_arm_checkpoint(ctx: &'ctx Context, point: Checkpoint<B>) -> Self {
+        Self::restore_checkpoint(ctx, point, true)
+    }
+
+    fn restore_checkpoint(
+        ctx: &'ctx Context,
+        Checkpoint { num, next_var, trace, cycles }: Checkpoint<B>,
+        arm_entry: bool,
+    ) -> Self {
         let mut solver = Solver::new(ctx);
+        // 入口重放只需恢复等价绑定与断言。臂开始后，仍在首次取值时化简定义。
+        solver.replaying_arm_entry = arm_entry;
         solver.replay(num, trace);
+        solver.replaying_arm_entry = false;
         solver.next_var = next_var;
         solver.cycles = cycles;
         solver
@@ -4598,6 +4626,116 @@ mod tests {
     use super::Def::*;
     use super::Exp::*;
     use super::*;
+
+    #[test]
+    fn arm_replay_rewinds_sibling_assertions_rebindings_and_enums() {
+        configure_tastic(Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        let info = SourceLoc::unknown();
+        let mut parent = Solver::<B64>::new(&context);
+        let input = parent.declare_const(Ty::Bool, info);
+        let rebound = parent.define_const(Var(input), info);
+        let mut chain = input;
+        for _ in 0..256 {
+            chain = parent.define_const(Not(Box::new(Var(chain))), info);
+        }
+        let entry = checkpoint(&mut parent);
+
+        let sibling = |left: bool| {
+            let mut solver = Solver::from_checkpoint(&context, entry.clone());
+            solver.add(DefineConst(rebound, Bool(left)));
+            solver.assert(if left { Var(chain) } else { Not(Box::new(Var(chain))) });
+            let enumeration = solver.get_enum(Name::from_u32(if left { 900 } else { 901 }), 2);
+            let symbol = solver.declare_const(Ty::Enum(enumeration), info);
+            solver.assert_eq(Var(symbol), Enum(enumeration.first_member()));
+            solver.cycle_count();
+            if left {
+                solver.cycle_count();
+            }
+            solver.arm_entry_checkpoint()
+        };
+        let left = sibling(true);
+        let right = sibling(false);
+        let mut visits = Vec::new();
+        let mut replay = ArmReplay::new(&context);
+        for (point, side) in [(&left, true), (&right, false), (&left, true), (&left, true)] {
+            let before = REPLAY_SMT_EVENTS.get();
+            let (solver, _) = replay.restore(point.clone());
+            visits.push(REPLAY_SMT_EVENTS.get() - before);
+            assert_eq!(solver.get_cycle_count(), if side { 2 } else { 1 });
+            assert_eq!(solver.next_join_symbol(), point.next_var);
+            assert_eq!(solver.structural_bool(&Var(rebound)), Some(side));
+            assert_eq!(solver.check_sat_with(&Var(input), info), if side { Sat } else { Unsat });
+            assert_eq!(solver.check_sat_with(&Not(Box::new(Var(input))), info), if side { Unsat } else { Sat });
+            assert_eq!(solver.enums.enums.len(), 1);
+            assert!(solver.enums.enums.contains_key(&Name::from_u32(if side { 900 } else { 901 })));
+            let root = solver.start_transaction();
+            solver.add(DefineConst(rebound, Bool(!side)));
+            solver.get_enum(Name::from_u32(902), 3);
+            solver.rollback_transaction(root);
+            replay.finish();
+        }
+        assert!(visits[0] >= 256);
+        assert_eq!(visits[1..], [5, 5, 0], "同一前缀的兄弟臂只需重放后缀");
+    }
+
+    #[test]
+    fn checkpoint_replay_preserves_each_assertion_without_simplifying_each_binding() {
+        use z3_sys::{
+            Z3_ast_vector_dec_ref, Z3_ast_vector_get, Z3_ast_vector_inc_ref, Z3_ast_vector_size,
+            Z3_solver_get_assertions,
+        };
+
+        configure_tastic(Tactic::Qfaufbv);
+        let context = Context::new(Config::new());
+        let mut original = Solver::<B64>::new(&context);
+        let info = SourceLoc::unknown();
+        let input = original.declare_const(Ty::BitVec(16), info);
+        AST_SIMPLIFY_CALLS.set(0);
+        let mut tail = input;
+        for index in 1..=192 {
+            tail = original.define_const(Bvadd(Box::new(Var(tail)), Box::new(smtlib::bits64(1, 16))), info);
+            if index % 48 == 0 {
+                original.assert(Eq(Box::new(Var(tail)), Box::new(smtlib::bits64(index + 7, 16))));
+                checkpoint(&mut original);
+            }
+        }
+        let original_calls = AST_SIMPLIFY_CALLS.get();
+        AST_SIMPLIFY_CALLS.set(0);
+        let mut replayed = Solver::from_arm_checkpoint(&context, checkpoint(&mut original));
+        let replay_calls = AST_SIMPLIFY_CALLS.get();
+
+        unsafe {
+            let ctx = context.z3_ctx;
+            let before = Z3_solver_get_assertions(ctx, original.z3_solver);
+            Z3_ast_vector_inc_ref(ctx, before);
+            let after = Z3_solver_get_assertions(ctx, replayed.z3_solver);
+            Z3_ast_vector_inc_ref(ctx, after);
+            let proof = new_z3_solver(ctx, Tactic::Default.as_c_str(), None);
+            assert_eq!(Z3_ast_vector_size(ctx, before), 4);
+            assert_eq!(Z3_ast_vector_size(ctx, after), 4);
+            for index in 0..4 {
+                let lhs = Z3_ast_vector_get(ctx, before, index);
+                let rhs = Z3_ast_vector_get(ctx, after, index);
+                let equality = Z3_mk_eq(ctx, lhs, rhs);
+                let difference = Z3_mk_not(ctx, equality);
+                Z3_solver_assert(ctx, proof, difference);
+                assert_eq!(Z3_solver_check(ctx, proof), Z3_L_FALSE, "第 {index} 条断言必须双向蕴含");
+                Z3_solver_reset(ctx, proof);
+            }
+            Z3_solver_dec_ref(ctx, proof);
+            Z3_ast_vector_dec_ref(ctx, after);
+            Z3_ast_vector_dec_ref(ctx, before);
+        }
+
+        let constant =
+            replayed.define_const(Bvadd(Box::new(smtlib::bits64(3, 16)), Box::new(smtlib::bits64(4, 16))), info);
+        let before = AST_SIMPLIFY_CALLS.get();
+        assert_eq!(replayed.translate_exp(&Var(constant)).get_numeral_u64().unwrap(), 7);
+        assert_eq!(AST_SIMPLIFY_CALLS.get(), before + 1, "新定义首次取值仍须化简");
+        eprintln!("重放／原执行的化简次数：{replay_calls}／{original_calls}");
+        assert!(replay_calls * 10 < original_calls, "重放／原执行的化简次数：{replay_calls}／{original_calls}");
+    }
 
     #[test]
     fn transaction_keeps_trace_and_solver_state_isolated() {

@@ -18,6 +18,7 @@ fn diamond(workers: usize, enabled: bool, hook: Option<Hook>) -> (Vec<Observatio
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Body {
     Inline,
+    SiblingReuse,
     Call,
     Nested,
     NestedAssert,
@@ -48,6 +49,20 @@ fn diamond_case_with_gate(
     timeout: Option<u64>,
     default_gate: bool,
 ) -> (Vec<Observation>, serde_json::Value) {
+    diamond_case_repeated(workers, enabled, hook, body, timeout, default_gate, false, 1)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn diamond_case_repeated(
+    workers: usize,
+    enabled: bool,
+    hook: Option<Hook>,
+    body: Body,
+    timeout: Option<u64>,
+    default_gate: bool,
+    adaptive: bool,
+    repeats: usize,
+) -> (Vec<Observation>, serde_json::Value) {
     let mut shared = empty_shared_state();
     shared.execution_stats = Arc::new(stats::ExecutionStats::new(true));
     let mut limits = ExecutionLimits::default().with_path_merging(true);
@@ -60,6 +75,9 @@ fn diamond_case_with_gate(
     limits.region_global_state = body == Body::Loop;
     let mut state = TaskState::new().with_execution_limits(limits);
     state.arm_test_hook = hook;
+    if !adaptive {
+        state.execution_limits.as_mut().unwrap().parallel.arm_cost_ratio_percent = 0;
+    }
     let ctx = Context::new(Config::new());
     let mut solver = Solver::new(&ctx);
     let c = solver.declare_const(smtlib::Ty::Bool, info());
@@ -69,7 +87,7 @@ fn diamond_case_with_gate(
     shared.registers.insert(input, Ty::Bool);
     let third = test_name(9015);
     let b_result = Exp::Call(Op::Or, vec![Exp::Id(input), Exp::Id(flag)]);
-    let b = if body != Body::Inline {
+    let b = if !matches!(body, Body::Inline | Body::SiblingReuse) {
         let counter = shared.symtab.intern("zscan_index");
         let set = |value| Instr::Copy(Loc::Id(RETURN), value, info());
         let scratch = test_name(9016);
@@ -165,7 +183,7 @@ fn diamond_case_with_gate(
                 set(Exp::Id(flag)),
                 Instr::End,
             ],
-            Body::Inline => unreachable!(),
+            Body::Inline | Body::SiblingReuse => unreachable!(),
         };
         let helper = shared.symtab.intern("zlinear_arm");
         shared.functions.insert(
@@ -176,13 +194,22 @@ fn diamond_case_with_gate(
     } else {
         Instr::Copy(Loc::Id(RETURN), b_result, info())
     };
-    let mut frame = make_frame(vec![
+    let mut code = vec![
         Instr::Jump(Exp::Id(flag), 3, info()),
         b,
         Instr::Goto(4),
         Instr::Copy(Loc::Id(RETURN), Exp::Call(Op::Not, vec![Exp::Id(input)]), info()),
-        Instr::End,
-    ]);
+    ];
+    if body == Body::SiblingReuse {
+        code.extend([
+            Instr::Jump(Exp::Id(input), 7, info()),
+            Instr::Copy(Loc::Id(RETURN), Exp::Id(flag), info()),
+            Instr::Goto(8),
+            Instr::Copy(Loc::Id(RETURN), Exp::Bool(true), info()),
+        ]);
+    }
+    code.push(Instr::End);
+    let mut frame = make_frame(code);
     let third_sym = matches!(body, Body::ThreeLevels | Body::ThreeLevelsAssert)
         .then(|| solver.declare_const(smtlib::Ty::Bool, info()));
     if let Some(choice) = third_sym {
@@ -191,69 +218,75 @@ fn diamond_case_with_gate(
     frame.vars_mut().insert(flag, UVal::Init(Val::Symbolic(c)));
     frame.regs_mut().insert(input, false, UVal::Init(Val::Symbolic(x)));
     let output = Arc::new(Mutex::new(Vec::new()));
-    let task = frame.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut solver));
-    start_multi(workers, timeout, vec![task], &shared, output.clone(), &|_, _, result, _, mut solver, output| {
-        let (value, frame) = match result {
-            Ok((Run::Finished(value), frame)) => (value, frame),
-            Err((ExecError::Type(..), frame)) if matches!(body, Body::ErrorLeaf | Body::ErrorInB) => {
-                assert!(frame.arm_error_certified());
-                // 单独收集错误叶的输入域，约定其观察值为 true。
-                (Val::Bool(true), frame)
-            }
-            _ => panic!("菱形程序应正常完成或交付已认证的错误叶"),
-        };
-        let records = frame
-            .region_merge_records
-            .iter()
-            .map(|r| {
-                let parent = r
-                    .parent_record
-                    .map(|id| frame.region_merge_records.iter().position(|p| p.record_id == id).unwrap());
-                let values: BTreeSet<_> = r.value_symbols.iter().map(|s| s.as_u32()).collect();
-                let inputs: BTreeSet<_> = r.input_symbols.iter().map(|s| s.as_u32()).collect();
-                format!(
-                    "{parent:?}/{:?}",
-                    (
-                        r.arm,
-                        r.function,
-                        r.branch_pc,
-                        r.join,
-                        r.condition,
-                        r.source_loc,
-                        r.depth,
-                        r.outcome,
-                        values,
-                        inputs,
-                        &r.single_arm_reads,
-                        &r.memory_reads
+    let entry = checkpoint(&mut solver);
+    for _ in 0..repeats {
+        let task = frame.task_with_checkpoint(TaskId::fresh(), &state, entry.clone());
+        start_multi(workers, timeout, vec![task], &shared, output.clone(), &|_, _, result, _, mut solver, output| {
+            let (value, frame) = match result {
+                Ok((Run::Finished(value), frame)) => (value, frame),
+                Err((ExecError::Type(..), frame)) if matches!(body, Body::ErrorLeaf | Body::ErrorInB) => {
+                    assert!(frame.arm_error_certified());
+                    // 单独收集错误叶的输入域，约定其观察值为 true。
+                    (Val::Bool(true), frame)
+                }
+                _ => panic!("菱形程序应正常完成或交付已认证的错误叶"),
+            };
+            let records = frame
+                .region_merge_records
+                .iter()
+                .map(|r| {
+                    let parent = r
+                        .parent_record
+                        .map(|id| frame.region_merge_records.iter().position(|p| p.record_id == id).unwrap());
+                    let values: BTreeSet<_> = r.value_symbols.iter().map(|s| s.as_u32()).collect();
+                    let inputs: BTreeSet<_> = r.input_symbols.iter().map(|s| s.as_u32()).collect();
+                    format!(
+                        "{parent:?}/{:?}",
+                        (
+                            r.arm,
+                            r.function,
+                            r.branch_pc,
+                            r.join,
+                            r.condition,
+                            r.source_loc,
+                            r.depth,
+                            r.outcome,
+                            values,
+                            inputs,
+                            &r.single_arm_reads,
+                            &r.memory_reads
+                        )
                     )
-                )
-            })
-            .collect();
-        let events = solver.trace().events_with_guards_rev().map(|(e, g)| format!("{e:?}/{g:?}")).collect();
-        let mut results = BTreeSet::new();
-        use smtlib::Exp::{And, Bool, Eq, Var};
-        for flag in [true, false] {
-            for input in [true, false] {
-                for ret in [true, false] {
-                    let equals = |x, y| Eq(Box::new(x), Box::new(Bool(y)));
-                    let args = And(Box::new(equals(Var(c), flag)), Box::new(equals(Var(x), input)));
-                    let query = And(Box::new(args), Box::new(equals(smt_value(&value, info()).unwrap(), ret)));
-                    if let Some(choice) = third_sym {
-                        for third in [false, true] {
-                            let with_choice = And(Box::new(query.clone()), Box::new(equals(Var(choice), third)));
-                            let expected = if flag { !input } else { input || third };
-                            assert_eq!(solver.check_sat_with(&with_choice, info()).is_sat().unwrap(), ret == expected);
+                })
+                .collect();
+            let events = solver.trace().events_with_guards_rev().map(|(e, g)| format!("{e:?}/{g:?}")).collect();
+            let mut results = BTreeSet::new();
+            use smtlib::Exp::{And, Bool, Eq, Var};
+            for flag in [true, false] {
+                for input in [true, false] {
+                    for ret in [true, false] {
+                        let equals = |x, y| Eq(Box::new(x), Box::new(Bool(y)));
+                        let args = And(Box::new(equals(Var(c), flag)), Box::new(equals(Var(x), input)));
+                        let query = And(Box::new(args), Box::new(equals(smt_value(&value, info()).unwrap(), ret)));
+                        if let Some(choice) = third_sym {
+                            for third in [false, true] {
+                                let with_choice = And(Box::new(query.clone()), Box::new(equals(Var(choice), third)));
+                                let expected = if flag { !input } else { input || third };
+                                assert_eq!(
+                                    solver.check_sat_with(&with_choice, info()).is_sat().unwrap(),
+                                    ret == expected
+                                );
+                            }
                         }
-                    }
-                    if solver.check_sat_with(&query, info()).is_sat().unwrap() {
-                        results.insert((flag, input, ret));
+                        if solver.check_sat_with(&query, info()).is_sat().unwrap() {
+                            results.insert((flag, input, ret));
+                        }
                     }
                 }
             }
-        }
-        output.lock().unwrap().push(Observation { records, events, results });
-    });
+            output.lock().unwrap().push(Observation { records, events, results });
+        });
+    }
     let observations = std::mem::take(&mut *output.lock().unwrap());
     (observations, shared.execution_stats.merge_json())
 }
@@ -417,6 +450,7 @@ fn region_arm_worker_failures() {
 
 #[test]
 fn region_arm_rejects_suspended_frame_before_clone() {
+    configure_tastic(Tactic::Qfaufbv);
     let mut frame = make_frame(vec![Instr::End]);
     frame.region_arrivals.push(make_frame(vec![Instr::End]));
     assert!(!region_arm::transferable_entry(&frame));
@@ -525,7 +559,7 @@ fn check_deferred_indices(nested: bool, name: &str) {
     }
     crate::config::RegionOptions { defer_exit_check: true, ..Default::default() }.configure();
     struct TestSink<'ir>(region_arm::ArmQueue<'ir, B64>);
-    impl region_arm::ArmThreads for TestSink<'_> {
+    impl<'ir> region_arm::ArmThreads<'ir, B64> for TestSink<'ir> {
         fn reserve(&self) -> Option<region_arm::ThreadSlot<'_>> {
             Some(region_arm::ThreadSlot { tid: 1, release: Some(Box::new(|| ())) })
         }
@@ -581,6 +615,7 @@ fn check_deferred_indices(nested: bool, name: &str) {
         let mut limits = ExecutionLimits::default().with_path_merging(true);
         limits.arms_as_tasks = parallel;
         limits.parallel.min_arm_instructions = 0;
+        limits.parallel.arm_cost_ratio_percent = 0;
         let mut state = TaskState::new().with_execution_limits(limits);
         let (tx, rx) = std::sync::mpsc::channel();
         let rx = Mutex::new(rx);
@@ -829,6 +864,59 @@ fn region_arm_waiter_runs_nested_b_without_another_thread() {
 }
 
 #[test]
+fn region_arm_adaptive_gate_samples_then_claims_only_the_large_site() {
+    configure_tastic(Tactic::Qfaufbv);
+    for (body, expected_claims) in [(Body::Inline, 0), (Body::Large, 3)] {
+        let claims = Arc::new(AtomicUsize::new(0));
+        let count = claims.clone();
+        let wait_for_claim = wait_for_arm_claim();
+        let hook = Arc::new(move |point: &str| {
+            wait_for_claim(point);
+            if point == "worker_claimed" {
+                count.fetch_add(1, Ordering::Relaxed);
+            }
+            if point == "serial_body_sample" && body == Body::Large {
+                let start = crate::timing::thread_cpu_time();
+                while crate::timing::thread_cpu_time() - start < Duration::from_millis(100) {
+                    std::hint::spin_loop();
+                }
+            }
+            Ok(())
+        });
+        let (observed, _) = diamond_case_repeated(2, true, Some(hook), body, None, false, true, 4);
+        let serial = &diamond_case(1, false, None, body, None).0;
+        assert_eq!(observed.len(), 4);
+        assert!(observed.iter().all(|row| row == &serial[0]));
+        assert_eq!(claims.load(Ordering::Relaxed), expected_claims, "小臂门槛或大臂预热不符合预期");
+    }
+}
+
+#[test]
+fn region_arm_sequential_siblings_use_the_same_worker_at_t2() {
+    configure_tastic(Tactic::Qfaufbv);
+    let (claim, claimed) = std::sync::mpsc::channel();
+    let claimed = Mutex::new(claimed);
+    let workers = Arc::new(Mutex::new(Vec::new()));
+    let trace = Arc::clone(&workers);
+    let hook = Arc::new(move |point: &str| {
+        match point {
+            "worker_claimed" => {
+                trace.lock().unwrap().push(std::thread::current().id());
+                claim.send(()).unwrap();
+            }
+            "a_join" => claimed.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap(),
+            _ => (),
+        }
+        Ok(())
+    });
+    let result = diamond_case(2, true, Some(hook), Body::SiblingReuse, None).0;
+    assert_eq!(result, diamond_case(2, false, None, Body::SiblingReuse, None).0);
+    let workers = workers.lock().unwrap();
+    assert_eq!(workers.len(), 2);
+    assert_eq!(workers[0], workers[1], "同一任务的两个远端臂应复用执行线程");
+}
+
+#[test]
 fn region_arm_nested_worker_panic_wakes_parent() {
     let count = Arc::new(AtomicUsize::new(0));
     let contexts = count.clone();
@@ -899,35 +987,49 @@ fn region_arm_default_gate_skips_small_and_schedules_large() {
     }
 }
 
-/// 用同一根的失败点交付，覆盖认证为真及被丢弃的叶，并保留实际发布次序。
-#[test]
-fn region_arm_error_certification_preserves_leaf_order() {
+/// 认证线程要求默认 tactic。用子进程隔离测试库的全局求解器配置。
+fn certification_fixture_child(test: &str) -> bool {
     const CHILD: &str = "ISLA_STAGE4_CERTIFICATION";
-    if std::env::var_os(CHILD).is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "executor::tests::region_arm_runtime_tests::region_arm_error_certification_preserves_leaf_order",
-            ])
-            .env(CHILD, "1")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return;
+    if std::env::var_os(CHILD).is_some() {
+        crate::smt::configure_tastic(crate::smt::Tactic::Default);
+        return true;
     }
-    crate::smt::configure_tastic(crate::smt::Tactic::Default);
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg(format!("executor::tests::region_arm_runtime_tests::{test}"))
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    false
+}
 
+struct CertificationOutcome {
+    leaves: Vec<(u64, u32, bool, u64)>,
+    workers: usize,
+    drops: stats::solver_failures::SolverPathDrops,
+    panic: Option<String>,
+}
+
+fn run_error_certification_fixture(
+    leaves: u32,
+    slots: usize,
+    policy: crate::config::PathFailureAction,
+    inject: bool,
+    worker_panic: bool,
+    execution_limits: &str,
+) -> CertificationOutcome {
     struct Sink<'ir, 'task> {
         queue: region_arm::ArmQueue<'ir, B64>,
         slots: AtomicUsize,
         leaves: Mutex<Vec<Task<'ir, 'task, B64>>>,
     }
-    impl region_arm::ArmThreads for Sink<'_, '_> {
+    impl<'ir, 'task> region_arm::ArmThreads<'ir, B64> for Sink<'ir, 'task> {
         fn reserve(&self) -> Option<region_arm::ThreadSlot<'_>> {
             self.slots.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |free| free.checked_sub(1)).ok()?;
             Some(region_arm::ThreadSlot {
@@ -948,125 +1050,160 @@ fn region_arm_error_certification_preserves_leaf_order() {
         }
     }
 
-    use crate::config::PathFailureAction;
     use crate::error::{SmtError, Z3QueryFailure, Z3Timeout};
 
-    let run = |leaves, slots, policy, inject: bool, worker_panic: bool| {
-        let shared = SharedState::new(
-            Symtab::new(),
-            &[],
-            IRTypeInfo::new::<B64>(&[]),
-            HashSet::new(),
-            HashSet::new(),
-            HashSet::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        );
-        let mut config = Config::new();
-        config.solver_options.on_unknown = policy;
-        let ctx = Context::new(config);
-        let mut solver = Solver::new(&ctx);
-        let input = solver.declare_const(smtlib::Ty::Bool, info());
-        let mut root = make_frame(vec![Instr::End]);
-        let entry = checkpoint(&mut solver);
-        let mut limits = ExecutionLimits::default().with_path_merging(true);
-        limits.arms_as_tasks = true;
-        let mut state = TaskState::new().with_execution_limits(limits);
-        let workers = Arc::new(Mutex::new(HashSet::new()));
-        let used = workers.clone();
-        state.arm_test_hook = Some(Arc::new(move |point| {
-            if point == "certification_worker" {
-                used.lock().unwrap().insert(std::thread::current().id());
-                assert!(!worker_panic, "认证线程注入 panic");
-            }
-            if inject {
-                let reason = match point {
-                    "certification_check/40" => "timeout",
-                    "certification_check/51" => "canceled",
-                    _ => return Ok(()),
-                };
-                let query = Z3QueryFailure {
-                    reason: reason.into(),
-                    source_loc: info(),
-                    purpose: "arm_error",
-                    wall: Duration::from_millis(5),
-                    limit: (reason == "timeout").then_some(Duration::from_millis(5)),
-                };
-                return Err(ExecError::Smt(SmtError::Z3Timeout(Z3Timeout::Native(query))));
-            }
-            Ok(())
-        }));
-        let errors = (0..leaves)
-            .map(|index| {
-                let mut failed = Solver::from_checkpoint(&ctx, entry.clone());
-                let positive = smtlib::Exp::Var(input);
-                let constraint =
-                    if index % 3 == 1 { smtlib::Exp::Not(Box::new(positive.clone())) } else { positive.clone() };
-                failed.assert(constraint);
-                let mut task = root.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut failed));
-                task.fork_cond = Some((smtlib::Def::Assert(positive), Event::Fork(0, input, index, info())));
-                task.frame.arm_error = Some((ExecError::Type("失败叶".into(), info()), false));
-                task
-            })
-            .collect();
-        let sink =
-            Sink { queue: region_arm::ArmQueue::new(), slots: AtomicUsize::new(slots), leaves: Mutex::new(Vec::new()) };
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            region_merge::publish_arm_errors(&mut root, errors, &solver, &mut Fraction::one(), &sink, &shared);
-        }));
-        assert_eq!(sink.slots.load(Ordering::Relaxed), slots);
-        let observed: Vec<_> = sink
-            .leaves
-            .into_inner()
+    let shared = SharedState::new(
+        Symtab::new(),
+        &[],
+        IRTypeInfo::new::<B64>(&[]),
+        HashSet::new(),
+        HashSet::new(),
+        HashSet::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    let mut config = Config::new();
+    config.solver_options.on_unknown = policy;
+    let ctx = Context::new(config);
+    let mut solver = Solver::new(&ctx);
+    let input = solver.declare_const(smtlib::Ty::Bool, info());
+    let mut root = make_frame(vec![Instr::End]);
+    let entry = checkpoint(&mut solver);
+    let config = toml::from_str(execution_limits).unwrap();
+    let limits = ExecutionLimits::default().with_config(&config, &shared.symtab).with_path_merging(true);
+    assert!(limits.arms_as_tasks);
+    let mut state = TaskState::new().with_execution_limits(limits);
+    let workers = Arc::new(Mutex::new(HashSet::new()));
+    let used = workers.clone();
+    state.arm_test_hook = Some(Arc::new(move |point| {
+        if point == "certification_worker" {
+            used.lock().unwrap().insert(std::thread::current().id());
+            assert!(!worker_panic, "认证线程注入 panic");
+        }
+        if inject {
+            let reason = match point {
+                "certification_check/40" => "timeout",
+                "certification_check/51" => "canceled",
+                _ => return Ok(()),
+            };
+            let query = Z3QueryFailure {
+                reason: reason.into(),
+                source_loc: info(),
+                purpose: "arm_error",
+                wall: Duration::from_millis(5),
+                limit: (reason == "timeout").then_some(Duration::from_millis(5)),
+            };
+            return Err(ExecError::Smt(SmtError::Z3Timeout(Z3Timeout::Native(query))));
+        }
+        Ok(())
+    }));
+    let errors = (0..leaves)
+        .map(|index| {
+            let mut failed = Solver::from_checkpoint(&ctx, entry.clone());
+            let positive = smtlib::Exp::Var(input);
+            let constraint =
+                if index % 3 == 1 { smtlib::Exp::Not(Box::new(positive.clone())) } else { positive.clone() };
+            failed.assert(constraint);
+            let mut task = root.task_with_checkpoint(TaskId::fresh(), &state, checkpoint(&mut failed));
+            task.fork_cond = Some((smtlib::Def::Assert(positive), Event::Fork(0, input, index, info())));
+            task.frame.arm_error = Some((ExecError::Type("失败叶".into(), info()), false));
+            task
+        })
+        .collect();
+    let sink =
+        Sink { queue: region_arm::ArmQueue::new(), slots: AtomicUsize::new(slots), leaves: Mutex::new(Vec::new()) };
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        region_merge::publish_arm_errors(&mut root, errors, &solver, &mut Fraction::one(), &sink, &shared);
+    }));
+    assert_eq!(sink.slots.load(Ordering::Relaxed), slots);
+    let observed: Vec<_> = sink
+        .leaves
+        .into_inner()
+        .unwrap()
+        .into_iter()
+        .map(|task| {
+            let Some((_, Event::Fork(id, _, index, _))) = task.fork_cond else { unreachable!() };
+            (id, index, task.frame.arm_error.unwrap().1, task.frame.execution_limit_state.path_signature())
+        })
+        .collect();
+    assert!(observed.iter().all(|(_, _, certified, _)| *certified));
+    let count = workers.lock().unwrap().len();
+    let drops = shared.execution_stats.solver_path_drops_since(0);
+    let panic = outcome.err().map(|panic| {
+        panic
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| panic.downcast_ref::<&str>().map(|text| (*text).to_owned()))
             .unwrap()
-            .into_iter()
-            .map(|task| {
-                let Some((_, Event::Fork(id, _, index, _))) = task.fork_cond else { unreachable!() };
-                (id, index, task.frame.arm_error.unwrap().1, task.frame.execution_limit_state.path_signature())
-            })
-            .collect();
-        assert!(observed.iter().all(|(_, _, certified, _)| *certified));
-        let count = workers.lock().unwrap().len();
-        let drops = shared.execution_stats.solver_path_drops_since(0);
-        let panic = outcome.err().map(|panic| {
-            panic
-                .downcast_ref::<String>()
-                .cloned()
-                .or_else(|| panic.downcast_ref::<&str>().map(|text| (*text).to_owned()))
-                .unwrap()
-        });
-        (observed, count, drops.count, drops.first_locations, panic)
-    };
+    });
+    CertificationOutcome { leaves: observed, workers: count, drops, panic }
+}
 
+#[test]
+fn region_arm_error_certification_requires_explicit_threshold() {
+    if !certification_fixture_child("region_arm_error_certification_requires_explicit_threshold") {
+        return;
+    }
+    assert!(!ExecutionLimits::default().arms_as_tasks);
+    let run =
+        |config| run_error_certification_fixture(72, 3, crate::config::PathFailureAction::Dead, false, false, config);
+    let serial = run("[path_merge]\narms_as_tasks = true");
+    let parallel = run("[path_merge]\narms_as_tasks = true\n[path_merge.parallel]\nmin_error_leaves = 16");
+    assert_eq!(serial.panic, None);
+    assert_eq!(parallel.panic, None);
+    assert_eq!(serial.leaves.len(), 48);
+    assert_eq!(serial.leaves, parallel.leaves);
+    assert_eq!(serial.workers, 0, "省略门槛时，根错误叶应串行认证");
+    assert!(parallel.workers > 0, "显式降低门槛后应启动认证线程");
+}
+
+/// 用同一根的失败点交付，覆盖认证为真及被丢弃的叶，并保留实际发布次序。
+#[test]
+fn region_arm_error_certification_preserves_leaf_order() {
+    if !certification_fixture_child("region_arm_error_certification_preserves_leaf_order") {
+        return;
+    }
+    use crate::config::PathFailureAction;
+
+    let run = |leaves, slots, policy, inject, worker_panic| {
+        run_error_certification_fixture(
+            leaves,
+            slots,
+            policy,
+            inject,
+            worker_panic,
+            "[path_merge]\narms_as_tasks = true\n[path_merge.parallel]\nmin_error_leaves = 64",
+        )
+    };
     let serial = run(72, 0, PathFailureAction::Dead, false, false);
     let parallel = run(72, 3, PathFailureAction::Dead, false, false);
     assert_eq!(
-        serial.0.iter().map(|(_, index, _, _)| *index).collect::<Vec<_>>(),
+        serial.leaves.iter().map(|(_, index, _, _)| *index).collect::<Vec<_>>(),
         (0..72).filter(|index| index % 3 != 1).collect::<Vec<_>>()
     );
-    assert_eq!(parallel.0, serial.0);
-    assert_eq!((serial.1, serial.2, parallel.2), (0, 0, 0));
-    assert_eq!((serial.4, parallel.4), (None, None));
-    assert!(parallel.1 > 0, "大根必须有远端认证线程");
-    assert_eq!(run(12, 3, PathFailureAction::Dead, false, false).1, 0);
+    assert_eq!(parallel.leaves, serial.leaves);
+    assert_eq!((serial.workers, serial.drops.count, parallel.drops.count), (0, 0, 0));
+    assert_eq!((serial.panic, parallel.panic), (None, None));
+    assert!(parallel.workers > 0, "大根必须有远端认证线程");
+    assert_eq!(run(12, 3, PathFailureAction::Dead, false, false).workers, 0);
 
     let serial = run(72, 0, PathFailureAction::Dead, true, false);
     let parallel = run(72, 3, PathFailureAction::Dead, true, false);
-    assert_eq!(parallel.0, serial.0);
-    assert_eq!(parallel.2, 2);
-    assert_eq!(parallel.3, serial.3);
+    assert_eq!(parallel.leaves, serial.leaves);
+    assert_eq!(parallel.drops.count, 2);
+    assert_eq!(parallel.drops.first_locations, serial.drops.first_locations);
     assert_eq!(
-        parallel.3.iter().map(|drop| drop.reason_unknown.as_deref()).collect::<Vec<_>>(),
+        parallel.drops.first_locations.iter().map(|drop| drop.reason_unknown.as_deref()).collect::<Vec<_>>(),
         [Some("timeout"), Some("canceled")]
     );
-    assert_eq!((serial.4, parallel.4), (None, None));
+    assert_eq!((serial.panic, parallel.panic), (None, None));
 
     let serial = run(72, 0, PathFailureAction::Panic, true, false);
     let parallel = run(72, 3, PathFailureAction::Panic, true, false);
-    assert_eq!(parallel.0, serial.0);
-    assert_eq!(parallel.4, serial.4);
-    assert!(parallel.4.unwrap().contains("reason_unknown=Some(\"timeout\")"));
+    assert_eq!(parallel.leaves, serial.leaves);
+    assert_eq!(parallel.panic, serial.panic);
+    assert!(parallel.panic.unwrap().contains("reason_unknown=Some(\"timeout\")"));
     let panicked = run(72, 3, PathFailureAction::Dead, false, true);
-    assert!(panicked.4.unwrap().contains("认证线程注入 panic"));
+    assert!(panicked.panic.unwrap().contains("认证线程注入 panic"));
 }

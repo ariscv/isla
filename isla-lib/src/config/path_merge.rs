@@ -91,13 +91,20 @@ impl Default for PathMergeSolverConfig {
 pub struct PathMergeParallelConfig {
     /// 区域内的 IR 指令数加直接被调函数的大小，0 关闭门槛。
     pub min_arm_instructions: usize,
-    /// 根区域至少累积多少错误叶才向空闲线程分发认证。
+    /// B 正文至少达到入口与导入 CPU 的百分比。0 关闭自适应门槛。
+    pub arm_cost_ratio_percent: u32,
+    /// 根区域至少累积多少错误叶才向空闲线程分发认证。缺省为 `isize::MAX`，实际走串行认证。
+    /// 两轮 LOAD 600 秒对照中，相对关闭 P-G 的 CPU 比值由并行认证的 1.19–1.20 降至 1.00–1.02。
     pub min_error_leaves: std::num::NonZeroUsize,
 }
 
 impl Default for PathMergeParallelConfig {
     fn default() -> Self {
-        Self { min_arm_instructions: 32, min_error_leaves: std::num::NonZeroUsize::new(64).unwrap() }
+        Self {
+            min_arm_instructions: 32,
+            arm_cost_ratio_percent: 200,
+            min_error_leaves: std::num::NonZeroUsize::new(isize::MAX as usize).unwrap(),
+        }
     }
 }
 
