@@ -2,6 +2,7 @@
 use super::*;
 
 mod arithmetic;
+mod batch;
 pub(super) mod ground;
 mod guard_conflict;
 mod prefix_index;
@@ -659,9 +660,16 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                             .ctx
                             .solver_options
                             .finite_domain_ground_eval
-                            .then(|| ground::eval_assertion(definition, |sym| projected[&sym].as_ref(), |_| None))
+                            .then(|| {
+                                let assigned = |sym: Sym| projected[&sym].as_ref();
+                                if self.ctx.has_unbounded_rewriting() {
+                                    ground::eval_projected(definition, assigned)
+                                } else {
+                                    ground::eval_assertion(definition, assigned, |_| None).map(Exp::Bool)
+                                }
+                            })
                             .flatten();
-                        direct.map(Exp::Bool).or_else(|| {
+                        direct.or_else(|| {
                             let mut ast = self.translate_exp(&expression);
                             ast.finite_bits().or_else(|| ast.structural_bool().map(Exp::Bool))
                         })

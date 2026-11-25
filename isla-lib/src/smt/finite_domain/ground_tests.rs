@@ -372,3 +372,31 @@ fn ground_assertions_respect_overlapping_ast_replacements() {
         );
     }
 }
+
+#[test]
+fn projected_ground_bitvectors_preserve_width_without_native_simplification() {
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let info = SourceLoc::unknown();
+    let mut rng = 0x67e1_047a_5d99_11f3;
+    let mut native_calls = 0;
+    for width in [8, 64, 65, 129] {
+        let x = solver.declare_bitvector(width, info);
+        let addend = constant(width, &mut rng);
+        let formula = Bvadd(Box::new(Var(x)), Box::new(addend.clone()));
+        let target = solver.define_const(formula, info);
+        let prefix = PathConditions::new(&solver).unwrap();
+        for _ in 0..32 {
+            let value = constant(width, &mut rng);
+            let mut expected = solver.translate_exp(&Bvadd(Box::new(value.clone()), Box::new(addend.clone())));
+            expected.simplify_native();
+            let expected = expected.finite_bits().unwrap();
+            let mut projected = HashMap::from([(x, Some(value))]);
+            let before = AST_SIMPLIFY_CALLS.get();
+            assert_eq!(solver.project_finite_definition(target, &prefix, &mut projected), Some(expected));
+            native_calls += AST_SIMPLIFY_CALLS.get() - before;
+        }
+    }
+    assert_eq!(native_calls, 0, "操作数已知时可以直接计算投影的位向量");
+}

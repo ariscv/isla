@@ -250,3 +250,132 @@ fn verified_small_fixpoint_is_shared_by_plain_simplification() {
     assert_eq!(term.z3_ast, raw);
     assert_eq!(AST_SIMPLIFY_CALLS.get(), 0);
 }
+
+#[test]
+fn first_read_reuses_terminal_choices_and_preserves_native_results() {
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let left = variable(&mut solver, 8);
+    let right = variable(&mut solver, 8);
+    let guard = variable(&mut solver, 32);
+    let low = guard.extract(3, 1);
+    let choices: Vec<_> = (0..8).map(|i| low.mk_eq(&Ast::mk_bv_u64(&ctx, 3, i))).collect();
+    let mut rng = 0xf010_9c21_u32;
+    let mut native_calls = 0;
+    for _ in 0..768 {
+        rng ^= rng << 13;
+        rng ^= rng >> 17;
+        rng ^= rng << 5;
+        let condition = &choices[(rng & 7) as usize];
+        let a = if rng & 8 == 0 { &left } else { &right };
+        let b = Ast::mk_bv_u64(&ctx, 8, (rng >> 4 & 3) as u64);
+        let input = condition.ite(a, &b);
+        let mut native = input.clone();
+        native.simplify_native();
+        let before = AST_SIMPLIFY_CALLS.get();
+        let binding = ConstBinding::new(input.clone(), true, true);
+        let result = binding.ast();
+        native_calls += AST_SIMPLIFY_CALLS.get() - before;
+        assert_eq!(binding.raw_ast().z3_ast, input.z3_ast);
+        assert_eq!(result.z3_ast, native.z3_ast);
+        equivalent(&ctx, &input, &result);
+    }
+    assert_eq!(native_calls, 8, "768 次首次读只需化简八个不同选择条件");
+}
+
+#[test]
+fn first_read_preserves_staged_literal_recognition() {
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let a = variable(&mut solver, 8);
+    let b = variable(&mut solver, 8);
+    let p = a.mk_bvsub(&b).mk_eq(&a.mk_bvadd(&Ast::mk_bv_u64(&ctx, 8, 3)));
+    let mut q = p.clone();
+    q.simplify_native();
+    q.simplify_native();
+    let binding = ConstBinding::new(p.clone(), true, false);
+    let staged = ConstBinding::new(binding.ast().mk_eq(&q), true, false).ast();
+    let mut reference = p.clone();
+    reference.simplify_native();
+    reference = reference.mk_eq(&q);
+    reference.simplify_native();
+    assert_eq!(staged.get_bool_value(), reference.get_bool_value());
+    assert_eq!(staged.get_bool_value(), Some(true));
+    equivalent(&ctx, &p.mk_eq(&q), &staged);
+}
+
+#[test]
+fn first_read_terminal_choices_release_their_branches() {
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let [a, b, c] = std::array::from_fn(|_| {
+        let sym = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+        solver.translate_exp(&Exp::Var(sym))
+    });
+    let [x, y, z, w] = std::array::from_fn(|_| variable(&mut solver, 8));
+    let left = ConstBinding::new(a.ite(&x, &y), true, false).ast();
+    let right = ConstBinding::new(b.ite(&z, &w), true, false).ast();
+    let cut = c.ite(&left, &right).extract(2, 0);
+    // 两个内层 ITE 仍被引用时，原生 extract 保持在树根。
+    let kept = ConstBinding::new(cut.clone(), true, false).ast();
+    assert_eq!(kept.z3_ast, cut.z3_ast);
+    drop((left, right));
+    // 释放内层引用后必须重新运行原生 extract，允许它下推到叶端。
+    let freed = ConstBinding::new(cut.clone(), true, false).ast();
+    let mut reference = cut.clone();
+    reference.simplify_native();
+    assert_ne!(kept.z3_ast, freed.z3_ast);
+    assert_eq!(reference.z3_ast, freed.z3_ast);
+    equivalent(&ctx, &cut, &freed);
+}
+
+#[test]
+fn definition_and_branch_consume_only_the_bits_they_need() {
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let info = SourceLoc::unknown();
+    let a = solver.declare_bitvector(64, info);
+    let b = solver.declare_bitvector(64, info);
+    let data = solver.define_const(Exp::Bvadd(Box::new(Exp::Var(a)), Box::new(Exp::Var(b))), info);
+    let wide = solver.define_const(Exp::ZeroExtend(128, Box::new(Exp::Var(data))), info);
+    let mut calls = AST_SIMPLIFY_CALLS.get();
+    let high = solver.define_const(Exp::Extract(191, 64, Box::new(Exp::Var(wide))), info);
+    let value = solver.translate_exp(&Exp::Var(high));
+    assert_eq!(value.get_numeral_u64().unwrap(), 0);
+    assert_eq!(AST_SIMPLIFY_CALLS.get(), calls, "只取零扩展区，不需要化简低位");
+    let raw = solver.decls[&wide].raw_ast().extract(191, 64);
+    equivalent(&ctx, &value, &raw);
+
+    let slice = Exp::Extract(19, 12, Box::new(Exp::Var(a)));
+    let check = Exp::Eq(Box::new(slice), Box::new(smtlib::bits64(37, 8)));
+    let predicate = solver.define_const(check, info);
+    calls = AST_SIMPLIFY_CALLS.get();
+    assert_eq!(solver.branch_structural_bool(&Exp::Var(predicate)), None);
+    assert_eq!(AST_SIMPLIFY_CALLS.get(), calls, "切片等于常量既可真也可假");
+    // 展开表达式的消费者仍取得原生残余。
+    let mut expected = solver.decls[&predicate].raw_ast();
+    expected.simplify_native();
+    assert_eq!(solver.translate_exp(&Exp::Var(predicate)).z3_ast, expected.z3_ast);
+}
+
+#[test]
+fn native_assert_consumes_boolean_binding_without_forcing_it() {
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let loc = SourceLoc::unknown();
+    let a = solver.declare_bitvector(8, loc);
+    let b = solver.declare_bitvector(8, loc);
+    let source =
+        Exp::Eq(Box::new(Exp::Bvsub(Box::new(Exp::Var(a)), Box::new(Exp::Var(b)))), Box::new(smtlib::bits64(7, 8)));
+    let p = solver.define_const(source, loc);
+    let before = AST_SIMPLIFY_CALLS.get();
+    solver.assert(Exp::Var(p));
+    solver.assert(Exp::Not(Box::new(Exp::Var(p))));
+    assert_eq!(AST_SIMPLIFY_CALLS.get(), before, "原生断言可直接消费绑定的布尔表达式");
+    assert_eq!(unsafe { Z3_solver_check(ctx.z3_ctx, solver.z3_solver) }, Z3_L_FALSE);
+}

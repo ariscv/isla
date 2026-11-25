@@ -228,6 +228,11 @@ impl ArmFacts {
             | ZeroExtend(..) | Extract(..) | Concat(..) | Bvult(..) | Bvule(..) | Bvugt(..) | Bvuge(..) | Bvslt(..)
             | Bvsle(..) | Bvsgt(..) | Bvsge(..) => {
                 let value = exp.map_var(&mut |s| known(s))?;
+                if solver.ctx.has_unbounded_rewriting() && solver.ctx.solver_options.finite_domain_ground_eval {
+                    if let Some(concrete) = ground::eval_projected(&value, |_| None) {
+                        return Ok(concrete);
+                    }
+                }
                 let mut ast = solver.translate_exp(&value);
                 ast.finite_bits().or_else(|| ast.structural_bool().map(Bool)).ok_or(None)
             }

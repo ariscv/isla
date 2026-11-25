@@ -71,6 +71,18 @@ impl<B: BV> Solver<'_, B> {
     }
 
     pub(super) fn branch_structural_bool(&self, exp: &Exp<Sym>) -> Option<bool> {
+        if self.ctx.has_unbounded_rewriting() && !self.replaying_arm_entry {
+            if let Some((sym, positive)) = dedup::literal(exp) {
+                let binding = &self.decls[&sym];
+                let current = binding.current_ast();
+                if let Some(truth) = binding.known_boolean(&current) {
+                    return Some(truth == positive);
+                }
+                if current.is_open_branch_atom() {
+                    return None;
+                }
+            }
+        }
         let mut value = self.translate_exp(exp);
         if dedup::literal(exp).is_some() && self.ctx.has_unbounded_rewriting() && value.is_open_branch_atom() {
             return None;
@@ -241,7 +253,7 @@ impl Ast<'_> {
         self.get_bool_value().or_else(|| unsafe { structural_comparison(self.ctx, self.z3_ast) })
     }
 
-    fn boolean_constant_rewrite(&self) -> Option<bool> {
+    pub(super) fn boolean_constant_rewrite(&self) -> Option<bool> {
         // 这些规则的原生残余必为 true/false。即使另一侧含符号值也可判定。
         unsafe {
             let z3 = self.ctx.z3_ctx;

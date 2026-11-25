@@ -26,21 +26,44 @@ impl<'ctx> ConstBinding<'ctx> {
         self.replay_ast.clone().unwrap_or_else(|| self.current_ast())
     }
 
-    fn current_ast(&self) -> Ast<'ctx> {
+    pub(super) fn current_ast(&self) -> Ast<'ctx> {
         let z3_ast = self.value.get();
         // 绑定与调用方各自持有一个引用，化简可以独立替换任一引用。
         unsafe { Z3_inc_ref(self.ctx.z3_ctx, z3_ast) };
         Ast { ctx: self.ctx, z3_ast }
     }
 
+    // 只写回已证明与原生首次化简同形的布尔字面量。取反属于调用者，
+    // 原始重放表达式和已消费过的复杂残余各自保留原来的结构。
+    pub(super) fn known_boolean(&self, current: &Ast<'ctx>) -> Option<bool> {
+        if let Some(value) = current.get_bool_value() {
+            return Some(value);
+        }
+        if !self.pending.get() {
+            return None;
+        }
+        let truth = current.boolean_constant_rewrite()?;
+        self.store_first_read(&Ast::mk_bool(self.ctx, truth));
+        Some(truth)
+    }
+
+    fn store_first_read(&self, ast: &Ast<'ctx>) {
+        unsafe {
+            Z3_inc_ref(self.ctx.z3_ctx, ast.z3_ast);
+            Z3_dec_ref(self.ctx.z3_ctx, self.value.replace(ast.z3_ast));
+        }
+        self.pending.set(false);
+    }
+
     pub(super) fn ast(&self) -> Ast<'ctx> {
         let mut ast = self.current_ast();
-        if self.pending.replace(false) {
-            ast.simplify_small();
-            unsafe {
-                Z3_inc_ref(self.ctx.z3_ctx, ast.z3_ast);
-                Z3_dec_ref(self.ctx.z3_ctx, self.value.replace(ast.z3_ast));
+        if self.pending.get() {
+            if let Some(choice) = ast.simplify_terminal_choice() {
+                ast = choice;
+            } else {
+                ast.simplify_small();
             }
+            self.store_first_read(&ast);
         }
         ast
     }
@@ -61,6 +84,27 @@ impl Drop for ConstBinding<'_> {
 mod tests {
     use super::*;
     use crate::smt::{configure_tastic, Config, Tactic};
+
+    #[test]
+    fn branch_read_writes_proven_literal_but_keeps_the_replay_expression() {
+        use crate::bitvector::b64::B64;
+        use crate::smt::{Exp, Solver, SourceLoc, Ty, AST_SIMPLIFY_CALLS};
+        configure_tastic(Tactic::Qfaufbv);
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let sym = solver.declare_const(Ty::Bool, SourceLoc::unknown());
+        let open = solver.translate_exp(&Exp::Var(sym));
+        let raw = open.mk_or(&Ast::mk_bool(&ctx, true));
+        let assigned = solver.fresh();
+        solver.bind_constant(assigned, ConstBinding::new(raw.clone(), true, true));
+        let before = AST_SIMPLIFY_CALLS.get();
+        assert_eq!(solver.branch_structural_bool(&Exp::Not(Box::new(Exp::Var(assigned)))), Some(false));
+        let binding = &solver.decls[&assigned];
+        assert_eq!(binding.raw_ast().z3_ast, raw.z3_ast);
+        assert_eq!(binding.current_ast().get_bool_value(), Some(true));
+        assert_eq!(binding.ast().get_bool_value(), Some(true));
+        assert_eq!(AST_SIMPLIFY_CALLS.get() - before, 0);
+    }
 
     #[test]
     fn literal_binding_is_ready_at_definition_time() {
