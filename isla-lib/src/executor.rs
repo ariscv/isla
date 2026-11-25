@@ -1358,6 +1358,11 @@ trait ForkSink<'ir, 'task, B: BV> {
         None
     }
 
+    /// 恢复另一编码入口的同一段续执行，不产生 Sail Fork 事件。
+    fn submit_entry_continuation(&self, task: Task<'ir, 'task, B>) {
+        self.submit(task);
+    }
+
     /// 错误叶跟随祖先区域事务，直到根区域提交才进入任务队列。
     fn submit_consumer_error(&self, task: Task<'ir, 'task, B>) {
         self.submit(task);
@@ -2461,6 +2466,38 @@ fn run_loop_inner<'ir, 'task, B: BV>(
         if timed_out {
             report_path_timeout(tid, timeout, frame, shared_state);
             return Err(ExecError::Timeout);
+        }
+        if frame.at_shared_entry_boundary() {
+            assert!(frame.region_execution.is_none(), "共用访存返回后应回到原执行入口");
+            // 原符号在共用访存结束前未参与执行。恢复入口身份和约束后继续正常执行，
+            // 这次调度不产生 Sail 分支或 guard，也不消耗分支额度。
+            let (mut unsigned, signedness) = frame.detach_unsigned_entry().unwrap();
+            let (signed_sat, unsigned_sat) = solver.shared_entry_feasibility(signedness);
+            let predicate = smtlib::Exp::Var(signedness);
+            match (signed_sat.is_sat()?, unsigned_sat.is_sat()?) {
+                (false, false) => return Ok(Run::Dead),
+                (true, false) => solver.assert(smtlib::Exp::Not(Box::new(predicate))),
+                (false, true) => {
+                    *frame = unsigned;
+                    solver.assert(predicate);
+                }
+                (true, true) => {
+                    let info = SourceLoc::unknown();
+                    unsigned.capture_path_smt_stats();
+                    let unsigned_checkpoint = checkpoint(solver).with_assertion(predicate.clone(), info);
+                    solver.assert(smtlib::Exp::Not(Box::new(predicate)));
+                    task_fraction.halve();
+                    fork_sink.submit_entry_continuation(Task {
+                        id: task_id,
+                        fraction: task_fraction.clone(),
+                        frame: freeze_frame(&unsigned),
+                        checkpoint: unsigned_checkpoint,
+                        fork_cond: None,
+                        state: task_state,
+                        stop_conditions,
+                    });
+                }
+            }
         }
         path_account::step(frame.function_name, frame.pc);
 

@@ -35,6 +35,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+mod entry;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FixedInstruction {
     pub bits: u64,
@@ -1719,6 +1721,14 @@ struct BatchOutcome {
     encdec_guard_rejects: usize,
 }
 
+fn can_share_load_entries(limits: &ExecutionLimits, has_case_budget: bool) -> bool {
+    // 旧的有限配额按路径签名选样；各原路径也各自扣除控制流预算。
+    !has_case_budget
+        && !limits.has_control_flow_budget()
+        && limits.max_region_fragments.is_none()
+        && limits.on_limit_reached != Some(isla_lib::executor::LimitBehavior::Concretize)
+}
+
 fn run_symbolic_execute_with_target<'ir, B: BV>(
     target: &mut dyn RISCV<B>,
     instruction_name: &str,
@@ -1910,8 +1920,22 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     // 创建checkpoint，包含符号化变量
     let cp = checkpoint(&mut solver);
     // 复用真实编码映射的载荷和守卫；执行入口只接受当前配置中可编码的指令域。
-    let entry_encodings = encoding_paths(&fun_args[0], shared_state, &symbolic_regs, lets, cp)?;
-    if entry_encodings.is_empty() {
+    let entry_encodings = encoding_paths(&fun_args[0], shared_state, &symbolic_regs, lets, cp.clone())?;
+    let encoding_roots = entry_encodings.len();
+    let rv64_memory =
+        target.arch_name() == "riscv" && target.xlen() == "64" && matches!(instruction_name, "zLOAD" | "zSTORE");
+    let shared_load = if rv64_memory
+        && instruction_name == "zLOAD"
+        && fixed_inputs.instruction.is_none()
+        && !solver.no_smt()
+        && can_share_load_entries(execution_limits, case_quota.is_some() || case_limit.is_some())
+    {
+        entry::shared_load(&fun_args[0], shared_state)
+    } else {
+        None
+    };
+    let entries = entry::plan(entry_encodings, &cp, shared_load)?;
+    if entries.is_empty() {
         return Ok(BatchOutcome {
             items: Vec::new(),
             summary: SolveSummary { inapplicable_batches: 1, ..SolveSummary::default() },
@@ -1938,7 +1962,7 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
     let continuations = Arc::new(Mutex::new(Vec::new()));
     let queued_continuations = continuations.clone();
     let target = &*target;
-    let collector: &ScopedCollector<'ir, '_, B, Mutex<SolveCollectorState>> =
+    let collect_path: &ScopedCollector<'ir, '_, B, Mutex<SolveCollectorState>> =
         &|thread, task_id, mut exec_result, shared_state, mut solver, collected| {
             let path_profile = profile_paths.then(|| {
                 let frame = match &exec_result {
@@ -3022,6 +3046,50 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
             }
         };
 
+    let collector: &ScopedCollector<'ir, '_, B, Mutex<SolveCollectorState>> =
+        &|thread, task_id, mut outcome, shared_state, mut solver, collected| {
+            // 在访存尚未返回时终结的已完成路径与错误叶也各有两个原编码身份。
+            // 其他中断和超时继续走执行错误处理。
+            let twin = match &mut outcome {
+                Ok((Run::Finished(value), frame)) => frame
+                    .detach_unsigned_entry()
+                    .map(|(unsigned, sign)| (Ok((Run::Finished(value.clone()), unsigned)), sign)),
+                Err((error, frame)) if frame.arm_error().is_some() => {
+                    frame.detach_unsigned_entry().map(|(unsigned, sign)| (Err((error.clone(), unsigned)), sign))
+                }
+                _ => None,
+            };
+            if let Some((unsigned, sign)) = twin {
+                let (signed_sat, unsigned_sat) = solver.shared_entry_feasibility(sign);
+                let signed_frame = match &outcome {
+                    Ok((_, frame)) | Err((_, frame)) => frame,
+                };
+                let unsigned_frame = match &unsigned {
+                    Ok((_, frame)) | Err((_, frame)) => frame,
+                };
+                let recorder = ErrorRecorder {
+                    collected,
+                    reporter: timeout_reporter,
+                    clause: instruction_name,
+                    on_unknown: solver.exploration_on_unknown(),
+                };
+                let keep_unsigned = recorder.terminal_path_is_sat(unsigned_sat, unsigned_frame, shared_state);
+                let keep_signed = recorder.terminal_path_is_sat(signed_sat, signed_frame, shared_state);
+                let predicate = Exp::Var(sign);
+                if keep_unsigned {
+                    let unsigned_checkpoint =
+                        checkpoint(&mut solver).with_assertion(predicate.clone(), SourceLoc::unknown());
+                    let unsigned_solver = Solver::from_checkpoint(solver.context(), unsigned_checkpoint);
+                    collect_path(thread, task_id, unsigned, shared_state, unsigned_solver, collected);
+                }
+                if !keep_signed {
+                    return;
+                }
+                solver.assert(Exp::Not(Box::new(predicate)));
+            }
+            collect_path(thread, task_id, outcome, shared_state, solver, collected);
+        };
+
     let function = shared_state.symtab.lookup("zexecute");
     let (args, ret_ty, instrs) = shared_state.functions.get(&function).unwrap();
     let mut initial_frame = LocalFrame::new(function, args, ret_ty, Some(&fun_args), instrs);
@@ -3031,15 +3099,25 @@ fn run_symbolic_execute_with_target<'ir, B: BV>(
         initial_frame.set_memory(memory);
     }
     let exploration_started = std::time::Instant::now();
-    let roots = entry_encodings.len();
-    let mut tasks = entry_encodings
+    let mut tasks = entries
         .into_iter()
-        .enumerate()
-        .map(|(index, (_, encoding_checkpoint))| {
-            initial_frame.clone().with_path_root(index, roots).task_with_checkpoint(
-                TaskId::fresh(),
+        .map(|entry| {
+            let id = TaskId::fresh();
+            if rv64_memory {
+                log!(
+                    log::SYM_EXEC,
+                    &format!(
+                        "solve_state: {instruction_name} ENTRY_TASK task={} encoding={} twin={:?}",
+                        id.as_usize(),
+                        entry.index,
+                        entry.twins.as_ref().map(|twin| twin.unsigned_index),
+                    )
+                );
+            }
+            entry.with_frame(initial_frame.clone(), encoding_roots).task_with_checkpoint(
+                id,
                 &task_state,
-                encoding_checkpoint,
+                entry.checkpoint,
             )
         })
         .collect();
@@ -5745,6 +5823,15 @@ mod tests {
         let finalized = finalize_cases(cases, &None);
         assert_eq!(finalized.len(), 1, "超时路径不能冒充可重放见证");
         assert_eq!(finalized[0].test_ins, "sd x1, 0(x2)");
+    }
+
+    #[test]
+    fn finite_budgets_preserve_encoding_roots() {
+        let limits = ExecutionLimits::default();
+        assert!(can_share_load_entries(&limits, false));
+        assert!(!can_share_load_entries(&limits, true));
+        assert!(!can_share_load_entries(&limits.clone().with_max_forks_per_path(1), false));
+        assert!(!can_share_load_entries(&limits.with_limit_behavior(LimitBehavior::Concretize), false));
     }
 
     #[test]

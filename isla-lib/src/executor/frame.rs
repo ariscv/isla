@@ -38,7 +38,7 @@ use std::sync::Arc;
 
 use crate::bitvector::BV;
 use crate::error::{ExecError, SmtError, Z3Timeout};
-use crate::executor::execution_limits::ExecutionLimitPathState;
+use crate::executor::execution_limits::{ExecutionLimitPathState, SharedEntry};
 use crate::executor::path_timing::{PathTimeTotals, PathTiming};
 use crate::executor::stats::path_account;
 use crate::executor::task::{Task, TaskId, TaskState, WriteSet};
@@ -547,6 +547,36 @@ impl<'ir, B: BV> LocalFrame<'ir, B> {
             state.advance_path_signature(index & (1 << bit) != 0);
         }
         self
+    }
+
+    /// 共享访存期间按同一方向递推两套原编码入口签名。
+    pub fn with_shared_path_root(
+        self,
+        signed: usize,
+        unsigned: usize,
+        roots: usize,
+        signedness: Sym,
+        resume_at: (Name, usize),
+    ) -> Self {
+        assert_ne!(signed, unsigned, "共享入口的原编号必须不同");
+        let unsigned_signature = self.clone().with_path_root(unsigned, roots).path_signature();
+        let mut frame = self.with_path_root(signed, roots);
+        cost::make_mut(&mut frame.execution_limit_state).shared_entry =
+            Some(SharedEntry { unsigned_signature, signedness, resume_at });
+        frame
+    }
+
+    pub(super) fn at_shared_entry_boundary(&self) -> bool {
+        self.execution_limit_state.shared_entry.is_some_and(|entry| entry.resume_at == (self.function_name, self.pc))
+    }
+
+    /// 恢复两条原路径身份，沿用共同前缀的所有守卫、寄存器与内存状态。
+    pub fn detach_unsigned_entry(&mut self) -> Option<(Self, Sym)> {
+        self.execution_limit_state.shared_entry?;
+        let entry = cost::make_mut(&mut self.execution_limit_state).shared_entry.take().unwrap();
+        let mut unsigned = self.clone();
+        cost::make_mut(&mut unsigned.execution_limit_state).set_path_signature(entry.unsigned_signature);
+        Some((unsigned, entry.signedness))
     }
 
     pub fn regs_mut(&mut self) -> &mut RegisterBindings<'ir, B> {
@@ -1085,6 +1115,31 @@ pub(super) mod tests {
             assert_counting_read(&parent, 2);
             assert_counting_read(&unfreeze_frame(&frozen.clone()), 1);
         }
+    }
+
+    #[test]
+    fn shared_entry_restores_both_root_signatures_after_forks_and_resume() {
+        let instrs: &[Instr<Name, B64>] = &[];
+        let name = Name::from_u32(0);
+        let sign = Sym::from_u32(7);
+        let initial = LocalFrame::new(name, &[], &Ty::Unit, None, instrs);
+        let mut shared = initial.clone().with_shared_path_root(0, 4, 7, sign, (name, 0));
+        let mut signed = initial.clone().with_path_root(0, 7);
+        let mut unsigned = initial.with_path_root(4, 7);
+        for frame in [&mut shared, &mut signed, &mut unsigned] {
+            for direction in [true, true, false, true] {
+                cost::make_mut(&mut frame.execution_limit_state).advance_path_signature(direction);
+            }
+        }
+        let mut resumed = unfreeze_frame(&freeze_frame(&shared));
+        assert!(resumed.at_shared_entry_boundary());
+        let (right, unsigned_sign) = resumed.detach_unsigned_entry().expect("访存后须恢复无符号入口");
+        assert_eq!(unsigned_sign, sign);
+        assert_eq!(resumed.path_signature(), signed.path_signature());
+        assert_eq!(right.path_signature(), unsigned.path_signature());
+        assert_eq!(resumed.forks(), signed.forks());
+        assert_eq!(right.forks(), unsigned.forks());
+        assert!(!resumed.at_shared_entry_boundary() && !right.at_shared_entry_boundary());
     }
 
     #[test]

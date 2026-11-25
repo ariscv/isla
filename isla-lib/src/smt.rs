@@ -423,6 +423,51 @@ impl<B: BV> Checkpoint<B> {
         }
     }
 
+    /// 将新增约束及输出投影到共同基点的符号，供不同编码分支比较。
+    /// 编码若引入新的自由符号，则没有可直接在基点重放的公式。
+    pub fn project_smt_suffix(&self, base: &Self, output: Exp<Sym>) -> Option<(Exp<Sym>, Exp<Sym>)> {
+        let mut definitions = std::collections::HashMap::new();
+        let mut assertions = Vec::new();
+        let mut cursor = &self.trace;
+        while !Arc::ptr_eq(cursor, &base.trace) {
+            let segment = cursor.as_ref().as_ref().expect("候选 checkpoint 缺少共同基点祖先");
+            for event in segment.head_events() {
+                match event {
+                    Event::Smt(Def::DefineConst(sym, exp), ..) => {
+                        definitions.insert(*sym, exp);
+                    }
+                    Event::Smt(Def::Assert(exp), ..) => assertions.push(exp),
+                    _ => (),
+                }
+            }
+            cursor = &segment.tail;
+        }
+        let guard = assertions.into_iter().rev().fold(Exp::Bool(true), |guard, assertion| {
+            Exp::And(Box::new(assertion.clone_expand(&definitions)), Box::new(guard))
+        });
+        let output = output.clone_expand(&definitions);
+        let is_projected = |exp: &Exp<Sym>| {
+            let mut valid = true;
+            exp.clone().modify(&mut |part| match part {
+                Exp::Var(sym) | Exp::App(sym, _) if sym.as_u32() >= base.next_var => valid = false,
+                _ => (),
+            });
+            valid
+        };
+        (is_projected(&guard) && is_projected(&output)).then_some((guard.eval(), output))
+    }
+
+    /// 把一条已验证的入口约束加到共享检查点，保留公共迹与符号声明。
+    pub fn with_assertion(&self, assertion: Exp<Sym>, info: SourceLoc) -> Self {
+        let mut trace = Trace::new();
+        trace.checkpoints = self.num;
+        trace.tail = self.trace.clone();
+        trace.head.push(Event::Smt(Def::Assert(assertion), DefAttrs::default(), info));
+        let mut point = trace.checkpoint(self.next_var);
+        point.cycles = self.cycles;
+        point
+    }
+
     /// 将辅助 checkpoint 从 base 开始新增的事件接到完整执行 checkpoint。
     pub fn with_suffix_from(&self, base: &Self, candidate: &Self) -> Self {
         assert_eq!(self.next_var, base.next_var, "执行与辅助基点的符号编号不一致");
@@ -3792,6 +3837,37 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         (!self.ctx.validation).then_some(self.ctx.solver_options.on_unknown)
     }
 
+    /// 恢复两个原编码时，只额外检查依赖符号位的路径。其余路径的两支与公共前缀
+    /// 等可满足，沿用正常终态或错误叶的可行性检查。
+    pub fn shared_entry_feasibility(&mut self, sign: Sym) -> (SmtResult, SmtResult) {
+        assert!(self.savepoints.is_empty(), "共享入口必须在区域事务提交后恢复");
+        let unsigned = Exp::Var(sign);
+        if let Some(value) = self.structural_bool(&unsigned) {
+            return if value { (Unsat, Sat) } else { (Sat, Unsat) };
+        }
+        let mut needed = HashSet::default();
+        let mut depends_on_sign = false;
+        for event in self.trace.events_rev() {
+            match event {
+                Event::Smt(Def::Assert(assertion), ..) => assertion.collect_variables(&mut needed),
+                Event::Smt(Def::DefineConst(sym, exp), ..) if needed.remove(sym) => exp.collect_variables(&mut needed),
+                Event::Smt(Def::DeclareConst(sym, _), ..) if *sym == sign => break,
+                _ => (),
+            }
+            if needed.contains(&sign) {
+                depends_on_sign = true;
+                break;
+            }
+        }
+        if !depends_on_sign {
+            return (Sat, Sat);
+        }
+
+        let info = SourceLoc::unknown();
+        let signed = Exp::Not(Box::new(unsigned.clone()));
+        (self.check_sat_with(&signed, info), self.check_sat_with(&unsigned, info))
+    }
+
     pub fn branch_checks_skipped(&self) -> bool {
         self.ctx.solver_options.skip_branch_checks || self.no_smt()
     }
@@ -4690,6 +4766,27 @@ mod tests {
     use super::Def::*;
     use super::Exp::*;
     use super::*;
+
+    #[test]
+    fn shared_entry_restores_only_satisfiable_signedness_sides() {
+        configure_tastic(Tactic::Qfaufbv);
+        let loc = SourceLoc::unknown();
+        let ctx = Context::new(Config::new());
+        let mut solver = Solver::<B64>::new(&ctx);
+        let sign = solver.declare_const(Ty::Bool, loc);
+        let other = solver.declare_const(Ty::Bool, loc);
+        let alias = solver.define_const(Exp::Not(Box::new(Exp::Var(sign))), loc);
+
+        // 引用符号位的定义尚未进入任何路径断言，两个编码保持可行。
+        solver.assert(Exp::Var(other));
+        let independent = checkpoint(&mut solver);
+        assert_eq!(solver.shared_entry_feasibility(sign), (Sat, Sat));
+
+        // 约束通过定义间接限制符号位，不能恢复已经不可达的无符号编码。
+        let mut pinned = Solver::from_checkpoint(&ctx, independent);
+        pinned.assert(Exp::Var(alias));
+        assert_eq!(pinned.shared_entry_feasibility(sign), (Sat, Unsat));
+    }
 
     #[cfg(not(feature = "smtperf"))]
     #[test]
