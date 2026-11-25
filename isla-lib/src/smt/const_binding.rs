@@ -36,7 +36,11 @@ impl<'ctx> ConstBinding<'ctx> {
     pub(super) fn ast(&self) -> Ast<'ctx> {
         let mut ast = self.current_ast();
         if self.pending.replace(false) {
-            ast.simplify_small();
+            if let Some(choice) = ast.simplify_terminal_choice() {
+                ast = choice;
+            } else {
+                ast.simplify_small();
+            }
             unsafe {
                 Z3_inc_ref(self.ctx.z3_ctx, ast.z3_ast);
                 Z3_dec_ref(self.ctx.z3_ctx, self.value.replace(ast.z3_ast));

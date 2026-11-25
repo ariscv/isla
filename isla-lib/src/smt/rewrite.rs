@@ -316,6 +316,68 @@ impl Ast<'_> {
         }
     }
 
+    /// 两条臂都是叶子时，先复用选择条件的化简。不缓存 ITE 本身：
+    /// 额外持有一个 ITE 引用可能改变后续 extract 的原生结果。
+    pub(super) fn simplify_terminal_choice(&self) -> Option<Self> {
+        if !self.ctx.has_unbounded_rewriting() || !self.rewrite_kind(DeclKind::ITE) {
+            return None;
+        }
+        let [mut guard, mut left, mut right]: [Self; 3] =
+            self.rewrite_args().try_into().unwrap_or_else(|_| unreachable!("ITE 应有三个操作数"));
+        let z3 = self.ctx.z3_ctx;
+        let leaf =
+            |a: &Self| unsafe { Z3_is_app(z3, a.z3_ast) && Z3_get_app_num_args(z3, Z3_to_app(z3, a.z3_ast)) == 0 };
+        let sort = unsafe { Z3_get_sort_kind(z3, Z3_get_sort(z3, left.z3_ast)) };
+        if !matches!(sort, SortKind::Bool | SortKind::BV | SortKind::Datatype) || !leaf(&left) || !leaf(&right) {
+            return None;
+        }
+        // 仅接纳变量、字面量，以及变量切片与字面量的相等比较。这样的条件
+        // 在独立调用和 ITE 子项中的化简不依赖父节点或引用数。
+        let selector = if guard.rewrite_kind(DeclKind::NOT) { guard.rewrite_args().remove(0) } else { guard.clone() };
+        if !leaf(&selector) {
+            if !selector.rewrite_kind(DeclKind::EQ) {
+                return None;
+            }
+            let args = selector.rewrite_args();
+            if !args.iter().any(|arg| unsafe { Z3_is_numeral_ast(z3, arg.z3_ast) })
+                || !args.iter().all(|arg| {
+                    arg.bv_width().is_some()
+                        && (leaf(arg) || (arg.rewrite_kind(DeclKind::EXTRACT) && leaf(&arg.rewrite_args()[0])))
+                })
+            {
+                return None;
+            }
+            // 一位条件可直接还原测试位；同宽时 (a=b ? a : b) 可化为 b。
+            // 在处理条件前将这两类留给完整的原生改写。
+            if sort == SortKind::BV && (args[0].bv_width() == Some(1) || args[0].bv_width() == left.bv_width()) {
+                return None;
+            }
+        }
+        if sort == SortKind::Bool && (left.get_bool_value().is_none() || right.get_bool_value().is_none()) {
+            return None;
+        }
+        if sort == SortKind::Datatype && !(is_enum_member(&left) && is_enum_member(&right)) {
+            return None;
+        }
+        if left.z3_ast == right.z3_ast {
+            return Some(left);
+        }
+        if !leaf(&guard) {
+            guard.simplify_small();
+        }
+        if let Some(truth) = guard.get_bool_value() {
+            return Some(if truth { left } else { right });
+        }
+        if guard.rewrite_kind(DeclKind::NOT) {
+            guard = guard.rewrite_args().remove(0);
+            std::mem::swap(&mut left, &mut right);
+        }
+        if sort == SortKind::Bool {
+            return Some(if left.get_bool_value() == Some(true) { guard } else { guard.mk_not() });
+        }
+        Some(guard.ite(&left, &right))
+    }
+
     /// 在首次读定义、数据相等和扩展检查中共用小式子的精确输入。
     pub(super) fn simplify_small(&mut self) {
         if !self.ctx.has_unbounded_rewriting() {
