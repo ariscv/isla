@@ -503,7 +503,8 @@ pub struct FunctionRegions<B> {
 }
 
 /// 显式表达式、目的槽和隐式读取，供槽位与当前内容的分析共用。
-pub(crate) fn instruction_operands<B>(instr: &Instr<Name, B>) -> (Vec<&Exp<Name>>, Option<&Loc<Name>>, Option<Name>) {
+/// 返回指令的显式读操作数、写位置和隐式读操作数。
+pub fn instruction_operands<B>(instr: &Instr<Name, B>) -> (Vec<&Exp<Name>>, Option<&Loc<Name>>, Option<Name>) {
     let mut expressions = Vec::new();
     let mut destination = None;
     let mut implicit_read = None;

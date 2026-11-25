@@ -508,7 +508,8 @@ impl ExecutionLimits {
             .and_then(|limit| limit.sample_bias)
     }
 
-    pub(super) fn is_active(&self) -> bool {
+    /// 控制流预算按原路径扣除。调整编码入口前需要保留它的原作用域。
+    pub fn has_control_flow_budget(&self) -> bool {
         self.max_forks_per_branch.is_some()
             || self.max_forks_per_path.is_some()
             || self.max_backjumps_per_loop.is_some()
@@ -516,6 +517,10 @@ impl ExecutionLimits {
             || self.max_fork_pct_per_branch.is_some()
             || !self.branch_region_limits.is_empty()
             || !self.region_fork_limits.is_empty()
+    }
+
+    pub(super) fn is_active(&self) -> bool {
+        self.has_control_flow_budget()
             || !self.merge_policy.is_empty()
             || self.path_merging
             || !self.filter_model_exceptions.is_empty()
@@ -548,6 +553,14 @@ impl ControlFlowScope {
     }
 }
 
+/// 同一个访存前缀下无符号读入口的身份与恢复位置。
+#[derive(Clone, Copy, Debug)]
+pub(super) struct SharedEntry {
+    pub unsigned_signature: u64,
+    pub signedness: crate::smt::Sym,
+    pub resume_at: (Name, usize),
+}
+
 /// 每条执行路径的私有限制状态，存储在 `Frame` 中。
 ///
 /// 跟踪控制流步数、累计 fork 数、每个循环 scope 的回跳次数、每个分支 scope 的
@@ -563,6 +576,7 @@ pub(super) struct ExecutionLimitPathState {
     sample_ordinals: HashMap<ControlFlowScope, u64>,
     sampled_execution_domain: bool,
     path_signature: u64,
+    pub(super) shared_entry: Option<SharedEntry>,
 }
 
 impl ExecutionLimitPathState {
@@ -572,6 +586,10 @@ impl ExecutionLimitPathState {
 
     pub(super) fn path_signature(&self) -> u64 {
         self.path_signature
+    }
+
+    pub(super) fn set_path_signature(&mut self, signature: u64) {
+        self.path_signature = signature;
     }
 
     pub(super) fn has_sampled_branch(&self) -> bool {
@@ -587,6 +605,9 @@ impl ExecutionLimitPathState {
     /// 具体化抽样仍然可复现。
     pub(super) fn advance_path_signature(&mut self, direction: bool) {
         self.path_signature = splitmix64((self.path_signature << 1) | direction as u64);
+        if let Some(entry) = &mut self.shared_entry {
+            entry.unsigned_signature = splitmix64((entry.unsigned_signature << 1) | direction as u64);
+        }
     }
 
     /// 这条路径迄今执行过的控制流步数（jump/goto/call）。
