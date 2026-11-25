@@ -227,6 +227,25 @@ pub(super) fn eval_assertion<'a>(
     assignment: impl Fn(Sym) -> Option<&'a Exp<Sym>>,
     definition: impl Fn(Sym) -> Option<&'a Exp<Sym>>,
 ) -> Option<bool> {
+    eval_value(exp, assignment, definition)?.boolean()
+}
+
+/// 投影需要保留布尔值和位向量的完整位宽，具体操作共用已有求值器。
+pub(super) fn eval_projected<'a>(
+    exp: &'a Exp<Sym>,
+    assignment: impl Fn(Sym) -> Option<&'a Exp<Sym>>,
+) -> Option<Exp<Sym>> {
+    Some(match eval_value(exp, assignment, |_| None)? {
+        Value::Bool(truth) => Exp::Bool(truth),
+        Value::Bits(bits) => crate::primop_util::smt_sbits(bits),
+    })
+}
+
+fn eval_value<'a>(
+    exp: &'a Exp<Sym>,
+    assignment: impl Fn(Sym) -> Option<&'a Exp<Sym>>,
+    definition: impl Fn(Sym) -> Option<&'a Exp<Sym>>,
+) -> Option<Value> {
     use Exp::*;
     evaluate(
         exp,
@@ -279,8 +298,7 @@ pub(super) fn eval_assertion<'a>(
                 _ => None,
             }
         },
-    )?
-    .boolean()
+    )
 }
 
 // 读绑定时，其直接操作数已经翻译。只读取已存在的常量，不遍历长定义 DAG。
