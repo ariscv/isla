@@ -375,11 +375,12 @@ impl<'a, 'ctx, B: BV> Graph<'a, '_, 'ctx, B> {
             for fixed in &evaluated.fixed {
                 projected.insert(fixed.sym, Some(Exp::Bool(fixed.truth)));
             }
-            for &(sym, node) in &predicates {
-                if let Some(value) = evaluated.values.get(&node) {
-                    let truth = value.clone().structural_bool().expect("已求值的布尔节点必须为常量");
-                    projected.insert(sym, Some(Exp::Bool(truth)));
-                }
+            let (symbols, roots): (Vec<_>, Vec<_>) = predicates
+                .iter()
+                .filter_map(|(sym, node)| evaluated.values.get(node).map(|value| (*sym, value)))
+                .unzip();
+            for (sym, truth) in symbols.into_iter().zip(batch::assigned_bools(&roots)) {
+                projected.insert(sym, Some(Exp::Bool(truth)));
             }
             possible[index] = !self.solver.transaction_conditions.iter().rev().any(|guard| {
                 let reduced = guard

@@ -2,6 +2,7 @@
 use super::*;
 
 mod arithmetic;
+mod batch;
 pub(super) mod ground;
 mod guard_conflict;
 mod prefix_index;
