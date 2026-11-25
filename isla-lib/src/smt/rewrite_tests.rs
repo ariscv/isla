@@ -331,3 +331,51 @@ fn first_read_terminal_choices_release_their_branches() {
     assert_eq!(reference.z3_ast, freed.z3_ast);
     equivalent(&ctx, &cut, &freed);
 }
+
+#[test]
+fn definition_and_branch_consume_only_the_bits_they_need() {
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let info = SourceLoc::unknown();
+    let a = solver.declare_bitvector(64, info);
+    let b = solver.declare_bitvector(64, info);
+    let data = solver.define_const(Exp::Bvadd(Box::new(Exp::Var(a)), Box::new(Exp::Var(b))), info);
+    let wide = solver.define_const(Exp::ZeroExtend(128, Box::new(Exp::Var(data))), info);
+    let mut calls = AST_SIMPLIFY_CALLS.get();
+    let high = solver.define_const(Exp::Extract(191, 64, Box::new(Exp::Var(wide))), info);
+    let value = solver.translate_exp(&Exp::Var(high));
+    assert_eq!(value.get_numeral_u64().unwrap(), 0);
+    assert_eq!(AST_SIMPLIFY_CALLS.get(), calls, "只取零扩展区，不需要化简低位");
+    let raw = solver.decls[&wide].raw_ast().extract(191, 64);
+    equivalent(&ctx, &value, &raw);
+
+    let slice = Exp::Extract(19, 12, Box::new(Exp::Var(a)));
+    let check = Exp::Eq(Box::new(slice), Box::new(smtlib::bits64(37, 8)));
+    let predicate = solver.define_const(check, info);
+    calls = AST_SIMPLIFY_CALLS.get();
+    assert_eq!(solver.branch_structural_bool(&Exp::Var(predicate)), None);
+    assert_eq!(AST_SIMPLIFY_CALLS.get(), calls, "切片等于常量既可真也可假");
+    // 展开表达式的消费者仍取得原生残余。
+    let mut expected = solver.decls[&predicate].raw_ast();
+    expected.simplify_native();
+    assert_eq!(solver.translate_exp(&Exp::Var(predicate)).z3_ast, expected.z3_ast);
+}
+
+#[test]
+fn native_assert_consumes_boolean_binding_without_forcing_it() {
+    configure_tastic(Tactic::Qfaufbv);
+    let ctx = Context::new(Config::new());
+    let mut solver = Solver::<B64>::new(&ctx);
+    let loc = SourceLoc::unknown();
+    let a = solver.declare_bitvector(8, loc);
+    let b = solver.declare_bitvector(8, loc);
+    let source =
+        Exp::Eq(Box::new(Exp::Bvsub(Box::new(Exp::Var(a)), Box::new(Exp::Var(b)))), Box::new(smtlib::bits64(7, 8)));
+    let p = solver.define_const(source, loc);
+    let before = AST_SIMPLIFY_CALLS.get();
+    solver.assert(Exp::Var(p));
+    solver.assert(Exp::Not(Box::new(Exp::Var(p))));
+    assert_eq!(AST_SIMPLIFY_CALLS.get(), before, "原生断言可直接消费绑定的布尔表达式");
+    assert_eq!(unsafe { Z3_solver_check(ctx.z3_ctx, solver.z3_solver) }, Z3_L_FALSE);
+}

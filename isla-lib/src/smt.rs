@@ -3314,15 +3314,44 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
         rewrite::apply(ast, self.ctx.solver_options.bv_rewrite)
     }
 
+    /// 取零扩展新增的高位时，不必先把整个绑定展开成 concat。
+    /// 只在构造定义时使用，公开的结构读取和臂重放仍保留原来的 AST。
+    fn definition_ast(&self, exp: &Exp<Sym>) -> Ast<'ctx> {
+        if let Exp::Extract(hi, lo, operand) = exp {
+            if let Exp::Var(sym) = operand.as_ref() {
+                if !self.replaying_arm_entry && self.ctx.has_unbounded_rewriting() {
+                    let value = self.decls[sym].current_ast();
+                    if let Some(zero) = value.zero_extension_slice(*hi, *lo) {
+                        return zero;
+                    }
+                }
+            }
+        }
+        self.translate_exp(exp)
+    }
+
     fn z3_assert(&mut self, exp: &Exp<Sym>) {
         let cost_scope = crate::executor::stats::region_cost::Scope::enter(
             crate::executor::stats::region_cost::Category::ReplayAssert,
         );
         let _ = &cost_scope;
         crate::executor::stats::region_cost::count(crate::executor::stats::region_cost::Category::ReplayAssert, 1, 0);
-        let mut ast = self.translate_exp(exp);
-        // B 臂的入口只需恢复等价的断言。原生求解器在消费这些 AST 时处理它们。
-        if !self.replaying_arm_entry || self.replay_assertions.is_none() {
+        // 只有直接交给原生求解器的断言只消费真值。缓冲断言还要供事务、
+        // 结构查询和重放读取；有界上下文也保留原来的化简及失败行为。
+        let native =
+            self.replay_assertions.is_none() && !self.replaying_arm_entry && self.ctx.has_unbounded_rewriting();
+        let mut ast = match dedup::literal(exp).filter(|_| native) {
+            Some((sym, positive)) => {
+                let value = self.decls[&sym].current_ast();
+                if positive {
+                    value
+                } else {
+                    value.mk_not()
+                }
+            }
+            None => self.translate_exp(exp),
+        };
+        if !native && (!self.replaying_arm_entry || self.replay_assertions.is_none()) {
             ast.simplify();
         }
         if let Some(assertions) = &mut self.replay_assertions {
@@ -3406,7 +3435,7 @@ impl<'ctx, B: BV> Solver<'ctx, B> {
                     }
                 }
                 // 翻译时冻结操作数的绑定，重放保留未折叠的原始表达式。
-                let ast = self.translate_exp(exp);
+                let ast = self.definition_ast(exp);
                 let keep_replay = self.replaying_arm_entry && self.replay_assertions.is_some();
                 let binding = ConstBinding::new(ast, true, keep_replay);
                 self.bind_constant(*v, binding);

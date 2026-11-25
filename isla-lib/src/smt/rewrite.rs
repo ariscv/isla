@@ -295,7 +295,18 @@ impl Ast<'_> {
             let lhs_var = app(lhs).is_some_and(is_variable);
             let rhs_var = app(rhs).is_some_and(is_variable);
             let literal = |term| Z3_is_numeral_ast(z3, term) || Z3_get_bool_value(z3, term) != Z3_L_UNDEF;
-            (lhs_var && (rhs_var || literal(rhs))) || (rhs_var && literal(lhs))
+            // 非空自由位向量切片可取其位宽内的任何值。只对常量比较
+            // 使用这个结论；同一变量的两个切片可能重叠。
+            let free_slice = |term| {
+                app(term).is_some_and(|slice| {
+                    kind(slice) == DeclKind::EXTRACT as u32
+                        && app(Z3_get_app_arg(z3, slice, 0)).is_some_and(is_variable)
+                })
+            };
+            (lhs_var && (rhs_var || literal(rhs)))
+                || (rhs_var && literal(lhs))
+                || (literal(rhs) && free_slice(lhs))
+                || (literal(lhs) && free_slice(rhs))
         }
     }
 
@@ -314,6 +325,14 @@ impl Ast<'_> {
         if verified == Some(false) && self.z3_ast == key.0 {
             self.ctx.small_simplifications.borrow_mut().outputs.insert(key, true);
         }
+    }
+
+    pub(super) fn zero_extension_slice(&self, hi: u32, lo: u32) -> Option<Self> {
+        if !self.rewrite_kind(DeclKind::ZERO_EXT) || hi < lo || hi >= self.bv_width()? {
+            return None;
+        }
+        let base = self.rewrite_args().remove(0);
+        (lo >= base.bv_width()?).then(|| Ast::mk_bv_u64(self.ctx, hi - lo + 1, 0))
     }
 
     /// 两条臂都是叶子时，先复用选择条件的化简。不缓存 ITE 本身：
